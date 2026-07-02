@@ -242,11 +242,13 @@ class ResearchWorkerRuntime:
             for action in ("wait", "retry", "unblock", "escalate", "inspect", "none")
         }
         state = self._user_facing_state(counts, running_count=running_count)
+        recovery_action = self._primary_recovery_action(recovery_counts, state=state)
         return {
             "state": state,
             "label": self._user_facing_label(state),
             "next_actions": self._user_facing_next_actions(state),
             "counts": queue_summary,
+            "recovery_action": recovery_action,
             "recovery_action_counts": recovery_counts,
             "safe_default_fields": [
                 "state",
@@ -256,6 +258,7 @@ class ResearchWorkerRuntime:
                 "counts.retrying_count",
                 "counts.active_work_item_count",
                 "counts.error_count",
+                "recovery_action",
                 "recovery_action_counts",
             ],
             "expert_fields": [
@@ -273,6 +276,17 @@ class ResearchWorkerRuntime:
                 "require expert disclosure."
             ),
         }
+
+    @staticmethod
+    def _primary_recovery_action(recovery_counts: Dict[str, int], *, state: str) -> str:
+        for action in ("escalate", "unblock", "retry", "inspect", "wait"):
+            if int(recovery_counts.get(action, 0)) > 0:
+                return action
+        if state == "needs_attention":
+            return "inspect"
+        if state in {"worker_disabled", "queued", "running", "retrying"}:
+            return "wait"
+        return "none"
 
     def _user_facing_state(self, counts: Dict[str, int], *, running_count: int = 0) -> str:
         active_count = int(counts.get("active", 0))
