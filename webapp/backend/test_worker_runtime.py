@@ -87,6 +87,9 @@ async def test_worker_tick_respects_disabled_mode() -> None:
 
         status = await runtime.tick()
         assert status["leased_count"] == 0
+        assert status["queue_status_counts"]["queued"] == 1
+        assert status["queue_status_counts"]["active"] == 1
+        assert runtime.status()["queue_status_counts"]["queued"] == 1
         assert store.get_work_item(item["work_item_id"])["status"] == "queued"
 
 
@@ -124,6 +127,8 @@ async def test_worker_tick_recovers_expired_leases_before_leasing() -> None:
         status = await runtime.tick()
         assert status["recovered_count"] == 1
         assert status["leased_count"] == 1
+        assert status["queue_status_counts"]["leased"] == 1
+        assert status["queue_status_counts"]["active"] == 1
         await asyncio.gather(*runtime._running_tasks)
 
         completed = store.get_work_item(item["work_item_id"])
