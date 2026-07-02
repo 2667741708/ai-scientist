@@ -2228,6 +2228,40 @@ class KnowledgeBaseStore:
             ).fetchall()
         return [self._work_item_from_row(row) for row in rows]
 
+    def work_item_status_counts(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        workflow_name: Optional[str] = None,
+    ) -> Dict[str, int]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if workflow_name:
+            clauses.append("workflow_name = ?")
+            params.append(workflow_name)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT status, COUNT(*) AS count
+                FROM research_work_items
+                {where}
+                GROUP BY status
+                """,
+                tuple(params),
+            ).fetchall()
+        counts = {
+            status: 0
+            for status in ("queued", "leased", "running", "retrying", "blocked", "complete", "error", "cancelled")
+        }
+        for row in rows:
+            counts[str(row["status"])] = int(row["count"])
+        counts["active"] = sum(counts.get(status, 0) for status in ACTIVE_WORK_ITEM_STATUSES)
+        return counts
+
     def lease_work_items(self, *, owner: str, limit: int = 1, lease_seconds: int = 300) -> list[Dict[str, Any]]:
         normalized_owner = owner.strip()
         if not normalized_owner:
