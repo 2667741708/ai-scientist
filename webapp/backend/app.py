@@ -1285,13 +1285,14 @@ def _extract_starting_hypotheses(text: str) -> list[str]:
 
 def _extract_labeled_list(text: str, labels: tuple[str, ...], *, max_items: int = 20) -> list[str]:
     results: list[str] = []
+    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
     for clause in _split_user_clauses(text):
         lowered = clause.lower()
         matched_label = next((label for label in labels if label.lower() in lowered), None)
         if not matched_label:
             continue
         cleaned = re.sub(
-            r"^(?:偏好|约束|限制|constraints?|preferences?)\s*[:：]?\s*",
+            rf"^(?:{label_pattern})\s*[:：]?\s*",
             "",
             clause,
             flags=re.I,
@@ -1595,6 +1596,7 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
         starting_hypotheses = _extract_starting_hypotheses(text)
         constraints = _extract_labeled_list(text, ("约束", "限制", "constraint", "constraints"), max_items=40)
         preferences = _extract_labeled_list(text, ("偏好", "preference", "preferences"), max_items=1)
+        attributes = _extract_labeled_list(text, ("属性", "评价维度", "attribute", "attributes"), max_items=20)
         return {
             "intent": "start_research_run",
             "confidence": 0.9,
@@ -1603,6 +1605,7 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
                 "starting_hypotheses": starting_hypotheses,
                 "constraints": constraints,
                 "preferences": preferences[0] if preferences else None,
+                "attributes": attributes,
             },
             "missingInputs": [],
             "userFacingReason": "用户通过对话提供 research goal 并请求启动研究流程。",
@@ -7113,6 +7116,11 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             for item in (inputs.get("constraints") if isinstance(inputs.get("constraints"), list) else [])
             if str(item).strip()
         ][:40]
+        attributes = [
+            str(item).strip()
+            for item in (inputs.get("attributes") if isinstance(inputs.get("attributes"), list) else [])
+            if str(item).strip()
+        ][:20]
         preferences = str(inputs.get("preferences") or "").strip() or None
         parent_run_id = request.context.run_id if _contains_any(request.message, ["继续", "基于当前", "基于上次", "continue", "revise"]) else None
         normalized_min_references = min(request.context.min_references, request.context.max_references)
@@ -7146,6 +7154,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
                 "min_references": normalized_min_references,
                 "max_references": normalized_max_references,
                 "preferences": preferences,
+                "attributes": attributes,
                 "constraints": constraints,
                 "starting_hypotheses": starting_hypotheses,
                 "starting_hypotheses_count": len(starting_hypotheses),
@@ -7489,6 +7498,11 @@ async def confirm_research_chat_action(
                     min_references=normalized_min_references,
                     max_references=normalized_max_references,
                     preferences=str(preview.get("preferences") or "") or None,
+                    attributes=[
+                        str(item).strip()
+                        for item in (preview.get("attributes") if isinstance(preview.get("attributes"), list) else [])
+                        if str(item).strip()
+                    ],
                     constraints=[
                         str(item).strip()
                         for item in (preview.get("constraints") if isinstance(preview.get("constraints"), list) else [])
