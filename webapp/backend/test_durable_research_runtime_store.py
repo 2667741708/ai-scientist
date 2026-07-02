@@ -608,6 +608,71 @@ def test_memory_context_prompt_packet_is_summary_only() -> None:
         assert "raw feedback text" in packet["boundary"]
 
 
+def test_build_memory_prompt_packet_combines_retrieval_and_summary_packet() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        store.record_research_run(
+            {
+                "run_id": "run_prompt_builder",
+                "status": "complete",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {"research_goal": "Prompt packet builder parent goal"},
+                "hypotheses": [
+                    {
+                        "id": "hyp_builder_secret",
+                        "text": "SECRET BUILDER HYPOTHESIS TEXT should not be injected.",
+                        "explanation": "Builder-safe hypothesis summary.",
+                        "support_level": "fulltext",
+                        "elo_rating": 1040,
+                    }
+                ],
+            }
+        )
+        store.store_feedback_item(
+            run_id="run_prompt_builder",
+            target_type="hypothesis",
+            target_ref={"hypothesis_id": "hyp_builder_secret"},
+            feedback_type="prefer",
+            text="SECRET BUILDER FEEDBACK should not be injected.",
+        )
+        store.ingest(
+            title="Prompt packet builder evidence",
+            content="Prompt packet builder evidence should be available as parsed fulltext memory.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+
+        packet = store.build_memory_prompt_packet(
+            research_goal="Prompt packet builder evidence parsed fulltext memory",
+            parent_run_id="run_prompt_builder",
+            memory_scope="project",
+        )
+
+        assert packet["mode"] == "summary_only"
+        assert packet["memory_scope"] == "project"
+        assert packet["memory_context_boundary"] == "Summaries only; raw records are not injected."
+        assert packet["memory_sources"] == [
+            "parent_run",
+            "prior_hypotheses",
+            "chat_feedback",
+            "knowledge_base",
+        ]
+        sections = {section["section"]: section for section in packet["sections"]}
+        assert sections["parent_run_summary"]["items"][0]["research_goal"] == "Prompt packet builder parent goal"
+        assert sections["prior_hypothesis_summaries"]["items"][0]["summary"] == "Builder-safe hypothesis summary."
+        assert sections["feedback_type_and_target_summary"]["items"][0] == {
+            "feedback_type": "prefer",
+            "target_type": "hypothesis",
+            "source": "user",
+        }
+        assert sections["evidence_boundary_and_snippet_summaries"]["items"][0]["source_reliability"] == "parsed_fulltext"
+        assert packet["raw_injection_allowed"] is False
+        assert "feedback_text" in packet["excluded_raw_fields"]
+        assert "SECRET" not in str(packet)
+        assert "hyp_builder_secret" not in str(packet)
+
+
 def test_checkpoint_status_summary_reports_resume_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
