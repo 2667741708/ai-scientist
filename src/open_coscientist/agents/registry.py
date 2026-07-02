@@ -67,6 +67,40 @@ PHASE_LABELS = {
 }
 
 
+TRACE_PHASE_ALIASES = {
+    "literature": "literature_review",
+    "lit_review": "literature_review",
+    "generation": "generate",
+    "hypothesis_generation": "generate",
+    "rank": "ranking",
+    "tournament": "ranking",
+    "metareview": "meta_review",
+    "meta": "meta_review",
+    "evolution": "evolve",
+    "dedupe": "proximity",
+    "dedup": "proximity",
+    "diversity": "proximity",
+}
+
+
+TRACE_REQUIRED_FIELDS = [
+    "phase",
+    "agent_id",
+    "role",
+    "prompt_template",
+    "output_summary",
+]
+
+
+TRACE_OPTIONAL_FIELDS = [
+    "tool_calls",
+    "token_usage",
+    "confidence",
+    "synthetic",
+    "degradation_reason",
+]
+
+
 AGENT_REGISTRY: list[AgentSpec] = [
     {
         "agent_id": "supervisor_agent",
@@ -233,6 +267,42 @@ def get_agent_spec(agent_id: str) -> Optional[AgentSpec]:
         if spec["agent_id"] == agent_id:
             return deepcopy(spec)
     return None
+
+
+def canonical_trace_phase(phase: str) -> Optional[str]:
+    normalized = str(phase or "").strip()
+    if not normalized:
+        return None
+    if normalized in PHASE_ORDER:
+        return normalized
+    return TRACE_PHASE_ALIASES.get(normalized)
+
+
+def get_trace_contract_payload() -> Dict[str, Any]:
+    agents = list_agent_specs(public=True)
+    phase_index = {
+        str(agent["phase"]): {
+            "agent_id": agent["agent_id"],
+            "role": agent["role"],
+            "prompt_template": agent["prompt_template"],
+            "observability_fields": agent["observability_fields"],
+        }
+        for agent in agents
+    }
+    return {
+        "phase_order": PHASE_ORDER,
+        "phase_labels": PHASE_LABELS,
+        "phase_aliases": TRACE_PHASE_ALIASES,
+        "phase_index": phase_index,
+        "required_fields": TRACE_REQUIRED_FIELDS,
+        "optional_fields": TRACE_OPTIONAL_FIELDS,
+        "observability_contract": BASE_OBSERVABILITY_FIELDS,
+        "boundary": (
+            "Trace summaries expose phase, agent identity, prompt template, output summary, "
+            "and degradation metadata; raw prompts, raw provider payloads, and full tool results "
+            "stay outside the default trace contract."
+        ),
+    }
 
 
 def get_phase_status_payload(*, disabled_phases: Optional[List[str]] = None) -> Dict[str, Any]:
