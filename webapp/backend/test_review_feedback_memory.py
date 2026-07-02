@@ -56,6 +56,27 @@ def test_review_guidance_includes_feedback_memory_without_raw_refs() -> None:
                 "text": "Penalize hypotheses without a clear failure condition.",
             }
         ],
+        {
+            "mode": "summary_only",
+            "sections": [
+                {
+                    "section": "execution_memory_summary",
+                    "items": [
+                        {
+                            "status": "limited",
+                            "checkpoint_available": True,
+                            "resume_supported": False,
+                            "should_retry": True,
+                            "recovery_action": "retry",
+                            "resume_mode": "metadata_only_retry",
+                            "phase": "review",
+                            "checkpoint_id": "raw-review-checkpoint-id",
+                            "checkpoint_ref": "D:/private/review-checkpoint.sqlite",
+                        }
+                    ],
+                }
+            ],
+        },
     )
 
     review_phase = guidance["workflow_plan"]["review_phase"]
@@ -65,18 +86,25 @@ def test_review_guidance_includes_feedback_memory_without_raw_refs() -> None:
     assert "[memory_user_feedback]" in joined
     assert "[memory_evidence_boundary]" in joined
     assert "[user_feedback]" in joined
+    assert "[memory_prompt_packet]" in joined
     assert "Prefer hypotheses with falsifiable negative controls" in joined
     assert "Parsed fulltext support is limited" in joined
     assert "Penalize hypotheses without a clear failure condition" in joined
     assert "status=absent" in joined
     assert "evidence_count=0" in joined
+    assert "section=execution_memory_summary" in joined
+    assert "recovery_action=retry" in joined
+    assert "resume_mode=metadata_only_retry" in joined
     assert "comparative" in review_phase["review_depth"]
     assert "instant rewrite" in review_phase["review_depth"]
+    assert "summary-only memory prompt packet" in review_phase["review_depth"]
     assert "raw-memory-feedback-id" not in joined
     assert "raw-memory-hyp-id" not in joined
     assert "raw-current-feedback-id" not in joined
     assert "raw-current-hyp-id" not in joined
     assert "raw-checkpoint-id" not in joined
+    assert "raw-review-checkpoint-id" not in joined
     assert "raw-review-boundary-ref" not in joined
     assert "D:/private/source.pdf" not in joined
+    assert "D:/private/review-checkpoint.sqlite" not in joined
     assert "target_ref" not in joined
