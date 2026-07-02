@@ -44,6 +44,13 @@ def test_supervisor_context_constraints_summarize_memory_without_raw_refs() -> N
                     "support_level": "limited",
                 }
             ],
+            "evidence_boundary": {
+                "status": "parsed_fulltext",
+                "evidence_count": 1,
+                "parsed_fulltext_count": 1,
+                "experimental_data_count": 0,
+                "raw_debug_ref": "raw-boundary-ref",
+            },
         },
         [
             {
@@ -60,15 +67,19 @@ def test_supervisor_context_constraints_summarize_memory_without_raw_refs() -> N
     assert "[memory_prior_hypothesis]" in joined
     assert "[memory_user_feedback]" in joined
     assert "[memory_evidence]" in joined
+    assert "[memory_evidence_boundary]" in joined
     assert "[memory_usage_policy]" in joined
     assert "[user_feedback]" in joined
     assert "Parent run favored evidence-linked hypotheses" in joined
     assert "Prior hypothesis links parsed fulltext" in joined
     assert "Prefer hypotheses with explicit negative controls" in joined
     assert "Parsed fulltext evidence summary" in joined
+    assert "status=parsed_fulltext" in joined
+    assert "parsed_fulltext_count=1" in joined
     assert "raw-parent-run-id" not in joined
     assert "raw-hyp-id" not in joined
     assert "raw-feedback-id" not in joined
     assert "raw-checkpoint-id" not in joined
+    assert "raw-boundary-ref" not in joined
     assert "D:/private/raw.pdf" not in joined
     assert "target_ref" not in joined
