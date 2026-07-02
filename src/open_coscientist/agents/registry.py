@@ -370,10 +370,18 @@ def agent_trace_surface_summary(
         for item in sorted_items
         if canonical_trace_phase(str(item.get("phase") or "")) is None
     ]
+    counts = {
+        "complete": sum(1 for item in sorted_items if item.get("status") == "complete"),
+        "degraded": len(degraded_phases),
+        "synthetic": sum(1 for item in sorted_items if item.get("synthetic")),
+        "unknown_phase": len(unknown_phases),
+        "with_tool_calls": sum(1 for item in sorted_items if int(item.get("tool_call_count") or 0) > 0),
+    }
     return {
         "trace_count": len(sorted_items),
         "phase_order": [item["phase"] for item in sorted_items],
         "items": sorted_items,
+        "counts": counts,
         "degradation_count": len(degraded_phases),
         "degraded_phases": degraded_phases,
         "synthetic_count": sum(1 for item in sorted_items if item.get("synthetic")),
