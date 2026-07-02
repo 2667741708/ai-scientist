@@ -55,6 +55,19 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
         assert set(payload["phase_index"]) == EXPECTED_PHASES
         assert payload["phase_index"]["review"]["agent_id"] == "hypothesis_review_agent"
         assert payload["phase_index"]["review"]["prompt_template"] == "prompts/review.md"
+        assert len(payload["phase_statuses"]) == 9
+        assert payload["degraded_phases"] == []
+        assert payload["degradation_count"] == 0
+        assert payload["invalid_disabled_phases"] == []
+        assert payload["phase_statuses"][0] == {
+            "phase": "supervisor",
+            "label": "Research planning",
+            "agent_id": "supervisor_agent",
+            "enabled": True,
+            "configurable": False,
+            "degradation_reason": None,
+        }
+        assert "required phases remain enabled" in payload["phase_status_boundary"]
         assert "tool_calls" in payload["observability_contract"]
         assert "degradation_reason" in payload["observability_contract"]
 
@@ -108,6 +121,10 @@ def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
         assert payload["phase_index"]["ranking"]["prompt_template"] == "prompts/ranking.md"
         assert payload["phase_index"]["literature_review"]["configurable"] is True
         assert "latent_knowledge" in payload["phase_index"]["literature_review"]["degradation_when_disabled"]
+        assert payload["degradation_count"] == 0
+        assert payload["degraded_phases"] == []
+        assert payload["phase_statuses"][0]["phase"] == "supervisor"
+        assert payload["phase_statuses"][0]["enabled"] is True
 
         agents = {agent["agent_id"]: agent for agent in payload["agents"]}
         review = agents["hypothesis_review_agent"]
