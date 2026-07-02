@@ -342,6 +342,85 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         assert memory["memory_boundary"] == "Summaries only; raw records are not injected."
 
 
+def test_memory_context_surface_summary_hides_raw_details_by_default() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        store.record_research_run(
+            {
+                "run_id": "run_surface_memory",
+                "status": "complete",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {"research_goal": "Summarize memory safely"},
+                "hypotheses": [
+                    {
+                        "id": "hyp_secret",
+                        "text": "SECRET HYPOTHESIS TEXT should not be in the default surface.",
+                        "explanation": "SECRET EXPLANATION should stay behind details.",
+                    }
+                ],
+            }
+        )
+        feedback = store.store_feedback_item(
+            run_id="run_surface_memory",
+            target_type="hypothesis",
+            target_ref={"hypothesis_id": "hyp_secret"},
+            feedback_type="critique",
+            text="SECRET FEEDBACK TEXT should not be in the default surface.",
+        )
+        store.persist_checkpoint_metadata(
+            checkpoint_id="checkpoint_secret",
+            run_id="run_surface_memory",
+            thread_id="run_surface_memory",
+            phase="review",
+            status="saved",
+            checkpoint_backend="metadata_only",
+            checkpoint_ref="checkpoint-secret-ref",
+            state_summary={"secret": "SECRET CHECKPOINT STATE"},
+        )
+        store.ingest(
+            title="Surface memory evidence",
+            content="Summarize memory safely with parsed fulltext evidence.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+
+        memory = store.build_memory_context(
+            research_goal="Summarize memory safely",
+            parent_run_id="run_surface_memory",
+            memory_scope="project",
+        )
+        summary = store.memory_context_surface_summary(memory)
+
+        assert summary["memory_scope"] == "project"
+        assert summary["parent_run"]["research_goal"] == "Summarize memory safely"
+        assert "run_id" not in summary["parent_run"]
+        assert summary["counts"]["prior_hypotheses"] == 1
+        assert summary["counts"]["user_feedback"] == 1
+        assert summary["counts"]["evidence_sources"] >= 1
+        assert summary["feedback_types"] == {"critique": 1}
+        assert summary["execution_memory"]["status"] == "limited"
+        assert summary["execution_memory"]["phase"] == "review"
+        assert "checkpoint_id" not in summary["execution_memory"]
+        assert summary["evidence_boundary"]["status"] == "parsed_fulltext"
+        assert "internal_refs" not in summary
+        assert "SECRET" not in str(summary)
+        assert feedback["feedback_id"] not in str(summary)
+        assert "hyp_secret" not in str(summary)
+        assert "checkpoint_secret" not in str(summary)
+
+        expert_summary = store.memory_context_surface_summary(
+            memory,
+            include_internal_refs=True,
+        )
+        assert expert_summary["parent_run"]["run_id"] == "run_surface_memory"
+        assert expert_summary["execution_memory"]["checkpoint_id"] == "checkpoint_secret"
+        assert expert_summary["execution_memory"]["checkpoint_ref"] == "checkpoint-secret-ref"
+        assert feedback["feedback_id"] in expert_summary["internal_refs"]["feedback_ids"]
+        assert "hyp_secret" in expert_summary["internal_refs"]["hypothesis_ids"]
+        assert expert_summary["internal_refs"]["evidence_refs"][0]["chunk_id"]
+
+
 def test_checkpoint_status_summary_reports_resume_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
