@@ -8575,9 +8575,14 @@ def summarize_worker_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def worker_queue_snapshot(limit: int = 20) -> Dict[str, Any]:
-    active_statuses = {"queued", "leased", "running", "retrying", "blocked"}
-    recent_items = knowledge_base.list_work_items(limit=max(1, min(limit, 50)))
-    active_items = [item for item in recent_items if item.get("status") in active_statuses]
+    active_statuses = ("queued", "leased", "running", "retrying", "blocked")
+    per_status_limit = max(1, min(limit, 50))
+    active_items = [
+        item
+        for status in active_statuses
+        for item in knowledge_base.list_work_items(status=status, limit=per_status_limit)
+    ]
+    active_items.sort(key=lambda item: (int(item.get("priority") or 3), -(float(item.get("updated_at") or 0))))
     counts = worker_status_counts()
     if counts.get("blocked_count", 0) > 0:
         health = "blocked"
@@ -8593,7 +8598,7 @@ def worker_queue_snapshot(limit: int = 20) -> Dict[str, Any]:
         **counts,
         "queue_health": health,
         "active_work_items": [summarize_worker_item(item) for item in active_items[:limit]],
-        "active_work_item_count": len(active_items),
+        "active_work_item_count": sum(counts.get(f"{status}_count", 0) for status in active_statuses),
         "boundary": (
             "Worker status exposes queue and lease metadata for runtime readiness. "
             "Work item arguments and result payloads are intentionally omitted from this summary."
