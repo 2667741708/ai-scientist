@@ -7,6 +7,7 @@ Multiple debates can run in parallel.
 
 import asyncio
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 from .citations import ReferenceIndex, resolve_citation_keys
@@ -22,6 +23,96 @@ from ...prompts import get_debate_generation_prompt, save_prompt_to_disk
 from ...state import WorkflowState
 
 logger = logging.getLogger(__name__)
+
+
+def _short_generation_guidance(value: Any, limit: int = 360) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}..."
+
+
+def _focus_area_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if str(value or "").strip():
+        return [str(value).strip()]
+    return []
+
+
+def _append_generation_feedback_focus(focus_areas: List[str], feedback_items: Any, label: str) -> int:
+    if not isinstance(feedback_items, list):
+        return 0
+
+    appended = 0
+    for item in feedback_items[:5]:
+        if not isinstance(item, dict):
+            continue
+        text = _short_generation_guidance(item.get("text"))
+        if not text:
+            continue
+        feedback_type = _short_generation_guidance(item.get("feedback_type") or "critique", 80)
+        focus_areas.append(f"[{label}] type={feedback_type}; feedback={text}.")
+        appended += 1
+    return appended
+
+
+def augment_generation_supervisor_guidance(
+    supervisor_guidance: Dict[str, Any] | None,
+    starting_hypotheses: Any,
+    memory_context: Any,
+    user_feedback: Any,
+) -> Dict[str, Any] | None:
+    generated_focus: List[str] = []
+
+    if isinstance(starting_hypotheses, list):
+        for hypothesis in starting_hypotheses[:5]:
+            text = _short_generation_guidance(hypothesis)
+            if text:
+                generated_focus.append(f"[user_starting_hypothesis] {text}")
+
+    if isinstance(memory_context, dict):
+        prior_hypotheses = memory_context.get("prior_hypotheses")
+        if isinstance(prior_hypotheses, list):
+            for hypothesis in prior_hypotheses[:3]:
+                if not isinstance(hypothesis, dict):
+                    continue
+                text = _short_generation_guidance(
+                    hypothesis.get("text")
+                    or hypothesis.get("hypothesis")
+                    or hypothesis.get("summary")
+                )
+                if text:
+                    support = _short_generation_guidance(
+                        hypothesis.get("support_level") or "unknown", 80
+                    )
+                    generated_focus.append(
+                        f"[memory_prior_hypothesis] support={support}; summary={text}."
+                    )
+
+        _append_generation_feedback_focus(
+            generated_focus,
+            memory_context.get("user_feedback"),
+            "memory_user_feedback",
+        )
+
+    _append_generation_feedback_focus(generated_focus, user_feedback, "user_feedback")
+    if not generated_focus:
+        return supervisor_guidance
+
+    augmented = deepcopy(supervisor_guidance) if isinstance(supervisor_guidance, dict) else {}
+    workflow_plan = dict(augmented.get("workflow_plan") or {})
+    generation_phase = dict(workflow_plan.get("generation_phase") or {})
+    focus_areas = _focus_area_list(generation_phase.get("focus_areas"))
+    focus_areas.extend(generated_focus)
+    focus_areas.append(
+        "[memory_generation_policy] Treat memory and feedback as summary-only guidance; "
+        "do not expose raw ids or claim unsupported evidence."
+    )
+    generation_phase["focus_areas"] = focus_areas
+    workflow_plan["generation_phase"] = generation_phase
+    augmented["workflow_plan"] = workflow_plan
+    return augmented
 
 
 def _match_papers_to_grounding(articles, literature_grounding):
@@ -62,7 +153,12 @@ async def _run_single_debate(
     count = 1  # each debate generates exactly 1 hypothesis
     debate_label = f"debate {debate_id}" if debate_id is not None else "debate"
 
-    supervisor_guidance = state.get("supervisor_guidance")
+    supervisor_guidance = augment_generation_supervisor_guidance(
+        state.get("supervisor_guidance"),
+        state.get("starting_hypotheses"),
+        state.get("memory_context"),
+        state.get("user_feedback"),
+    )
     preferences = state.get("preferences")
     attributes = state.get("attributes")
 
