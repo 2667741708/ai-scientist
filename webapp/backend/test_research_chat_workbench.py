@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -67,6 +68,65 @@ class FakeWebSearchChatResult:
     }
 
 
+def planner_json(
+    intent: str,
+    *,
+    capability_id: str | None = None,
+    execution_mode: str = "read_only",
+    inputs: dict | None = None,
+    missing_inputs: list[str] | None = None,
+    confidence: float = 0.91,
+    grounding_boundary: str = "knowledge_base",
+    requires_confirmation: bool | None = None,
+):
+    if capability_id is None:
+        capability_id = {
+            "ask_project_ai": "project.answer_with_rag",
+            "discover_capabilities": "project.discover_capabilities",
+            "start_research_run": "research.start_run",
+            "explain_current_run": "research.explain_run",
+            "inspect_hypothesis": "hypothesis.inspect",
+            "explain_ranking": "ranking.explain_elo",
+            "parse_pdf_to_knowledge_base": "evidence.parse_pdf",
+            "search_public_web": "evidence.web_search_public",
+            "search_knowledge_evidence": "evidence.search_knowledge",
+            "check_hypothesis_grounding": "evidence.check_hypothesis_grounding",
+            "verify_evidence_with_literature": "evidence.verify_with_literature",
+            "design_experiment": "experiment.design",
+            "draft_report": "report.draft",
+            "search_session_history": "history.session_search",
+            "run_terminal_command": "runtime.terminal_command",
+            "run_ssh_training_command": "runtime.ssh_training_command",
+        }.get(intent)
+    if requires_confirmation is None:
+        requires_confirmation = execution_mode == "approval_required"
+    return json.dumps(
+        {
+            "intent": intent,
+            "capability_id": capability_id,
+            "executionMode": execution_mode,
+            "inputs": inputs or {},
+            "missingInputs": missing_inputs or [],
+            "confidence": confidence,
+            "groundingBoundary": grounding_boundary,
+            "requiresConfirmation": requires_confirmation,
+            "answerStrategy": f"test planner selected {intent}",
+        },
+        ensure_ascii=False,
+    )
+
+
+def planner_sequence(*plans: str):
+    items = list(plans)
+
+    async def fake_call_research_chat_planner_llm(**kwargs):
+        if not items:
+            raise AssertionError("planner_sequence exhausted")
+        return items.pop(0)
+
+    return fake_call_research_chat_planner_llm
+
+
 def test_research_chat_capabilities_sessions_and_start_run() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         studio = load_studio(tmp)
@@ -88,8 +148,18 @@ def test_research_chat_capabilities_sessions_and_start_run() -> None:
 
         original_has_key = studio.has_model_provider_key
         original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
         studio.has_model_provider_key = fake_has_model_provider_key
         studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json("discover_capabilities"),
+            planner_json(
+                "start_research_run",
+                execution_mode="approval_required",
+                grounding_boundary="live_model_workflow",
+                inputs={"research_goal": "验证 chat-first workbench 能生成合理候选假设"},
+            ),
+        )
         try:
             capability_turn = client.post(
                 "/api/research-chat/turn",
@@ -101,6 +171,7 @@ def test_research_chat_capabilities_sessions_and_start_run() -> None:
         finally:
             studio.has_model_provider_key = original_has_key
             studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
 
         assert capability_turn.status_code == 200, capability_turn.text
         session_id = capability_turn.json()["session_id"]
@@ -120,20 +191,35 @@ def test_research_chat_capabilities_sessions_and_start_run() -> None:
         assert session.status_code == 200
         assert len(session.json()["messages"]) >= 2
 
-        proposed = client.post(
-            "/api/research-chat/turn",
-            json={
-                "message": "研究目标：验证 chat-first workbench 能生成合理候选假设",
-                "context": {
-                    "mode": "workspace",
-                    "demo_mode": True,
-                    "literature_review": False,
-                    "initial_hypotheses": 1,
-                    "iterations": 0,
-                    "language": "zh",
-                },
-            },
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = fake_has_model_provider_key
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json(
+                "start_research_run",
+                execution_mode="approval_required",
+                grounding_boundary="live_model_workflow",
+                inputs={"research_goal": "验证 chat-first workbench 能生成合理候选假设"},
+            )
         )
+        try:
+            proposed = client.post(
+                "/api/research-chat/turn",
+                json={
+                    "message": "研究目标：验证 chat-first workbench 能生成合理候选假设",
+                    "context": {
+                        "mode": "workspace",
+                        "demo_mode": True,
+                        "literature_review": False,
+                        "initial_hypotheses": 1,
+                        "iterations": 0,
+                        "language": "zh",
+                    },
+                },
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
         assert proposed.status_code == 200, proposed.text
         proposal = proposed.json()["assistant_message"]["proposal"]
         assert proposal["approvalScope"] == "research.start_live_run"
@@ -184,9 +270,11 @@ def test_research_chat_general_turn_uses_llm_with_knowledge_context() -> None:
 
         original_has_key = studio.has_model_provider_key
         original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
         original_rag_search = studio.paper_parse_store.rag_search
         studio.has_model_provider_key = fake_has_model_provider_key
         studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(planner_json("ask_project_ai"))
         studio.paper_parse_store.rag_search = fake_rag_search
         try:
             client = TestClient(studio.app)
@@ -204,6 +292,7 @@ def test_research_chat_general_turn_uses_llm_with_knowledge_context() -> None:
         finally:
             studio.has_model_provider_key = original_has_key
             studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
             studio.paper_parse_store.rag_search = original_rag_search
 
         assert response.status_code == 200, response.text
@@ -230,8 +319,10 @@ def test_research_chat_elo_concept_uses_rag_llm_not_ranking_template() -> None:
 
         original_has_key = studio.has_model_provider_key
         original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
         studio.has_model_provider_key = lambda model_name: True
         studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(planner_json("ask_project_ai"))
         try:
             client = TestClient(studio.app)
             response = client.post(
@@ -244,6 +335,7 @@ def test_research_chat_elo_concept_uses_rag_llm_not_ranking_template() -> None:
         finally:
             studio.has_model_provider_key = original_has_key
             studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
 
         assert response.status_code == 200, response.text
         payload = response.json()
@@ -285,8 +377,13 @@ def test_research_chat_read_only_run_and_report_are_modelized() -> None:
 
         original_has_key = studio.has_model_provider_key
         original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
         studio.has_model_provider_key = lambda model_name: True
         studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json("explain_current_run"),
+            planner_json("draft_report"),
+        )
         try:
             client = TestClient(studio.app)
             run_response = client.post(
@@ -306,6 +403,7 @@ def test_research_chat_read_only_run_and_report_are_modelized() -> None:
         finally:
             studio.has_model_provider_key = original_has_key
             studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
 
         assert run_response.status_code == 200, run_response.text
         run_payload = run_response.json()
@@ -346,34 +444,167 @@ def test_research_chat_greeting_without_model_does_not_route_to_tool_picker() ->
         result = payload["assistant_message"]["result"]
         assert payload["state"] == "needs_input"
         assert result["status"] == "model_missing"
-        assert "模型通道尚未配置" in result["title"]
-        assert "live model" in text
+        assert result["plannerStatus"] == "model_missing"
+        assert result["routingSource"] == "fallback_error"
+        assert "模型规划器不可用" in result["title"]
+        assert "模型 planner" in text
         assert "解析 PDF、抓取网页、搜索知识库，还是检查假设支撑" not in text
+
+
+def test_research_chat_explicit_web_search_without_planner_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        studio = load_studio(tmp)
+        original_has_key = studio.has_model_provider_key
+        studio.has_model_provider_key = lambda model_name: False
+        try:
+            client = TestClient(studio.app)
+            response = client.post(
+                "/api/research-chat/turn",
+                json={"message": "联网搜索：open-coscientist github", "context": {"mode": "workspace", "language": "zh"}},
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assistant = payload["assistant_message"]
+        assert payload["state"] == "needs_input"
+        assert "proposal" not in assistant
+        result = assistant["result"]
+        assert result["status"] == "model_missing"
+        assert result["routingSource"] == "fallback_error"
+
+
+def test_research_chat_invalid_planner_schema_does_not_propose_tool() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        studio = load_studio(tmp)
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_planner_llm = planner_sequence(
+            json.dumps(
+                {
+                    "intent": "search_public_web",
+                    "capability_id": "runtime.terminal_command",
+                    "executionMode": "approval_required",
+                    "inputs": {"query": "open-coscientist github"},
+                    "missingInputs": [],
+                    "confidence": 0.9,
+                    "groundingBoundary": "public_web_search",
+                    "requiresConfirmation": True,
+                    "answerStrategy": "bad schema should be rejected",
+                },
+                ensure_ascii=False,
+            )
+        )
+        try:
+            client = TestClient(studio.app)
+            response = client.post(
+                "/api/research-chat/turn",
+                json={"message": "联网搜索：open-coscientist github", "context": {"mode": "workspace", "language": "zh"}},
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assistant = payload["assistant_message"]
+        assert payload["state"] == "error"
+        assert "proposal" not in assistant
+        result = assistant["result"]
+        assert result["status"] == "planner_error"
+        assert result["routingSource"] == "fallback_error"
 
 
 def test_research_goal_prefix_routes_to_start_run_confirmation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         studio = load_studio(tmp)
         client = TestClient(studio.app)
-
-        response = client.post(
-            "/api/research-chat/turn",
-            json={
-                "message": "研究目标：为 VLA 模型在长时序机器人任务中的泛化失败生成可证伪假设",
-                "context": {
-                    "mode": "workspace",
-                    "demo_mode": True,
-                    "literature_review": False,
-                    "language": "zh",
-                },
-            },
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json(
+                "start_research_run",
+                execution_mode="approval_required",
+                grounding_boundary="live_model_workflow",
+                inputs={"research_goal": "为 VLA 模型在长时序机器人任务中的泛化失败生成可证伪假设"},
+            )
         )
+
+        try:
+            response = client.post(
+                "/api/research-chat/turn",
+                json={
+                    "message": "研究目标：为 VLA 模型在长时序机器人任务中的泛化失败生成可证伪假设",
+                    "context": {
+                        "mode": "workspace",
+                        "demo_mode": True,
+                        "literature_review": False,
+                        "language": "zh",
+                    },
+                },
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["state"] == "awaiting_confirmation"
         proposal = payload["assistant_message"]["proposal"]
         assert proposal["intent"] == "start_research_run"
         assert proposal["executionTarget"] == "workflow.start_run"
+
+
+def test_hypothesis_planning_advice_does_not_trigger_conditional_web_search() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        studio = load_studio(tmp)
+        client = TestClient(studio.app)
+        prompts: list[str] = []
+
+        def fake_has_model_provider_key(model_name: str) -> bool:
+            return model_name == "openai/mimo-v2.5"
+
+        async def fake_call_research_chat_llm(**kwargs):
+            prompts.append(kwargs["prompt"])
+            return "当前没有绑定具体运行；应先补充研究目标约束、已有 PDF/fulltext 证据和失败条件，然后再启动 literature-grounded workflow。"
+
+        original_has_key = studio.has_model_provider_key
+        original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = fake_has_model_provider_key
+        studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(planner_json("ask_project_ai"))
+        try:
+            response = client.post(
+                "/api/research-chat/turn",
+                json={
+                    "message": (
+                        "我想基于当前项目和最近对话生成候选假设。请告诉我现在最应该补充哪些证据、"
+                        "研究目标还缺哪些约束，以及下一步应启动哪种 workflow。请基于下面的当前对话上下文回答，"
+                        "不要只给通用说明；如果下一步需要解析 PDF、联网搜索或调用外部文献服务，请先返回确认卡或明确说明需要我确认。"
+                        " - 当前页面: /project-chat - 当前没有绑定具体运行"
+                    ),
+                    "context": {"mode": "project_help", "model_name": "openai/mimo-v2.5", "language": "zh"},
+                },
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["state"] == "complete"
+        assistant = payload["assistant_message"]
+        assert "proposal" not in assistant
+        result = assistant["result"]
+        assert result["intent"] == "ask_project_ai"
+        assert result["modelName"] == "openai/mimo-v2.5"
+        assert "当前没有绑定具体运行" in assistant["text"]
+        assert prompts
+        assert "intent: ask_project_ai" in prompts[0]
 
 
 def test_research_chat_can_propose_and_confirm_command_workflows() -> None:
@@ -387,79 +618,95 @@ def test_research_chat_can_propose_and_confirm_command_workflows() -> None:
         }
         studio.run_ssh_training_command = lambda **kwargs: FakeSshChatResult()
         studio.search_public_web = lambda *args, **kwargs: FakeWebSearchChatResult()
+        original_has_key = studio.has_model_provider_key
+        original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_llm = lambda **kwargs: asyncio.sleep(0, result="fake synthesized answer")
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json("run_terminal_command", execution_mode="approval_required", grounding_boundary="local_terminal_audit", inputs={"command": "echo chat_terminal_ok"}),
+            planner_json("run_ssh_training_command", execution_mode="approval_required", grounding_boundary="remote_ssh_audit", inputs={"server_id": "c201-5080", "command": "hostname"}),
+            planner_json("run_terminal_command", execution_mode="approval_required", grounding_boundary="local_terminal_audit", inputs={"command": "ssh some-new-host hostname"}),
+            planner_json("search_public_web", execution_mode="approval_required", grounding_boundary="public_web_search", inputs={"query": "open-coscientist github"}),
+        )
         client = TestClient(studio.app)
 
-        terminal_turn = client.post(
-            "/api/research-chat/turn",
-            json={"message": "执行本地命令：echo chat_terminal_ok", "context": {"mode": "workspace", "language": "zh"}},
-        )
-        assert terminal_turn.status_code == 200, terminal_turn.text
-        terminal_proposal = terminal_turn.json()["assistant_message"]["proposal"]
-        assert terminal_proposal["intent"] == "run_terminal_command"
-        assert terminal_proposal["approvalScope"] == "terminal.command"
-        assert terminal_proposal["executionTarget"] == "workflow.terminal_command"
+        try:
+            terminal_turn = client.post(
+                "/api/research-chat/turn",
+                json={"message": "执行本地命令：echo chat_terminal_ok", "context": {"mode": "workspace", "language": "zh"}},
+            )
+            assert terminal_turn.status_code == 200, terminal_turn.text
+            terminal_proposal = terminal_turn.json()["assistant_message"]["proposal"]
+            assert terminal_proposal["intent"] == "run_terminal_command"
+            assert terminal_proposal["approvalScope"] == "terminal.command"
+            assert terminal_proposal["executionTarget"] == "workflow.terminal_command"
 
-        terminal_confirmed = client.post(
-            f"/api/research-chat/actions/{terminal_proposal['actionId']}/confirm",
-            json={"approval": {"confirmed": True, "scope": "terminal.command", "reason": "test terminal command"}},
-        )
-        assert terminal_confirmed.status_code == 200, terminal_confirmed.text
-        terminal_result = terminal_confirmed.json()["assistant_message"]["result"]
-        assert terminal_result["intent"] == "run_terminal_command"
-        assert terminal_result["jobId"]
-        terminal_job = client.get(f"/api/tools/background-jobs/{terminal_result['jobId']}")
-        assert terminal_job.status_code == 200
-        assert terminal_job.json()["status"] == "complete"
+            terminal_confirmed = client.post(
+                f"/api/research-chat/actions/{terminal_proposal['actionId']}/confirm",
+                json={"approval": {"confirmed": True, "scope": "terminal.command", "reason": "test terminal command"}},
+            )
+            assert terminal_confirmed.status_code == 200, terminal_confirmed.text
+            terminal_result = terminal_confirmed.json()["assistant_message"]["result"]
+            assert terminal_result["intent"] == "run_terminal_command"
+            assert terminal_result["jobId"]
+            terminal_job = client.get(f"/api/tools/background-jobs/{terminal_result['jobId']}")
+            assert terminal_job.status_code == 200
+            assert terminal_job.json()["status"] == "complete"
 
-        ssh_turn = client.post(
-            "/api/research-chat/turn",
-            json={"message": "在 c201-5080 执行命令：hostname", "context": {"mode": "workspace", "language": "zh"}},
-        )
-        assert ssh_turn.status_code == 200, ssh_turn.text
-        ssh_proposal = ssh_turn.json()["assistant_message"]["proposal"]
-        assert ssh_proposal["intent"] == "run_ssh_training_command"
-        assert ssh_proposal["approvalScope"] == "ssh.training_command"
-        assert ssh_proposal["executionTarget"] == "workflow.ssh_training_command"
+            ssh_turn = client.post(
+                "/api/research-chat/turn",
+                json={"message": "在 c201-5080 执行命令：hostname", "context": {"mode": "workspace", "language": "zh"}},
+            )
+            assert ssh_turn.status_code == 200, ssh_turn.text
+            ssh_proposal = ssh_turn.json()["assistant_message"]["proposal"]
+            assert ssh_proposal["intent"] == "run_ssh_training_command"
+            assert ssh_proposal["approvalScope"] == "ssh.training_command"
+            assert ssh_proposal["executionTarget"] == "workflow.ssh_training_command"
 
-        ssh_confirmed = client.post(
-            f"/api/research-chat/actions/{ssh_proposal['actionId']}/confirm",
-            json={"approval": {"confirmed": True, "scope": "ssh.training_command", "reason": "test ssh command"}},
-        )
-        assert ssh_confirmed.status_code == 200, ssh_confirmed.text
-        ssh_result = ssh_confirmed.json()["assistant_message"]["result"]
-        assert ssh_result["intent"] == "run_ssh_training_command"
-        assert ssh_result["serverId"] == "c201-5080"
-        assert ssh_result["jobId"]
+            ssh_confirmed = client.post(
+                f"/api/research-chat/actions/{ssh_proposal['actionId']}/confirm",
+                json={"approval": {"confirmed": True, "scope": "ssh.training_command", "reason": "test ssh command"}},
+            )
+            assert ssh_confirmed.status_code == 200, ssh_confirmed.text
+            ssh_result = ssh_confirmed.json()["assistant_message"]["result"]
+            assert ssh_result["intent"] == "run_ssh_training_command"
+            assert ssh_result["serverId"] == "c201-5080"
+            assert ssh_result["jobId"]
 
-        arbitrary_ssh_turn = client.post(
-            "/api/research-chat/turn",
-            json={"message": "执行本地命令：ssh some-new-host hostname", "context": {"mode": "workspace", "language": "zh"}},
-        )
-        assert arbitrary_ssh_turn.status_code == 200, arbitrary_ssh_turn.text
-        arbitrary_ssh_proposal = arbitrary_ssh_turn.json()["assistant_message"]["proposal"]
-        assert arbitrary_ssh_proposal["intent"] == "run_terminal_command"
-        assert arbitrary_ssh_proposal["approvalScope"] == "terminal.command"
-        assert arbitrary_ssh_proposal["requestPreview"]["command"] == "ssh some-new-host hostname"
+            arbitrary_ssh_turn = client.post(
+                "/api/research-chat/turn",
+                json={"message": "执行本地命令：ssh some-new-host hostname", "context": {"mode": "workspace", "language": "zh"}},
+            )
+            assert arbitrary_ssh_turn.status_code == 200, arbitrary_ssh_turn.text
+            arbitrary_ssh_proposal = arbitrary_ssh_turn.json()["assistant_message"]["proposal"]
+            assert arbitrary_ssh_proposal["intent"] == "run_terminal_command"
+            assert arbitrary_ssh_proposal["approvalScope"] == "terminal.command"
+            assert arbitrary_ssh_proposal["requestPreview"]["command"] == "ssh some-new-host hostname"
 
-        web_turn = client.post(
-            "/api/research-chat/turn",
-            json={"message": "联网搜索：open-coscientist github", "context": {"mode": "workspace", "language": "zh"}},
-        )
-        assert web_turn.status_code == 200, web_turn.text
-        web_proposal = web_turn.json()["assistant_message"]["proposal"]
-        assert web_proposal["intent"] == "search_public_web"
-        assert web_proposal["approvalScope"] == "web.search_public"
-        assert web_proposal["executionTarget"] == "workflow.web_search"
+            web_turn = client.post(
+                "/api/research-chat/turn",
+                json={"message": "联网搜索：open-coscientist github", "context": {"mode": "workspace", "language": "zh"}},
+            )
+            assert web_turn.status_code == 200, web_turn.text
+            web_proposal = web_turn.json()["assistant_message"]["proposal"]
+            assert web_proposal["intent"] == "search_public_web"
+            assert web_proposal["approvalScope"] == "web.search_public"
+            assert web_proposal["executionTarget"] == "workflow.web_search"
 
-        web_confirmed = client.post(
-            f"/api/research-chat/actions/{web_proposal['actionId']}/confirm",
-            json={"approval": {"confirmed": True, "scope": "web.search_public", "reason": "test public search"}},
-        )
-        assert web_confirmed.status_code == 200, web_confirmed.text
-        web_result = web_confirmed.json()["assistant_message"]["result"]
-        assert web_result["intent"] == "search_public_web"
-        assert web_result["resultCount"] == 1
-        assert web_result["items"][0]["url"] == "https://example.org/open-coscientist"
+            web_confirmed = client.post(
+                f"/api/research-chat/actions/{web_proposal['actionId']}/confirm",
+                json={"approval": {"confirmed": True, "scope": "web.search_public", "reason": "test public search"}},
+            )
+            assert web_confirmed.status_code == 200, web_confirmed.text
+            web_result = web_confirmed.json()["assistant_message"]["result"]
+            assert web_result["intent"] == "search_public_web"
+            assert web_result["resultCount"] == 1
+            assert web_result["items"][0]["url"] == "https://example.org/open-coscientist"
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
 
 
 def test_literature_capability_uses_registered_mcp_tool() -> None:
@@ -488,17 +735,32 @@ def test_hypothesis_correctness_routes_to_public_literature_verification() -> No
     with tempfile.TemporaryDirectory() as tmp:
         studio = load_studio(tmp)
         client = TestClient(studio.app)
-
-        response = client.post(
-            "/api/research-chat/turn",
-            json={
-                "message": "检验这个假设是否正确：VLA token 序列可以通过层级动作语法稳定转换为机器臂可执行动作",
-                "context": {
-                    "mode": "workspace",
-                    "language": "zh",
-                },
-            },
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json(
+                "verify_evidence_with_literature",
+                execution_mode="approval_required",
+                grounding_boundary="literature_mcp_audit",
+                inputs={"hypothesis_text": "VLA token 序列可以通过层级动作语法稳定转换为机器臂可执行动作"},
+            )
         )
+
+        try:
+            response = client.post(
+                "/api/research-chat/turn",
+                json={
+                    "message": "检验这个假设是否正确：VLA token 序列可以通过层级动作语法稳定转换为机器臂可执行动作",
+                    "context": {
+                        "mode": "workspace",
+                        "language": "zh",
+                    },
+                },
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["state"] == "awaiting_confirmation"
@@ -723,8 +985,10 @@ def test_research_chat_pdf_proposal_and_ranking_regression() -> None:
 
         original_has_key = studio.has_model_provider_key
         original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
         studio.has_model_provider_key = lambda model_name: True
         studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(planner_json("explain_ranking"))
         client = TestClient(studio.app)
         try:
             ranking = client.post(
@@ -737,6 +1001,7 @@ def test_research_chat_pdf_proposal_and_ranking_regression() -> None:
         finally:
             studio.has_model_provider_key = original_has_key
             studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
         assert ranking.status_code == 200, ranking.text
         payload = ranking.json()
         assert "模型化回答" in payload["assistant_message"]["text"]
@@ -755,10 +1020,25 @@ def test_research_chat_pdf_proposal_and_ranking_regression() -> None:
         assert prompts
         assert "hyp_1 includes clearer falsification criteria" in prompts[0]
 
-        proposed_pdf = client.post(
-            "/api/research-chat/turn",
-            json={"message": r"帮我解析 D:\papers\paper.pdf 并加入知识库", "context": {"language": "zh"}},
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json(
+                "parse_pdf_to_knowledge_base",
+                execution_mode="approval_required",
+                grounding_boundary="parsed_pdf_fulltext",
+                inputs={"pdf_path": r"D:\papers\paper.pdf"},
+            )
         )
+        try:
+            proposed_pdf = client.post(
+                "/api/research-chat/turn",
+                json={"message": r"帮我解析 D:\papers\paper.pdf 并加入知识库", "context": {"language": "zh"}},
+            )
+        finally:
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
         assert proposed_pdf.status_code == 200, proposed_pdf.text
         pdf_proposal = proposed_pdf.json()["assistant_message"]["proposal"]
         assert pdf_proposal["approvalScope"] == "pdf.parse_to_knowledge_base"
@@ -811,8 +1091,12 @@ def test_research_chat_explains_existing_hypothesis_list_without_starting_run() 
 
         original_has_key = studio.has_model_provider_key
         original_llm = studio.call_research_chat_llm
+        original_planner = studio.call_research_chat_planner_llm
         studio.has_model_provider_key = lambda model_name: True
         studio.call_research_chat_llm = fake_call_research_chat_llm
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json("inspect_hypothesis", inputs={"list_all": True})
+        )
         client = TestClient(studio.app)
         try:
             response = client.post(
@@ -825,6 +1109,7 @@ def test_research_chat_explains_existing_hypothesis_list_without_starting_run() 
         finally:
             studio.has_model_provider_key = original_has_key
             studio.call_research_chat_llm = original_llm
+            studio.call_research_chat_planner_llm = original_planner
 
         assert response.status_code == 200, response.text
         payload = response.json()

@@ -9,6 +9,7 @@ export type ResearchChatIntent =
   | "explain_ranking"
   | "parse_pdf_to_knowledge_base"
   | "extract_web_evidence"
+  | "extract_web_evidence_batch"
   | "search_public_web"
   | "search_knowledge_evidence"
   | "check_hypothesis_grounding"
@@ -141,6 +142,10 @@ export type ResearchChatResult = {
   support_level?: string;
   confidence?: number;
   modelName?: string;
+  plannerStatus?: "complete" | "model_missing" | "model_disabled" | "planner_error" | "legacy_disabled" | string;
+  plannerConfidence?: number;
+  capabilityId?: string | null;
+  routingSource?: "llm_planner" | "safety_guard" | "fallback_error" | string;
   structuredContext?: Record<string, unknown> | null;
   query?: string;
   runId?: string;
@@ -220,6 +225,7 @@ export type ResearchChatResult = {
   nextActions?: string[];
   groundingBoundary?: string;
   status?: string;
+  knowledgeHitCount?: number;
   resultCount?: number;
   jobId?: string;
   toolName?: string;
@@ -261,6 +267,30 @@ export type ResearchChatTurnResponse = {
   assistant_message: ResearchChatAssistantMessage;
   state: ResearchChatState;
 };
+
+export type ResearchChatProgressEvent = {
+  phase: string;
+  message: string;
+  createdAt?: number;
+  elapsedMs?: number;
+  intent?: ResearchChatIntent | string;
+  missingInputs?: string[];
+  knowledgeHitCount?: number;
+  modelName?: string;
+  plannerStatus?: string;
+  plannerConfidence?: number;
+  capabilityId?: string | null;
+  routingSource?: string;
+  scoped?: boolean;
+  sessionId?: string;
+  delta?: string;
+};
+
+export type ResearchChatStreamEvent =
+  | { event: "session"; data: { session_id: string; message?: string } }
+  | { event: "progress"; data: ResearchChatProgressEvent }
+  | { event: "final"; data: ResearchChatTurnResponse }
+  | { event: "error"; data: { message: string; code?: string; httpStatus?: number } };
 
 export type ResearchChatTurnRequest = {
   session_id?: string;

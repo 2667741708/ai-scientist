@@ -10,10 +10,11 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import requests
 
@@ -527,7 +528,7 @@ class ResearchChatContext(BaseModel):
     selected_hypothesis_id: Optional[str] = Field(default=None, max_length=160)
     selected_hypothesis_index: Optional[int] = Field(default=None, ge=0, le=200)
     selected_source_ref: Optional[str] = Field(default=None, max_length=240)
-    model_name: str = "deepseek/deepseek-v4-pro"
+    model_name: Optional[str] = Field(default=None, max_length=120)
     literature_review: bool = True
     demo_mode: bool = False
     initial_hypotheses: int = Field(default=3, ge=1, le=8)
@@ -638,6 +639,7 @@ SSH_TRAINING_ARTIFACT_ROOT = KB_ROOT / "ssh_training_jobs"
 TERMINAL_COMMAND_ARTIFACT_ROOT = KB_ROOT / "terminal_command_jobs"
 SOURCE_EVIDENCE_ROOT = Path(os.getenv("COSCIENTIST_SOURCE_EVIDENCE_ROOT", str(ROOT)))
 worker_runtime: Optional[ResearchWorkerRuntime] = None
+research_chat_llm_module: Optional[Any] = None
 
 WEAK_SUPPORT_LEVELS = {"metadata", "abstract", "unknown"}
 WEAK_SOURCE_RELIABILITY = {"best_effort_public_html"}
@@ -669,6 +671,24 @@ def _path_summary(value: str) -> str:
 def _url_summary(value: str) -> str:
     parsed = urllib.parse.urlparse(value.strip())
     return parsed.netloc or value[:120]
+
+
+def _clean_public_url_candidate(value: str) -> str:
+    return value.strip().rstrip(".,;:，。；：、)]}）】")
+
+
+def _extract_public_urls(text: str, *, limit: int = 5) -> List[str]:
+    urls: List[str] = []
+    seen: set[str] = set()
+    for match in URL_PATTERN.finditer(text):
+        url = _clean_public_url_candidate(match.group("value"))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
 
 
 def _clean_command_candidate(value: str) -> str:
@@ -822,6 +842,8 @@ def _extract_arbitrary_ssh_terminal_request(text: str) -> Optional[Dict[str, Any
 
 def _extract_web_search_request(text: str) -> Optional[Dict[str, Any]]:
     lowered = text.lower()
+    if _looks_like_conditional_tool_boundary(text):
+        return None
     if not (
         "websearch" in lowered
         or "web search" in lowered
@@ -855,6 +877,122 @@ def _extract_web_search_request(text: str) -> Optional[Dict[str, Any]]:
         "query": clean_query or query[:600],
         "domains": domains[:8],
     }
+
+
+def _looks_like_conditional_tool_boundary(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:如果|若|如需|需要时|下一步需要|下一步如果).{0,120}"
+            r"(?:联网搜索|网上搜索|网页搜索|网络搜索|web\s*search|公开\s*web\s*search|解析\s*PDF|调用外部文献服务|外部文献服务|MCP)"
+            r".{0,120}(?:先返回确认卡|返回确认卡|先.*确认|需要.*确认|授权)",
+            text,
+            re.IGNORECASE | re.S,
+        )
+    )
+
+
+def _looks_like_live_public_web_question(text: str) -> bool:
+    if not text.strip() or URL_PATTERN.search(text) or PDF_PATTERN.search(text):
+        return False
+    if _contains_any(
+        text,
+        [
+            "当前运行",
+            "运行状态",
+            "当前 run",
+            "当前假设",
+            "当前项目",
+            "项目现在",
+            "这个项目",
+            "this project",
+            "current run",
+            "selected hypothesis",
+        ],
+    ):
+        return False
+    has_temporal_signal = _contains_any(
+        text,
+        [
+            "最新",
+            "目前",
+            "现在",
+            "今天",
+            "今日",
+            "实时",
+            "刚刚",
+            "最近",
+            "当前消息",
+            "latest",
+            "current",
+            "today",
+            "now",
+            "recent",
+            "real-time",
+            "realtime",
+        ],
+    )
+    if not has_temporal_signal:
+        return False
+    has_public_topic = _contains_any(
+        text,
+        [
+            "世界杯",
+            "比赛",
+            "赛况",
+            "比分",
+            "冠军",
+            "新闻",
+            "天气",
+            "股价",
+            "股票",
+            "价格",
+            "汇率",
+            "政策",
+            "法规",
+            "版本",
+            "发布",
+            "更新",
+            "榜单",
+            "排名",
+            "公司",
+            "ceo",
+            "president",
+            "election",
+            "score",
+            "match",
+            "game",
+            "news",
+            "weather",
+            "stock",
+            "price",
+            "release",
+            "version",
+        ],
+    )
+    asks_public_status = _contains_any(
+        text,
+        [
+            "如何了",
+            "怎么样",
+            "什么情况",
+            "进展",
+            "结果",
+            "多少",
+            "谁赢",
+            "谁领先",
+            "what happened",
+            "how is",
+            "who won",
+            "status",
+        ],
+    )
+    return has_public_topic or asks_public_status
+
+
+def _extract_live_public_web_question(text: str) -> Dict[str, Any]:
+    query = re.sub(r"^(?:帮我|请|查一下|查询|检索一下|搜一下)\s*", "", text.strip(), flags=re.IGNORECASE)
+    query = re.sub(r"\s+", " ", query).strip(" ：:\n\t")
+    return {"query": query[:600] or text.strip()[:600], "domains": []}
 
 
 def _safe_chat_error(exc: HTTPException) -> str:
@@ -911,6 +1049,18 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
     terminal_status = _tool_capability_status("terminal.command")
     ssh_status = _tool_capability_status("ssh.training_command")
     return [
+        {
+            "id": "project.answer_with_rag",
+            "userTitle": "项目 AI 问答",
+            "userSummary": "基于当前页面、最近对话、SQL 知识库、run/audit 上下文回答普通研究问题；不会直接执行外部动作。",
+            "intent": "ask_project_ai",
+            "taskArea": "project_help",
+            "executionMode": "read_only",
+            "requiredInputs": [],
+            "expectedOutputs": ["grounded answer", "evidence boundary", "safe next steps"],
+            "groundingBoundary": "knowledge_base",
+            "availability": {"available": True, "status": "ready", "summary": "普通问答默认走 SQL RAG + LLM。"},
+        },
         {
             "id": "project.discover_capabilities",
             "userTitle": "询问这个项目能做什么",
@@ -1475,7 +1625,48 @@ def _asks_for_all_hypotheses(text: str) -> bool:
     )
 
 
+def _looks_like_hypothesis_planning_advice_request(text: str) -> bool:
+    if _contains_any(
+        text,
+        [
+            "补充哪些证据",
+            "哪些证据",
+            "证据还缺",
+            "缺哪些约束",
+            "约束还缺",
+            "下一步应启动",
+            "下一步应该启动",
+            "应启动哪种 workflow",
+            "应该启动哪种 workflow",
+            "基于当前项目和最近对话",
+            "基于当前对话上下文",
+        ],
+    ):
+        return True
+    return _contains_any(text, ["生成候选假设", "候选假设"]) and _contains_any(
+        text,
+        ["告诉我", "建议", "应该", "从哪里开始", "哪里开始", "补充", "还缺", "缺哪些", "下一步"],
+    )
+
+
 def _route_research_chat_intent(message: str) -> Dict[str, Any]:
+    """Fail-closed legacy shim.
+
+    Natural-language routing is handled by the async LLM planner. This
+    synchronous helper is kept only for older imports and must not select
+    side-effecting tools from keywords.
+    """
+    text = message.strip()
+    return {
+        "intent": "ask_project_ai",
+        "confidence": 0.0,
+        "extractedInputs": {"query": text},
+        "missingInputs": [],
+        "userFacingReason": "Legacy deterministic router is disabled; natural-language routing requires the model planner.",
+        "plannerStatus": "legacy_disabled",
+        "plannerConfidence": 0.0,
+        "routingSource": "fallback_error",
+    }
     text = message.strip()
     lowered = text.lower()
     pdf_match = PDF_PATTERN.search(text)
@@ -1524,6 +1715,14 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
             "missingInputs": [] if terminal_command.get("command") else ["command"],
             "userFacingReason": "用户请求执行本地 terminal/bash/PowerShell 命令。",
         }
+    if _looks_like_hypothesis_planning_advice_request(text):
+        return {
+            "intent": "ask_project_ai",
+            "confidence": 0.88,
+            "extractedInputs": {"query": text},
+            "missingInputs": [],
+            "userFacingReason": "用户请求基于当前项目上下文给出候选假设生成前的证据、约束和 workflow 建议，应走只读 RAG 回答。",
+        }
     web_search = _extract_web_search_request(text)
     if web_search is not None:
         return {
@@ -1532,6 +1731,14 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
             "extractedInputs": web_search,
             "missingInputs": [] if web_search.get("query") else ["query"],
             "userFacingReason": "用户请求通用公开 Web Search。",
+        }
+    if _looks_like_live_public_web_question(text):
+        return {
+            "intent": "search_public_web",
+            "confidence": 0.74,
+            "extractedInputs": _extract_live_public_web_question(text),
+            "missingInputs": [],
+            "userFacingReason": "用户询问实时公网事实或状态，应先请求授权后执行通用 Web Search。",
         }
     if _contains_any(text, ["elo", "锦标赛", "tournament"]) and _looks_like_concept_question(text):
         return {
@@ -1626,11 +1833,20 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
             "missingInputs": [] if pdf_value else ["pdf_path"],
             "userFacingReason": "用户请求解析 PDF 并形成可检索证据。",
         }
-    if url_value and any(word in text for word in ("网页", "证据", "抓取", "保存", "链接", "文章")):
+    web_extract_urls = _extract_public_urls(text, limit=5)
+    if url_value and any(word in text for word in ("网页", "证据", "抓取", "保存", "链接", "文章", "读取", "打开", "聚合", "整理")):
+        if len(web_extract_urls) > 1 or _contains_any(text, ["高相关", "前几个", "前 3", "前3", "聚合", "整理", "汇总"]):
+            return {
+                "intent": "extract_web_evidence_batch",
+                "confidence": 0.9,
+                "extractedInputs": {"urls": web_extract_urls[:3], "query": text},
+                "missingInputs": [],
+                "userFacingReason": "用户请求抓取多个公开网页并整理正文证据。",
+            }
         return {
             "intent": "extract_web_evidence",
             "confidence": 0.88,
-            "extractedInputs": {"url": url_value},
+            "extractedInputs": {"url": web_extract_urls[0] if web_extract_urls else url_value},
             "missingInputs": [],
             "userFacingReason": "用户请求保存公开网页证据。",
         }
@@ -1756,6 +1972,36 @@ def _chat_turn_response(
         "assistant_message": assistant_message,
         "state": state,
     }
+
+
+ResearchChatProgressCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+async def _emit_research_chat_progress(
+    progress: Optional[ResearchChatProgressCallback],
+    phase: str,
+    message: str,
+    **payload: Any,
+) -> None:
+    if progress is None:
+        return
+    event = {
+        "phase": phase,
+        "message": message,
+        "createdAt": time.time(),
+        **payload,
+    }
+    await progress(event)
+
+
+def _research_chat_sse_event(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(serialize_value(data), ensure_ascii=False)}\n\n"
+
+
+def _research_chat_request_with_session(request: ResearchChatTurnRequest, session_id: str) -> ResearchChatTurnRequest:
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    payload["session_id"] = session_id
+    return ResearchChatTurnRequest(**payload)
 
 
 def _active_run_record(context: ResearchChatContext) -> Optional[RunRecord]:
@@ -2266,7 +2512,23 @@ def _is_research_chat_llm_enabled() -> bool:
 
 
 def _research_chat_model_name(context: ResearchChatContext) -> str:
-    return os.getenv("COSCIENTIST_RESEARCH_CHAT_MODEL") or context.model_name or "deepseek/deepseek-v4-pro"
+    configured = os.getenv("COSCIENTIST_RESEARCH_CHAT_MODEL") or context.model_name
+    if configured:
+        return configured
+    if has_provider_key("MIMO_API_KEY", "XIAOMI_MIMO_API_KEY", "MIMOCODE_API_KEY"):
+        return "openai/mimo-v2.5"
+    if has_provider_key("DEEPSEEK_API_KEY"):
+        return "deepseek/deepseek-chat"
+    return "deepseek/deepseek-v4-pro"
+
+
+def _get_research_chat_llm_module() -> Any:
+    global research_chat_llm_module
+    if research_chat_llm_module is None:
+        from open_coscientist import llm as llm_module
+
+        research_chat_llm_module = llm_module
+    return research_chat_llm_module
 
 
 def _looks_like_plain_greeting(message: str) -> bool:
@@ -2433,6 +2695,10 @@ def _build_research_chat_llm_prompt(
 当前 route:
 intent: {routed.get("intent")}
 reason: {routed.get("userFacingReason")}
+routing_source: {routed.get("routingSource")}
+
+最近对话:
+{_format_recent_research_chat_context(routed.get("recentMessages") if isinstance(routed.get("recentMessages"), list) else [])}
 
 当前 run context:
 {_format_research_chat_run_context(context)}
@@ -2457,16 +2723,693 @@ async def call_research_chat_llm(
     model_name: str,
     max_tokens: int = 900,
     temperature: float = 0.2,
+    transport_attempts: int = 2,
 ) -> str:
-    from open_coscientist.llm import call_llm
+    llm_module = _get_research_chat_llm_module()
 
-    return await call_llm(
+    return await llm_module.call_llm(
         prompt,
         model_name=model_name,
         max_tokens=max_tokens,
         temperature=temperature,
-        transport_attempts=2,
+        transport_attempts=transport_attempts,
     )
+
+
+async def call_research_chat_planner_llm(*, prompt: str, model_name: str) -> str:
+    llm_module = _get_research_chat_llm_module()
+    return await llm_module.call_llm(
+        prompt,
+        model_name=model_name,
+        max_tokens=900,
+        temperature=0.0,
+        transport_attempts=1,
+    )
+
+
+def _research_chat_capabilities_by_intent() -> Dict[str, Dict[str, Any]]:
+    return {str(item.get("intent")): item for item in _chat_capabilities()}
+
+
+def _research_chat_capabilities_by_id() -> Dict[str, Dict[str, Any]]:
+    return {str(item.get("id")): item for item in _chat_capabilities()}
+
+
+PLANNER_ALLOWED_INPUTS: Dict[str, set[str]] = {
+    "ask_project_ai": {"query"},
+    "discover_capabilities": {"query"},
+    "start_research_run": {"research_goal", "starting_hypotheses", "constraints", "preferences", "attributes"},
+    "explain_current_run": {"run_id", "query"},
+    "continue_or_revise_run": {"run_id", "research_goal", "starting_hypotheses", "constraints", "preferences", "attributes"},
+    "inspect_hypothesis": {"hypothesis_index", "hypothesis_id", "list_all", "query"},
+    "apply_expert_feedback": {"hypothesis_index", "feedback_type", "feedback_text"},
+    "critique_generated_hypothesis": {"hypothesis_index", "feedback_type", "feedback_text"},
+    "explain_ranking": {"run_id", "hypothesis_index", "query"},
+    "parse_pdf_to_knowledge_base": {"pdf_path"},
+    "extract_web_evidence": {"url"},
+    "extract_web_evidence_batch": {"urls", "query"},
+    "search_public_web": {"query", "domains"},
+    "search_knowledge_evidence": {"query"},
+    "check_hypothesis_grounding": {"hypothesis_text"},
+    "verify_evidence_with_literature": {"hypothesis_text", "query"},
+    "design_experiment": {"hypothesis_index", "hypothesis_text", "query"},
+    "draft_report": {"run_id", "query"},
+    "search_session_history": {"query"},
+    "run_terminal_command": {"command", "workdir"},
+    "run_ssh_training_command": {"server_id", "command", "workdir"},
+    "clarify": {"question", "query"},
+    "unsupported": {"query"},
+}
+
+
+def _recent_research_chat_context(session_id: Optional[str], *, limit: int = 6) -> List[Dict[str, Any]]:
+    if not session_id:
+        return []
+    try:
+        session = knowledge_base.get_research_chat_session(session_id)
+    except Exception as exc:
+        print(f"Research chat recent context load failed for {session_id}: {exc}", file=sys.stderr)
+        return []
+    messages = session.get("messages") if isinstance(session, dict) else []
+    recent: List[Dict[str, Any]] = []
+    for item in (messages or [])[-max(1, limit) :]:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        recent.append(
+            {
+                "role": str(item.get("role") or "unknown"),
+                "text": text[:900],
+                "created_at": item.get("created_at"),
+            }
+        )
+    return recent
+
+
+def _format_recent_research_chat_context(messages: List[Dict[str, Any]]) -> str:
+    if not messages:
+        return "当前没有可用的最近对话。"
+    return "\n".join(f"- {item.get('role')}: {str(item.get('text') or '')[:900]}" for item in messages[-6:])
+
+
+def _research_chat_literal_refs(message: str) -> Dict[str, Any]:
+    pdf_match = PDF_PATTERN.search(message)
+    urls = _extract_public_urls(message, limit=5)
+    terminal = _extract_terminal_command_request(message)
+    managed_ssh = _extract_managed_ssh_request(message)
+    arbitrary_ssh = _extract_arbitrary_ssh_terminal_request(message)
+    explicit_web_search = _extract_web_search_request(message)
+    refs: Dict[str, Any] = {
+        "pdf_path": pdf_match.group("value") if pdf_match else None,
+        "urls": urls,
+        "hypothesis_index": _extract_hypothesis_index(message),
+        "research_goal": _extract_research_goal(message),
+        "web_search": explicit_web_search,
+        "terminal_command": terminal,
+        "managed_ssh": managed_ssh,
+        "arbitrary_ssh": arbitrary_ssh,
+        "conditional_tool_boundary": _looks_like_conditional_tool_boundary(message),
+    }
+    return {key: value for key, value in refs.items() if value not in (None, [], {})}
+
+
+def _planner_capability_schema() -> List[Dict[str, Any]]:
+    allowed_intents = {
+        "ask_project_ai",
+        "discover_capabilities",
+        "start_research_run",
+        "explain_current_run",
+        "inspect_hypothesis",
+        "explain_ranking",
+        "parse_pdf_to_knowledge_base",
+        "extract_web_evidence",
+        "extract_web_evidence_batch",
+        "search_public_web",
+        "search_knowledge_evidence",
+        "check_hypothesis_grounding",
+        "verify_evidence_with_literature",
+        "run_terminal_command",
+        "run_ssh_training_command",
+        "design_experiment",
+        "draft_report",
+        "search_session_history",
+    }
+    schema: List[Dict[str, Any]] = []
+    for item in _chat_capabilities():
+        intent = str(item.get("intent") or "")
+        if intent not in allowed_intents:
+            continue
+        schema.append(
+            {
+                "id": item.get("id"),
+                "intent": intent,
+                "title": item.get("userTitle"),
+                "summary": item.get("userSummary"),
+                "executionMode": item.get("executionMode"),
+                "approvalScope": item.get("approvalScope"),
+                "requiredInputs": item.get("requiredInputs") or [],
+                "groundingBoundary": item.get("groundingBoundary"),
+                "availability": item.get("availability"),
+            }
+        )
+    return schema
+
+
+def _build_research_chat_planner_prompt(
+    *,
+    message: str,
+    context: ResearchChatContext,
+    session_id: str,
+    literal_refs: Dict[str, Any],
+    recent_messages: List[Dict[str, Any]],
+) -> str:
+    language = "中文" if context.language == "zh" else "English"
+    context_payload = {
+        "page": context.page or context.page_path,
+        "mode": context.mode,
+        "run_id": context.run_id,
+        "paper_id": context.paper_id,
+        "library_id": context.library_id,
+        "selected_hypothesis_index": context.selected_hypothesis_index,
+        "language": context.language,
+    }
+    return f"""
+你是 Open Co-Scientist 项目聊天的 planner。你的任务只是在 tool schema 中选择一个能力或选择普通 RAG 问答，不要生成最终回答。
+
+硬性规则:
+- 除非用户明确要求执行外部动作，否则优先选择 ask_project_ai。
+- 条件边界句不是工具请求。例如“如果下一步需要解析 PDF、联网搜索或调用外部文献服务，请先确认”只能表示安全要求，不能选择 Web Search/PDF/MCP。
+- approval_required 能力只允许生成确认卡，不能直接执行。
+- terminal/SSH 必须只有在用户明确要求执行命令时选择。
+- 如果缺少 requiredInputs，把缺少字段放入 missingInputs。
+- 如果只是询问概念、证据缺口、项目状态、工作流建议、Elo、候选假设解释，选择 read_only 能力。
+- 输出语言相关字段使用{language}，但最终必须只输出 JSON，不要 markdown，不要解释。
+
+输出 JSON schema:
+{{
+  "intent": "ask_project_ai | discover_capabilities | start_research_run | explain_current_run | inspect_hypothesis | explain_ranking | parse_pdf_to_knowledge_base | extract_web_evidence | extract_web_evidence_batch | search_public_web | search_knowledge_evidence | check_hypothesis_grounding | verify_evidence_with_literature | run_terminal_command | run_ssh_training_command | design_experiment | draft_report | search_session_history | clarify | unsupported",
+  "capability_id": "tool schema id or null",
+  "executionMode": "read_only | approval_required | unsupported",
+  "inputs": {{}},
+  "missingInputs": [],
+  "confidence": 0.0,
+  "groundingBoundary": "knowledge_base",
+  "requiresConfirmation": false,
+  "answerStrategy": "one short sentence describing why this route was selected"
+}}
+
+当前上下文:
+{json.dumps(serialize_value(context_payload), ensure_ascii=False)}
+
+最近对话:
+{_format_recent_research_chat_context(recent_messages)}
+
+literal refs extracted by guard code:
+{json.dumps(serialize_value(literal_refs), ensure_ascii=False)}
+
+tool/capability schema:
+{json.dumps(serialize_value(_planner_capability_schema()), ensure_ascii=False)}
+
+用户消息:
+{message}
+""".strip()
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    stripped = text.strip()
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    match = re.search(r"\{[\s\S]*\}", stripped)
+    if not match:
+        raise ValueError("Planner did not return a JSON object.")
+    parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("Planner JSON root is not an object.")
+    return parsed
+
+
+def _planner_failure_route(
+    *,
+    message: str,
+    status: str,
+    title: str,
+    summary: str,
+    model_name: str,
+    recent_messages: Optional[List[Dict[str, Any]]] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "intent": "ask_project_ai",
+        "confidence": 0.0,
+        "extractedInputs": {"query": message},
+        "missingInputs": [],
+        "userFacingReason": summary,
+        "status": status,
+        "title": title,
+        "summary": summary,
+        "plannerStatus": status,
+        "plannerReason": reason,
+        "plannerConfidence": 0.0,
+        "modelName": model_name,
+        "routingSource": "fallback_error",
+        "recentMessages": recent_messages or [],
+    }
+
+
+def _normalize_planner_inputs(intent: str, inputs: Dict[str, Any], literal_refs: Dict[str, Any], message: str) -> Dict[str, Any]:
+    normalized = dict(inputs or {})
+    if intent in {"ask_project_ai", "discover_capabilities", "search_knowledge_evidence", "search_session_history"}:
+        normalized["query"] = str(normalized.get("query") or message).strip()
+    if intent == "parse_pdf_to_knowledge_base" and not normalized.get("pdf_path"):
+        normalized["pdf_path"] = literal_refs.get("pdf_path")
+    if intent == "extract_web_evidence" and not normalized.get("url"):
+        urls = literal_refs.get("urls") if isinstance(literal_refs.get("urls"), list) else []
+        if urls:
+            normalized["url"] = urls[0]
+    if intent == "extract_web_evidence_batch" and not normalized.get("urls"):
+        urls = literal_refs.get("urls") if isinstance(literal_refs.get("urls"), list) else []
+        normalized["urls"] = urls[:3]
+    if intent == "search_public_web":
+        explicit = literal_refs.get("web_search") if isinstance(literal_refs.get("web_search"), dict) else {}
+        normalized["query"] = str(normalized.get("query") or explicit.get("query") or "").strip()
+        domains = normalized.get("domains") or explicit.get("domains") or []
+        normalized["domains"] = [str(item).strip() for item in domains if str(item).strip()][:8] if isinstance(domains, list) else []
+    if intent == "run_terminal_command":
+        terminal = literal_refs.get("terminal_command") if isinstance(literal_refs.get("terminal_command"), dict) else {}
+        arbitrary = literal_refs.get("arbitrary_ssh") if isinstance(literal_refs.get("arbitrary_ssh"), dict) else {}
+        normalized["command"] = str(normalized.get("command") or terminal.get("command") or arbitrary.get("command") or "").strip()
+        normalized["workdir"] = normalized.get("workdir") or terminal.get("workdir") or arbitrary.get("workdir")
+    if intent == "run_ssh_training_command":
+        managed = literal_refs.get("managed_ssh") if isinstance(literal_refs.get("managed_ssh"), dict) else {}
+        normalized["server_id"] = str(normalized.get("server_id") or managed.get("server_id") or "").strip()
+        normalized["command"] = str(normalized.get("command") or managed.get("command") or "").strip()
+        normalized["workdir"] = normalized.get("workdir") or managed.get("workdir")
+    if intent == "start_research_run":
+        normalized["research_goal"] = str(normalized.get("research_goal") or literal_refs.get("research_goal") or "").strip()
+        for key in ("starting_hypotheses", "constraints", "attributes"):
+            value = normalized.get(key)
+            normalized[key] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
+        if normalized.get("preferences") is not None:
+            normalized["preferences"] = str(normalized.get("preferences") or "").strip()
+    if intent in {"inspect_hypothesis", "explain_ranking", "design_experiment"} and normalized.get("hypothesis_index") is None:
+        normalized["hypothesis_index"] = literal_refs.get("hypothesis_index")
+    if intent in {"check_hypothesis_grounding", "verify_evidence_with_literature"}:
+        normalized["hypothesis_text"] = str(normalized.get("hypothesis_text") or "").strip()
+        if not normalized["hypothesis_text"] and len(message.strip()) >= 12:
+            normalized["hypothesis_text"] = message.strip()
+    if intent in {"apply_expert_feedback", "critique_generated_hypothesis"}:
+        normalized["feedback_text"] = str(normalized.get("feedback_text") or message).strip()
+    return {key: value for key, value in normalized.items() if value not in (None, "", [])}
+
+
+def _validate_planner_route(
+    *,
+    raw_plan: Dict[str, Any],
+    message: str,
+    literal_refs: Dict[str, Any],
+    recent_messages: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    capabilities_by_intent = _research_chat_capabilities_by_intent()
+    capabilities_by_id = _research_chat_capabilities_by_id()
+    intent = str(raw_plan.get("intent") or "ask_project_ai").strip()
+    capability_id = raw_plan.get("capability_id")
+    capability = capabilities_by_intent.get(intent)
+    if capability_id:
+        selected = capabilities_by_id.get(str(capability_id))
+        if selected is None or str(selected.get("intent")) != intent:
+            raise ValueError(f"Planner selected invalid capability_id for intent: {capability_id}")
+        capability = selected
+    if intent in {"clarify", "unsupported"}:
+        return {
+            "intent": intent,
+            "confidence": float(raw_plan.get("confidence") or 0.0),
+            "extractedInputs": {"query": message},
+            "missingInputs": list(raw_plan.get("missingInputs") or []),
+            "userFacingReason": str(raw_plan.get("answerStrategy") or "Planner requested clarification."),
+            "plannerStatus": "complete",
+            "plannerConfidence": float(raw_plan.get("confidence") or 0.0),
+            "capabilityId": capability_id,
+            "routingSource": "llm_planner",
+            "recentMessages": recent_messages,
+        }
+    if capability is None:
+        raise ValueError(f"Planner selected unknown intent: {intent}")
+    inputs_raw = raw_plan.get("inputs") if isinstance(raw_plan.get("inputs"), dict) else {}
+    allowed_inputs = PLANNER_ALLOWED_INPUTS.get(intent, set())
+    unknown_inputs = sorted(key for key in inputs_raw if key not in allowed_inputs)
+    if unknown_inputs:
+        raise ValueError(f"Planner returned unknown input keys for {intent}: {unknown_inputs}")
+    inputs = _normalize_planner_inputs(intent, inputs_raw, literal_refs, message)
+    missing = [str(item.get("key")) for item in capability.get("requiredInputs") or [] if item.get("required") and not inputs.get(str(item.get("key")))]
+    missing.extend(str(item) for item in raw_plan.get("missingInputs") or [] if str(item) and str(item) not in missing)
+    execution_mode = str(capability.get("executionMode") or raw_plan.get("executionMode") or "read_only")
+    if execution_mode == "approval_required" and not capability.get("approvalScope"):
+        raise ValueError(f"Approval-required capability has no approvalScope: {intent}")
+    if intent == "run_terminal_command" and inputs.get("command"):
+        command_risk = classify_command_risk(str(inputs["command"]))
+        if command_risk.get("allowed") is False or command_risk.get("risk_level") == "blocked":
+            raise ValueError("Planner selected a blocked terminal command.")
+    return {
+        "intent": intent,
+        "confidence": float(raw_plan.get("confidence") or 0.0),
+        "extractedInputs": inputs,
+        "missingInputs": missing,
+        "userFacingReason": str(raw_plan.get("answerStrategy") or capability.get("userSummary") or "LLM planner selected this route."),
+        "plannerStatus": "complete",
+        "plannerConfidence": float(raw_plan.get("confidence") or 0.0),
+        "capabilityId": str(capability.get("id") or capability_id or ""),
+        "executionMode": execution_mode,
+        "requiresConfirmation": execution_mode == "approval_required",
+        "groundingBoundary": capability.get("groundingBoundary") or raw_plan.get("groundingBoundary"),
+        "routingSource": "llm_planner",
+        "recentMessages": recent_messages,
+    }
+
+
+async def _plan_research_chat_route(
+    *,
+    request: ResearchChatTurnRequest,
+    session_id: str,
+    progress: Optional[ResearchChatProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_name = _research_chat_model_name(request.context)
+    recent_messages = _recent_research_chat_context(session_id)
+    literal_refs = _research_chat_literal_refs(request.message)
+    await _emit_research_chat_progress(
+        progress,
+        "planner_start",
+        "正在用模型 planner 结合 tool schema 判断意图和安全边界。",
+        modelName=model_name,
+    )
+    if not _is_research_chat_llm_enabled():
+        route = _planner_failure_route(
+            message=request.message,
+            status="model_disabled",
+            title="模型规划器未启用",
+            summary="项目聊天现在需要模型 planner 才能解释自然语言和选择工具；当前模型问答未启用，因此不会用关键词规则触发工具。",
+            model_name=model_name,
+            recent_messages=recent_messages,
+        )
+        await _emit_research_chat_progress(progress, "planner_error", route["summary"], modelName=model_name)
+        return route
+    if not has_model_provider_key(model_name):
+        route = _planner_failure_route(
+            message=request.message,
+            status="model_missing",
+            title="模型规划器不可用",
+            summary="项目聊天现在需要模型 planner 才能解释自然语言和选择工具；当前模型凭据不可用，因此不会用关键词规则触发工具。",
+            model_name=model_name,
+            recent_messages=recent_messages,
+        )
+        await _emit_research_chat_progress(progress, "planner_error", route["summary"], modelName=model_name)
+        return route
+    prompt = _build_research_chat_planner_prompt(
+        message=request.message,
+        context=request.context,
+        session_id=session_id,
+        literal_refs=literal_refs,
+        recent_messages=recent_messages,
+    )
+    try:
+        raw = await call_research_chat_planner_llm(prompt=prompt, model_name=model_name)
+        plan = _extract_json_object(raw)
+        routed = _validate_planner_route(
+            raw_plan=plan,
+            message=request.message,
+            literal_refs=literal_refs,
+            recent_messages=recent_messages,
+        )
+        await _emit_research_chat_progress(
+            progress,
+            "planner_complete",
+            f"模型 planner 已选择：{routed.get('intent')}。",
+            intent=routed.get("intent"),
+            modelName=model_name,
+            missingInputs=list(routed.get("missingInputs") or []),
+        )
+        return routed
+    except Exception as exc:
+        route = _planner_failure_route(
+            message=request.message,
+            status="planner_error",
+            title="模型规划器返回不可用",
+            summary="模型 planner 没有返回可验证的 tool schema JSON，因此没有触发任何工具动作。请重试或把请求拆成更明确的一步。",
+            model_name=model_name,
+            recent_messages=recent_messages,
+            reason=str(exc),
+        )
+        await _emit_research_chat_progress(
+            progress,
+            "planner_error",
+            route["summary"],
+            modelName=model_name,
+            error=str(exc)[:240],
+        )
+        return route
+
+
+def _extract_litellm_stream_delta(chunk: Any) -> str:
+    try:
+        choices = getattr(chunk, "choices", None)
+        if choices:
+            delta = getattr(choices[0], "delta", None)
+            content = getattr(delta, "content", None)
+            if content:
+                return str(content)
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", None)
+            if content:
+                return str(content)
+        if isinstance(chunk, dict):
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            content = delta.get("content") or (choice.get("message") or {}).get("content")
+            return str(content or "")
+    except Exception:
+        return ""
+    return ""
+
+
+async def call_research_chat_llm_stream(
+    *,
+    prompt: str,
+    model_name: str,
+    progress: Optional[ResearchChatProgressCallback],
+    max_tokens: int = 900,
+    temperature: float = 0.2,
+) -> str:
+    llm_module = _get_research_chat_llm_module()
+
+    completion_args = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "drop_params": True,
+        "stream": True,
+    }
+    completion_args.update(llm_module.transport_resilience_overrides(model_name))
+    completion_args.update(llm_module.mimo_completion_overrides(model_name))
+
+    chunks: List[str] = []
+    response = await llm_module.litellm.acompletion(**completion_args)
+    async for chunk in response:
+        delta = _extract_litellm_stream_delta(chunk)
+        if not delta:
+            continue
+        chunks.append(delta)
+        await _emit_research_chat_progress(
+            progress,
+            "answer_delta",
+            "正在生成回答正文。",
+            delta=delta,
+            modelName=model_name,
+        )
+    content = "".join(chunks).strip()
+    if not content:
+        raise ValueError(f"LLM stream returned empty content. Model: {model_name}")
+    return content
+
+
+def _research_chat_response_max_tokens(routed: Dict[str, Any]) -> int:
+    intent = str(routed.get("intent") or "")
+    if intent in {"ask_project_ai", "discover_capabilities", "search_knowledge_evidence", "explain_current_run"}:
+        return 560
+    if intent in {"explain_ranking", "inspect_hypothesis", "design_experiment", "critique_generated_hypothesis"}:
+        return 760
+    if intent == "draft_report":
+        return 1200
+    return 700
+
+
+def _format_web_search_results_for_synthesis(web_search: Dict[str, Any], *, limit: int = 5) -> str:
+    results = web_search.get("results") if isinstance(web_search.get("results"), list) else []
+    formatted: List[str] = []
+    for index, item in enumerate(results[:limit], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "Untitled result").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("snippet") or item.get("content") or "").strip().replace("\n", " ")
+        source = str(item.get("source") or item.get("provider") or "").strip()
+        formatted.append(
+            "\n".join(
+                [
+                    f"[S{index}] {title}",
+                    f"url: {url or 'unknown'}",
+                    f"source: {source or 'public web search'}",
+                    f"snippet: {snippet[:420] or 'empty'}",
+                ]
+            )
+        )
+    return "\n\n".join(formatted) or "搜索 provider 没有返回可整理的 snippet。"
+
+
+def _web_search_synthesis_model_name(model_name: str) -> str:
+    configured = os.getenv("COSCIENTIST_RESEARCH_CHAT_SYNTHESIS_MODEL")
+    if configured:
+        return configured
+    if model_name.startswith("deepseek/"):
+        return "deepseek/deepseek-chat"
+    return model_name
+
+
+async def _synthesize_web_search_answer(
+    *,
+    query: str,
+    web_search: Dict[str, Any],
+    model_name: str,
+) -> Optional[str]:
+    if not _is_research_chat_llm_enabled() or not has_model_provider_key(model_name):
+        return None
+    prompt = f"""
+你是 Open Co-Scientist 项目 AI。用户授权执行了公开 Web Search，现在需要你把搜索结果整理成可读回答。
+
+硬性边界:
+- 只能基于下面的 search snippets、标题和 URL 做整理。
+- 必须明确说明这些结果是 snippets-only 线索，不是全文证据或已验证结论。
+- 如果 snippets 互相冲突或不足，要说“不足以确认”，并给出下一步抓取网页、解析 PDF 或调用文献 MCP 的建议。
+- 不要编造没有出现在 snippets 里的比分、日期、机构、论文结论或 URL。
+- 用中文回答，结构紧凑。
+
+用户问题:
+{query}
+
+搜索结果:
+{_format_web_search_results_for_synthesis(web_search)}
+
+输出格式:
+1. 直接回答: 用 2-3 句概括目前从 snippets 能看到什么。
+2. 线索来源: 列出 2-4 条最相关 URL 标题和为什么相关。
+3. 证据边界与下一步: 一句话说明 snippets-only 限制和下一步。
+""".strip()
+    try:
+        return await asyncio.wait_for(
+            call_research_chat_llm(
+                prompt=prompt,
+                model_name=model_name,
+                max_tokens=420,
+                temperature=0.15,
+                transport_attempts=1,
+            ),
+            timeout=60,
+        )
+    except Exception as exc:
+        print(f"Web search synthesis failed: {exc}", file=sys.stderr)
+        return None
+
+
+def _format_web_extract_results_for_synthesis(web_results: List[Dict[str, Any]], *, limit: int = 3) -> str:
+    formatted: List[str] = []
+    for index, item in enumerate(web_results[:limit], start=1):
+        title = str(item.get("title") or item.get("final_url") or f"网页 {index}").strip()
+        url = str(item.get("final_url") or item.get("requested_url") or "").strip()
+        reliability = str(item.get("source_reliability") or "best_effort_public_html")
+        preview = str(item.get("text_preview") or "").strip().replace("\n", " ")
+        formatted.append(
+            "\n".join(
+                [
+                    f"[W{index}] {title}",
+                    f"url: {url or 'unknown'}",
+                    f"source_reliability: {reliability}",
+                    f"content_preview: {preview[:1000] or 'empty'}",
+                ]
+            )
+        )
+    return "\n\n".join(formatted) or "没有抓取到可整理的网页正文。"
+
+
+def _fallback_web_extract_answer(query: str, web_results: List[Dict[str, Any]], errors: List[Dict[str, str]]) -> str:
+    lines = [f"已抓取 {len(web_results)} 个公开网页正文，并按 best-effort public HTML 证据处理。"]
+    if query:
+        lines.append(f"原始问题/目标：{query[:240]}")
+    for index, item in enumerate(web_results[:3], start=1):
+        title = str(item.get("title") or item.get("final_url") or f"网页 {index}").strip()
+        url = str(item.get("final_url") or item.get("requested_url") or "").strip()
+        preview = str(item.get("text_preview") or "").strip().replace("\n", " ")
+        lines.append(f"{index}. {title}\n{url}\n{preview[:360] or '没有抽取到正文 preview。'}")
+    if errors:
+        lines.append("部分网页未能抓取：" + "；".join(f"{item.get('url')}: {item.get('error')}" for item in errors[:3]))
+    lines.append("证据边界：这些是网页正文的 best-effort 抽取结果，仍建议优先抓取官方文档、PDF 或权威来源做最终核验。")
+    return "\n\n".join(lines)
+
+
+async def _synthesize_web_extract_answer(
+    *,
+    query: str,
+    web_results: List[Dict[str, Any]],
+    errors: List[Dict[str, str]],
+    model_name: str,
+) -> Optional[str]:
+    if not web_results or not _is_research_chat_llm_enabled() or not has_model_provider_key(model_name):
+        return None
+    error_block = "\n".join(f"- {item.get('url')}: {item.get('error')}" for item in errors[:5]) or "无。"
+    prompt = f"""
+你是 Open Co-Scientist 项目 AI。用户授权抓取了公开网页正文，现在需要你基于网页正文 preview 聚合回答。
+
+硬性边界:
+- 只能基于下面的网页正文 preview、标题和 URL 作答。
+- 这些是 best-effort public HTML 抽取，不等于权威全文审查；需要标注证据边界。
+- 如果网页内容不足或互相冲突，要明确指出不足，并建议抓取官方文档、PDF 或更权威来源。
+- 不要编造没有出现在网页正文里的细节。
+- 用中文回答，结构紧凑。
+
+用户问题/目标:
+{query}
+
+已抓取网页:
+{_format_web_extract_results_for_synthesis(web_results)}
+
+抓取失败:
+{error_block}
+
+输出格式:
+1. 聚合回答: 用 3-5 句回答用户问题。
+2. 来源依据: 列出 2-3 个网页标题/URL 与支撑点。
+3. 证据边界与下一步: 说明局限和下一步。
+""".strip()
+    try:
+        return await asyncio.wait_for(
+            call_research_chat_llm(
+                prompt=prompt,
+                model_name=model_name,
+                max_tokens=620,
+                temperature=0.15,
+                transport_attempts=1,
+            ),
+            timeout=75,
+        )
+    except Exception as exc:
+        print(f"Web extract synthesis failed: {exc}", file=sys.stderr)
+        return None
 
 
 async def _research_chat_llm_result(
@@ -2476,17 +3419,51 @@ async def _research_chat_llm_result(
     routed: Dict[str, Any],
     structured_context: Optional[Dict[str, Any]] = None,
     knowledge_results: Optional[List[Dict[str, Any]]] = None,
+    progress: Optional[ResearchChatProgressCallback] = None,
 ) -> Dict[str, Any]:
+    started_at = time.perf_counter()
     model_name = _research_chat_model_name(context)
+    await _emit_research_chat_progress(
+        progress,
+        "route",
+        "已识别问题类型，正在准备知识库检索。",
+        intent=routed.get("intent", "clarify"),
+        modelName=model_name,
+    )
+    await _emit_research_chat_progress(
+        progress,
+        "rag_start",
+        "正在检索 SQL 知识库、PDF/fulltext 片段和项目系统知识。",
+        scoped=bool(context.paper_id or context.library_id or context.run_id),
+    )
     resolved_knowledge_results = (
         _dedupe_knowledge_results(knowledge_results, limit=8)
         if knowledge_results is not None
         else _research_chat_knowledge_results(message, context, limit=6)
     )
+    await _emit_research_chat_progress(
+        progress,
+        "rag_complete",
+        f"知识库检索完成，命中 {len(resolved_knowledge_results)} 条可用片段。",
+        knowledgeHitCount=len(resolved_knowledge_results),
+        elapsedMs=round((time.perf_counter() - started_at) * 1000),
+    )
     base_result: Dict[str, Any] = dict(structured_context or {})
+    routing_metadata = {
+        key: routed.get(key)
+        for key in ("plannerStatus", "plannerConfidence", "capabilityId", "routingSource")
+        if routed.get(key) is not None
+    }
     if not _is_research_chat_llm_enabled():
+        await _emit_research_chat_progress(
+            progress,
+            "model_skipped",
+            "模型问答未启用，返回明确的 model_disabled 状态。",
+            modelName=model_name,
+        )
         return {
             **base_result,
+            **routing_metadata,
             "intent": routed.get("intent", "clarify"),
             "title": "模型问答未启用",
             "summary": "模型问答当前未启用，因此无法生成 SQL RAG + LLM 回答。写入型动作仍可通过确认卡准备，启用模型后请重新发送问题。",
@@ -2500,8 +3477,15 @@ async def _research_chat_llm_result(
             "groundingBoundary": "knowledge_base" if resolved_knowledge_results else "model_without_local_evidence",
         }
     if not has_model_provider_key(model_name):
+        await _emit_research_chat_progress(
+            progress,
+            "model_skipped",
+            "模型凭据不可用，返回明确的 model_missing 状态。",
+            modelName=model_name,
+        )
         return {
             **base_result,
+            **routing_metadata,
             "intent": routed.get("intent", "clarify"),
             "title": "模型通道尚未配置",
             "summary": "这个问题需要由 live model 基于 SQL 知识库检索片段回答，但当前后端没有可用模型凭据。请配置模型 API 后重新发送；写入型动作仍会通过确认卡处理。",
@@ -2515,6 +3499,13 @@ async def _research_chat_llm_result(
             "groundingBoundary": "knowledge_base" if resolved_knowledge_results else "model_without_local_evidence",
         }
 
+    await _emit_research_chat_progress(
+        progress,
+        "context_ready",
+        "已完成结构化上下文和检索片段拼接，准备调用模型生成回答。",
+        knowledgeHitCount=len(resolved_knowledge_results),
+        modelName=model_name,
+    )
     prompt = _build_research_chat_llm_prompt(
         message=message,
         context=context,
@@ -2523,11 +3514,52 @@ async def _research_chat_llm_result(
         structured_context=structured_context,
     )
     try:
-        answer = await call_research_chat_llm(prompt=prompt, model_name=model_name)
+        max_tokens = _research_chat_response_max_tokens(routed)
+        await _emit_research_chat_progress(
+            progress,
+            "model_start",
+            "正在等待模型基于知识库片段生成回答。",
+            modelName=model_name,
+            maxTokens=max_tokens,
+        )
+        if progress is not None:
+            try:
+                answer = await call_research_chat_llm_stream(
+                    prompt=prompt,
+                    model_name=model_name,
+                    progress=progress,
+                    max_tokens=max_tokens,
+                )
+            except Exception as stream_exc:
+                print(f"Research chat streaming LLM call fell back to non-streaming: {stream_exc}", file=sys.stderr)
+                await _emit_research_chat_progress(
+                    progress,
+                    "model_stream_fallback",
+                    "当前模型通道不支持稳定正文流，已回退为完整回答返回。",
+                    modelName=model_name,
+                )
+                answer = await call_research_chat_llm(prompt=prompt, model_name=model_name, max_tokens=max_tokens)
+        else:
+            answer = await call_research_chat_llm(prompt=prompt, model_name=model_name, max_tokens=max_tokens)
+        await _emit_research_chat_progress(
+            progress,
+            "model_complete",
+            "模型回答已生成，正在保存对话结果。",
+            modelName=model_name,
+            elapsedMs=round((time.perf_counter() - started_at) * 1000),
+        )
     except Exception as exc:
         print(f"Research chat LLM call failed: {exc}", file=sys.stderr)
+        await _emit_research_chat_progress(
+            progress,
+            "model_error",
+            "模型调用失败，返回可恢复的 model_error 状态。",
+            modelName=model_name,
+            elapsedMs=round((time.perf_counter() - started_at) * 1000),
+        )
         return {
             **base_result,
+            **routing_metadata,
             "intent": routed.get("intent", "clarify"),
             "title": "模型回答暂时不可用",
             "summary": "SQL 知识库检索已完成，但 live model 调用失败，因此没有生成模型回答。请检查模型服务、key、网络或稍后重试；写入型任务仍会通过确认卡执行。",
@@ -2543,6 +3575,7 @@ async def _research_chat_llm_result(
 
     return {
         **base_result,
+        **routing_metadata,
         "intent": routed.get("intent", "clarify"),
         "title": base_result.get("title") or "研究助手回答",
         "summary": answer.strip(),
@@ -2564,6 +3597,7 @@ async def _chat_turn_llm_response(
     routed: Dict[str, Any],
     structured_context: Optional[Dict[str, Any]] = None,
     knowledge_results: Optional[List[Dict[str, Any]]] = None,
+    progress: Optional[ResearchChatProgressCallback] = None,
 ) -> Dict[str, Any]:
     result = await _research_chat_llm_result(
         message=request.message,
@@ -2571,6 +3605,7 @@ async def _chat_turn_llm_response(
         routed=routed,
         structured_context=structured_context,
         knowledge_results=knowledge_results,
+        progress=progress,
     )
     state = "needs_input" if result.get("status") in {"model_missing", "model_disabled"} else "complete"
     return _chat_turn_response(
@@ -5879,6 +6914,10 @@ def build_worker_runtime() -> ResearchWorkerRuntime:
 @app.on_event("startup")
 async def start_research_worker_runtime() -> None:
     global worker_runtime
+    try:
+        await asyncio.to_thread(_get_research_chat_llm_module)
+    except Exception as exc:
+        print(f"Research chat LLM module warmup failed: {exc}", file=sys.stderr)
     if worker_runtime is None:
         worker_runtime = build_worker_runtime()
     if WORKER_AUTOSTART_ENABLED:
@@ -7041,9 +8080,18 @@ async def get_research_chat_session(session_id: str) -> Dict[str, Any]:
     return session
 
 
-@app.post("/api/research-chat/turn")
-async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]:
+async def _research_chat_turn_impl(
+    request: ResearchChatTurnRequest,
+    *,
+    progress: Optional[ResearchChatProgressCallback] = None,
+) -> Dict[str, Any]:
     session_id = request.session_id or f"chat_{uuid.uuid4().hex[:12]}"
+    await _emit_research_chat_progress(
+        progress,
+        "session",
+        "已创建或恢复项目 AI 对话会话。",
+        sessionId=session_id,
+    )
     _ensure_chat_session(session_id, request)
     _record_chat_message(
         session_id,
@@ -7051,9 +8099,47 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
         request.message,
         {"text": request.message, "context": _context_dict(request.context)},
     )
-    routed = _route_research_chat_intent(request.message)
+    await _emit_research_chat_progress(
+        progress,
+        "routing",
+        "正在用模型 planner 和 tool schema 判断请求是否需要确认卡、工具动作或只读 RAG 回答。",
+    )
+    routed = await _plan_research_chat_route(request=request, session_id=session_id, progress=progress)
     intent = routed["intent"]
     inputs = routed["extractedInputs"]
+    await _emit_research_chat_progress(
+        progress,
+        "routed",
+        f"路由完成：{intent}。",
+        intent=intent,
+        missingInputs=list(routed.get("missingInputs") or []),
+    )
+
+    if routed.get("plannerStatus") in {"model_missing", "model_disabled", "planner_error"}:
+        result = {
+            "intent": intent,
+            "title": routed.get("title") or "模型规划器不可用",
+            "summary": routed.get("summary") or routed.get("userFacingReason") or "模型 planner 暂时不可用。",
+            "status": routed.get("plannerStatus"),
+            "verdict": "limited",
+            "modelName": routed.get("modelName") or _research_chat_model_name(request.context),
+            "plannerStatus": routed.get("plannerStatus"),
+            "plannerConfidence": routed.get("plannerConfidence", 0.0),
+            "routingSource": routed.get("routingSource", "fallback_error"),
+            "capabilityId": routed.get("capabilityId"),
+            "nextActions": ["检查模型 API 配置", "重试同一问题", "把请求拆成更明确的一步"],
+            "groundingBoundary": "model_without_local_evidence",
+        }
+        return _chat_turn_response(
+            session_id=session_id,
+            assistant_message={
+                "kind": "result_summary",
+                "text": result["summary"],
+                "result": result,
+                "suggestions": _chat_capabilities(),
+            },
+            state="needs_input" if result["status"] in {"model_missing", "model_disabled"} else "error",
+        )
 
     if routed["missingInputs"]:
         if intent == "clarify":
@@ -7061,6 +8147,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
                 message=request.message,
                 context=request.context,
                 routed=routed,
+                progress=progress,
             )
             return _chat_turn_response(
                 session_id=session_id,
@@ -7102,6 +8189,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=structured,
+            progress=progress,
         )
 
     if intent == "start_research_run":
@@ -7172,6 +8260,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=result,
+            progress=progress,
         )
 
     if intent in {"critique_generated_hypothesis", "apply_expert_feedback"}:
@@ -7189,6 +8278,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=result,
+            progress=progress,
         )
 
     if intent == "explain_ranking":
@@ -7198,6 +8288,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=result,
+            progress=progress,
         )
 
     if intent == "design_experiment":
@@ -7207,6 +8298,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=result,
+            progress=progress,
         )
 
     if intent == "draft_report":
@@ -7216,6 +8308,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=result,
+            progress=progress,
         )
 
     if intent == "search_session_history":
@@ -7226,6 +8319,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             request=request,
             routed=routed,
             structured_context=result,
+            progress=progress,
         )
 
     if intent == "run_terminal_command":
@@ -7333,6 +8427,33 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             },
         )
 
+    if intent == "extract_web_evidence_batch":
+        urls = [str(url).strip() for url in inputs.get("urls", []) if str(url).strip()][:3]
+        action_id = f"action_{uuid.uuid4().hex[:12]}"
+        return _proposal_response(
+            session_id=session_id,
+            action_id=action_id,
+            intent=intent,
+            title="抓取网页正文并整理",
+            summary="我可以打开前几个高相关公开网页，抽取正文 preview，写入知识库，并基于网页内容给出聚合回答。",
+            input_summary="；".join(_url_summary(url) for url in urls)[:240],
+            operation_summary=["校验公开 URL", "抓取网页正文", "抽取文本 preview 并入库", "基于网页正文聚合回答"],
+            risk_summary="将访问多个公开 HTTP(S) 页面；抓取结果是 best-effort public HTML，不等同于权威全文审查。",
+            expected_result_summary=["web evidence snapshots", "knowledge papers", "aggregated answer", "source URLs"],
+            approval_scope="browser.web_extract",
+            execution_target="workflow.web_extract_batch",
+            request_preview={
+                "urls": urls,
+                "query": inputs.get("query") or "",
+                "phase": "literature_review",
+                "run_id": request.context.run_id,
+                "max_bytes": 1_000_000,
+                "max_text_chars": 60_000,
+                "ingest_to_knowledge_base": True,
+                "model_name": request.context.model_name,
+            },
+        )
+
     if intent == "search_public_web":
         query = str(inputs["query"]).strip()
         action_id = f"action_{uuid.uuid4().hex[:12]}"
@@ -7355,6 +8476,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
                 "run_id": request.context.run_id,
                 "limit": 10,
                 "domains": domains,
+                "model_name": request.context.model_name,
             },
         )
 
@@ -7379,6 +8501,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             routed=routed,
             structured_context=structured,
             knowledge_results=_dedupe_knowledge_results(results + _project_chat_knowledge_fallback(limit=2), limit=8),
+            progress=progress,
         )
 
     if intent == "verify_evidence_with_literature":
@@ -7429,6 +8552,7 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             routed=routed,
             structured_context=structured,
             knowledge_results=_dedupe_knowledge_results(local_evidence + _project_chat_knowledge_fallback(limit=2), limit=8),
+            progress=progress,
         )
 
     return _chat_turn_response(
@@ -7439,6 +8563,96 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             "suggestions": _chat_capabilities(),
         },
         state="idle",
+    )
+
+
+@app.post("/api/research-chat/turn")
+async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]:
+    return await _research_chat_turn_impl(request)
+
+
+@app.post("/api/research-chat/turn/stream")
+async def research_chat_turn_stream(request: ResearchChatTurnRequest) -> StreamingResponse:
+    session_id = request.session_id or f"chat_{uuid.uuid4().hex[:12]}"
+    request_with_session = _research_chat_request_with_session(request, session_id)
+
+    async def event_stream():
+        queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+        started_at = time.perf_counter()
+
+        async def progress(event: Dict[str, Any]) -> None:
+            event.setdefault("elapsedMs", round((time.perf_counter() - started_at) * 1000))
+            await queue.put({"event": "progress", "data": event})
+            await asyncio.sleep(0)
+
+        async def run_turn() -> None:
+            try:
+                response = await _research_chat_turn_impl(request_with_session, progress=progress)
+                await queue.put({"event": "final", "data": response})
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+                await queue.put(
+                    {
+                        "event": "error",
+                        "data": {
+                            "message": detail.get("message") or "研究聊天请求失败。",
+                            "code": detail.get("code") or "research_chat_stream_failed",
+                            "httpStatus": exc.status_code,
+                        },
+                    }
+                )
+            except Exception as exc:
+                print(f"Research chat stream failed: {exc}", file=sys.stderr)
+                await queue.put(
+                    {
+                        "event": "error",
+                        "data": {
+                            "message": "研究聊天流式请求失败，请稍后重试。",
+                            "code": "research_chat_stream_failed",
+                        },
+                    }
+                )
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run_turn())
+        yield _research_chat_sse_event(
+            "session",
+            {
+                "session_id": session_id,
+                "message": "已打开流式项目 AI 通道。",
+            },
+        )
+
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=1.2)
+            except asyncio.TimeoutError:
+                if task.done():
+                    break
+                yield _research_chat_sse_event(
+                    "progress",
+                    {
+                        "phase": "waiting",
+                        "message": "仍在等待模型或检索返回；页面会在结果可用后自动补全。",
+                        "elapsedMs": round((time.perf_counter() - started_at) * 1000),
+                    },
+                )
+                continue
+            if item is None:
+                break
+            yield _research_chat_sse_event(item["event"], item["data"])
+
+        if not task.done():
+            task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -7604,6 +8818,72 @@ async def confirm_research_chat_action(
                 "nextActions": ["解析发现的 PDF", "搜索相关证据", "创建人工复核任务"],
                 "groundingBoundary": "public_html_best_effort",
             }
+        elif proposal.get("executionTarget") == "workflow.web_extract_batch":
+            urls = [str(url).strip() for url in preview.get("urls", []) if str(url).strip()][:3]
+            web_results: List[Dict[str, Any]] = []
+            extract_errors: List[Dict[str, str]] = []
+            for url in urls:
+                try:
+                    payload = await execute_web_extract_workflow(
+                        WebExtractWorkflowRequest(
+                            url=url,
+                            phase=str(preview.get("phase") or "literature_review"),
+                            run_id=preview.get("run_id"),
+                            max_bytes=bounded_int(preview.get("max_bytes"), 1_000_000, 4096, 3_000_000),
+                            max_text_chars=bounded_int(preview.get("max_text_chars"), 60_000, 1000, 200_000),
+                            ingest_to_knowledge_base=bool(preview.get("ingest_to_knowledge_base", True)),
+                            approval=request.approval,
+                        )
+                    )
+                    web_results.append(payload.get("web_result", {}))
+                except HTTPException as exc:
+                    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+                    extract_errors.append({"url": url, "error": str(detail.get("message") or detail.get("code") or exc.detail)})
+                except Exception as exc:
+                    extract_errors.append({"url": url, "error": str(exc)})
+            if not web_results:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "web_extract_batch_failed",
+                        "message": "高相关网页均未能抓取正文，请换用可公开访问的 URL 或先打开单个网页检查。",
+                    },
+                )
+            query = str(preview.get("query") or "")
+            model_name = _web_search_synthesis_model_name(
+                str(preview.get("model_name") or os.getenv("COSCIENTIST_RESEARCH_CHAT_MODEL") or "deepseek/deepseek-v4-pro")
+            )
+            synthesized_answer = await _synthesize_web_extract_answer(
+                query=query,
+                web_results=web_results,
+                errors=extract_errors,
+                model_name=model_name,
+            )
+            result_summary = {
+                "intent": proposal.get("intent"),
+                "title": "网页内容已抓取并整理",
+                "summary": synthesized_answer or _fallback_web_extract_answer(query, web_results, extract_errors),
+                "status": "complete",
+                "resultCount": len(web_results),
+                "failedCount": len(extract_errors),
+                "modelName": model_name if synthesized_answer else None,
+                "synthesisStatus": "model_synthesized" if synthesized_answer else "fallback_synthesized",
+                "items": [
+                    {
+                        "type": "web_evidence_extract",
+                        "title": item.get("title"),
+                        "url": item.get("final_url") or item.get("requested_url"),
+                        "evidence_summary": item.get("text_preview"),
+                        "source_channel": "browser_web_extract",
+                        "source_reliability": item.get("source_reliability") or "best_effort_public_html",
+                        "paper_id": item.get("knowledge_base_paper_id"),
+                    }
+                    for item in web_results[:5]
+                ],
+                "errors": extract_errors,
+                "nextActions": ["继续抓取官方文档", "解析发现的 PDF", "用知识库核验候选假设"],
+                "groundingBoundary": "public_html_best_effort",
+            }
         elif proposal.get("executionTarget") == "workflow.web_search":
             payload = await execute_web_search_workflow(
                 WebSearchWorkflowRequest(
@@ -7618,13 +8898,25 @@ async def confirm_research_chat_action(
             )
             web_search = payload.get("web_search", {})
             result_count = int(web_search.get("result_count") or len(web_search.get("results") or []))
+            query = str(web_search.get("query") or preview.get("query") or "")
+            model_name = _web_search_synthesis_model_name(
+                str(preview.get("model_name") or os.getenv("COSCIENTIST_RESEARCH_CHAT_MODEL") or "deepseek/deepseek-v4-pro")
+            )
+            synthesized_answer = await _synthesize_web_search_answer(
+                query=query,
+                web_search=web_search,
+                model_name=model_name,
+            )
             result_summary = {
                 "intent": proposal.get("intent"),
-                "title": "公开 Web Search 完成",
-                "summary": f"公开 Web Search 返回 {result_count} 条结果；这些是 snippet 线索，后续全文支撑仍需抓取网页、解析 PDF 或调用文献 MCP。",
-                "query": web_search.get("query") or preview.get("query"),
+                "title": "公开 Web Search 已整理",
+                "summary": synthesized_answer
+                or f"公开 Web Search 返回 {result_count} 条结果；这些是 snippet 线索，后续全文支撑仍需抓取网页、解析 PDF 或调用文献 MCP。",
+                "query": query,
                 "status": "complete",
                 "resultCount": result_count,
+                "modelName": model_name if synthesized_answer else None,
+                "synthesisStatus": "model_synthesized" if synthesized_answer else "tool_summary_only",
                 "items": [
                     {
                         "type": "web_search_result",
@@ -7637,7 +8929,7 @@ async def confirm_research_chat_action(
                     for item in (web_search.get("results") or [])[:5]
                 ],
                 "resultRef": payload.get("result_ref"),
-                "nextActions": ["抓取高相关网页作为证据", "解析搜索结果中的 PDF", "用知识库核验候选假设"],
+                "nextActions": ["抓取高相关网页作为证据", "解析搜索结果中的 PDF", "继续搜索更精确 query", "用知识库核验候选假设"],
                 "groundingBoundary": "public_web_search",
             }
         elif proposal.get("executionTarget") == "workflow.terminal_command":
