@@ -2583,7 +2583,7 @@ class KnowledgeBaseStore:
             evidence_summaries = []
             known_gaps = ["current_run scope does not retrieve project, library, or global evidence memory."]
         else:
-            evidence_library_id = library_id if normalized_scope == "library" else None
+            evidence_library_id = (library_id or DEFAULT_LIBRARY_ID) if normalized_scope == "library" else None
             evidence_summaries = [
                 self._evidence_memory_summary(item)
                 for item in self.search_chunks(research_goal, limit=max(1, max_evidence), library_id=evidence_library_id)
