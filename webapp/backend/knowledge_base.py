@@ -2678,7 +2678,7 @@ class KnowledgeBaseStore:
             "section_type": evidence.get("section_type"),
             "source_reliability": evidence.get("source_reliability"),
             "support_level": evidence.get("support_level"),
-            "snippet": str(evidence.get("text") or evidence.get("snippet") or "")[:700],
+            "snippet": str(evidence.get("text") or evidence.get("snippet") or evidence.get("text_preview") or "")[:700],
             "experiment_data_summary": evidence.get("experiment_data_summary"),
         }
 
