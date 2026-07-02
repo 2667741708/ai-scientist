@@ -108,3 +108,18 @@ def test_research_chat_records_preference_feedback_from_selected_context() -> No
         assert result["intent"] == "apply_expert_feedback"
         assert result["feedback"]["feedback_type"] == "prefer"
         assert result["targetRef"]["hypothesis_id"] == "hyp_selected"
+
+
+def test_research_chat_capabilities_include_feedback_memory() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        studio = load_studio(tmp)
+        client = TestClient(studio.app)
+
+        response = client.get("/api/research-chat/capabilities")
+
+        assert response.status_code == 200, response.text
+        capabilities = response.json()["capabilities"]
+        feedback = next(item for item in capabilities if item["id"] == "hypothesis.feedback")
+        assert feedback["intent"] == "apply_expert_feedback"
+        assert feedback["taskArea"] == "hypothesis_audit"
+        assert "下一轮" in feedback["availability"]["summary"]
