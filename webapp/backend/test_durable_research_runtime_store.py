@@ -157,6 +157,55 @@ def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
         assert project_memory["evidence_boundary"]["parsed_fulltext_count"] >= 1
 
 
+def test_memory_scope_library_filters_evidence_without_narrowing_project_or_global() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        primary_library = store.create_library(name="Primary library")["library_id"]
+        secondary_library = store.create_library(name="Secondary library")["library_id"]
+        query = "crosslibrary retrieval marker"
+        store.ingest(
+            title="Primary scoped evidence",
+            content=f"{query} supports the first library-specific context.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+            library_id=primary_library,
+        )
+        store.ingest(
+            title="Secondary scoped evidence",
+            content=f"{query} supports the second library-specific context.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+            library_id=secondary_library,
+        )
+
+        library_memory = store.build_memory_context(
+            research_goal=query,
+            memory_scope="library",
+            library_id=primary_library,
+            max_evidence=10,
+        )
+        project_memory = store.build_memory_context(
+            research_goal=query,
+            memory_scope="project",
+            library_id=primary_library,
+            max_evidence=10,
+        )
+        global_memory = store.build_memory_context(
+            research_goal=query,
+            memory_scope="global",
+            library_id=primary_library,
+            max_evidence=10,
+        )
+
+        library_ids = {item["library_id"] for item in library_memory["evidence_summaries"]}
+        project_library_ids = {item["library_id"] for item in project_memory["evidence_summaries"]}
+        global_library_ids = {item["library_id"] for item in global_memory["evidence_summaries"]}
+
+        assert library_ids == {primary_library}
+        assert {primary_library, secondary_library}.issubset(project_library_ids)
+        assert {primary_library, secondary_library}.issubset(global_library_ids)
+
+
 def test_research_runtime_schema_migrates_legacy_work_item_table() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "knowledge.sqlite3"
