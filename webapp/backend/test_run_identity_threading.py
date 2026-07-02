@@ -170,6 +170,66 @@ def test_run_real_passes_parent_memory_summary_constraints(monkeypatch) -> None:
     assert "parent-run-memory" not in joined_constraints
 
 
+def test_run_real_passes_current_request_feedback_constraints(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+    captured: dict[str, object] = {}
+
+    class FakeHypothesisGenerator:
+        def __init__(self, **kwargs):
+            captured["init_kwargs"] = kwargs
+
+        async def generate_hypotheses(self, **kwargs):
+            captured["generate_kwargs"] = kwargs
+            return {
+                "hypotheses": [],
+                "research_plan": {},
+                "tournament_matchups": [],
+                "metrics": {},
+                "workflow_tool_policy": {},
+            }
+
+    with tempdir:
+        import open_coscientist
+
+        monkeypatch.setattr(open_coscientist, "HypothesisGenerator", FakeHypothesisGenerator)
+
+        request = studio.RunRequest(
+            research_goal="Use current request feedback for continuation guidance",
+            demo_mode=False,
+            literature_review=False,
+            initial_hypotheses=1,
+            iterations=0,
+            min_references=0,
+            max_references=1,
+            user_feedback=[
+                studio.FeedbackItem(
+                    target_type="hypothesis",
+                    target_ref={"hypothesis_id": "raw-target-hidden"},
+                    feedback_type="critique",
+                    text="Revise toward hypotheses with stronger falsification tests.",
+                )
+            ],
+        )
+        record = studio.RunRecord(
+            run_id="run-current-feedback",
+            status="queued",
+            created_at=1.0,
+            updated_at=1.0,
+            request=request,
+        )
+
+        asyncio.run(studio.run_real(record))
+
+    constraints = captured["generate_kwargs"]["opts"]["constraints"]
+    joined_constraints = "\n".join(constraints)
+    assert "[user_feedback]" in joined_constraints
+    assert "Revise toward hypotheses with stronger falsification tests" in joined_constraints
+    assert "[user_feedback_policy]" in joined_constraints
+    assert "immediate reversible edit" in joined_constraints
+    assert "raw-target-hidden" not in joined_constraints
+
+
 def test_run_real_annotates_hypothesis_origins(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
