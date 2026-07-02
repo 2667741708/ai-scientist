@@ -6743,6 +6743,7 @@ async def run_real(record: RunRecord) -> None:
             library_id=record.request.library_id,
             memory_scope=record.request.memory_scope,
         )
+        memory_prompt_packet = knowledge_base.memory_context_prompt_packet(memory_context)
         combined_constraints = [
             f"[user_constraint] {constraint}"
             for constraint in record.request.constraints
@@ -6760,6 +6761,7 @@ async def run_real(record: RunRecord) -> None:
             "attributes": record.request.attributes,
             "constraints": combined_constraints,
             "memory_context": memory_context,
+            "memory_prompt_packet": memory_prompt_packet,
             "user_feedback": [item.model_dump() for item in record.request.user_feedback],
             "user_inputs": {
                 "starting_hypotheses": record.request.starting_hypotheses,
@@ -6817,6 +6819,7 @@ async def run_real(record: RunRecord) -> None:
             "feedback_count": len(record.request.user_feedback),
             "starting_hypotheses_count": len(record.request.starting_hypotheses),
             "evidence_summary_count": len(memory_context.get("evidence_summaries", [])),
+            "memory_prompt_packet_section_count": int(memory_prompt_packet.get("section_count") or 0),
         }
         annotate_hypothesis_origins(record)
         apply_citation_provenance_qa(record)
