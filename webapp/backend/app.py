@@ -4758,6 +4758,11 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
     related_runs = memory_context.get("related_runs") if isinstance(memory_context.get("related_runs"), list) else []
     known_gaps = memory_context.get("known_gaps") if isinstance(memory_context.get("known_gaps"), list) else []
     source_types: List[str] = []
+    evidence_library_ids = {
+        str(item.get("library_id"))
+        for item in evidence_summaries
+        if isinstance(item, dict) and item.get("library_id")
+    }
     if parent_run:
         source_types.append("parent_run")
     if prior_hypotheses:
@@ -4818,6 +4823,7 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
                 "title": "Evidence memory",
                 "summary": f"{len(evidence_summaries)} knowledge-base evidence summary item(s) matched this run.",
                 "count": len(evidence_summaries),
+                "library_count": len(evidence_library_ids),
                 "source_reliability_counts": reliability_counts,
                 "support_level_counts": support_counts,
             }
@@ -4846,6 +4852,7 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
         "prior_hypotheses_count": len(prior_hypotheses),
         "user_feedback_count": len(user_feedback),
         "evidence_summary_count": len(evidence_summaries),
+        "evidence_library_count": len(evidence_library_ids),
         "related_run_count": len(related_runs),
         "known_gaps_count": len(known_gaps),
         "sections": sections,
