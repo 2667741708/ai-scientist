@@ -307,6 +307,53 @@ def hypothesis_surface_collection(
     }
 
 
+def ranking_surface_summary(
+    matchups: Optional[Iterable[Any]] = None,
+    *,
+    hypotheses: Optional[Iterable[Any]] = None,
+    max_items: int = 8,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    matchup_records = _record_items(matchups)
+    hypothesis_records = _record_items(hypotheses)
+    items = [
+        _ranking_matchup_surface_summary(matchup, index=index)
+        for index, matchup in enumerate(matchup_records[:max(0, max_items)])
+    ]
+    status = _ranking_status(items, matchup_count=len(matchup_records))
+    summary = {
+        "status": status,
+        "ranking_method": "pairwise_tournament_elo" if matchup_records else "not_available",
+        "matchup_count": len(matchup_records),
+        "displayed_matchup_count": len(items),
+        "truncated_matchup_count": max(0, len(matchup_records) - len(items)),
+        "items": items,
+        "ranked_hypotheses": _ranking_hypothesis_summaries(hypothesis_records),
+        "confidence": _ranking_confidence_summary(items),
+        "next_actions": _ranking_next_actions(status),
+        "visibility_boundary": (
+            "Ranking surface summaries expose pairwise winners, losers, confidence, Elo before/after, "
+            "delta, and short reasoning summaries by default; raw matchup payloads, matchup IDs, "
+            "provider traces, and full tournament JSON require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "matchup_ids": [
+                _first_value(matchup, ("matchup_id", "id"))
+                for matchup in matchup_records
+                if _first_value(matchup, ("matchup_id", "id"))
+            ],
+            "hypothesis_ids": [
+                _first_value(hypothesis, ("id", "hypothesis_id"))
+                for hypothesis in hypothesis_records
+                if _first_value(hypothesis, ("id", "hypothesis_id"))
+            ],
+            "raw_matchups": [dict(matchup) for matchup in matchup_records],
+        }
+    return summary
+
+
 def evidence_surface_summary(
     evidence: Any,
     *,
@@ -408,6 +455,19 @@ def _as_list(value: Any) -> list[Any]:
     return [] if value is None else [value]
 
 
+def _record_items(values: Any) -> list[Mapping[str, Any]]:
+    if values is None or isinstance(values, (str, bytes)):
+        candidates: list[Any] = []
+    elif isinstance(values, Mapping):
+        candidates = [values]
+    else:
+        try:
+            candidates = list(values)
+        except TypeError:
+            candidates = [values]
+    return [item for item in (_as_mapping(value) for value in candidates) if item]
+
+
 def _first_value(source: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         value = source.get(key)
@@ -504,6 +564,116 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _ranking_matchup_surface_summary(matchup: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
+    winner_key = _first_value(matchup, ("winner_id", "winner_hypothesis_id", "winnerHypothesisId", "winner"))
+    loser_key = _first_value(matchup, ("loser_id", "loser_hypothesis_id", "loserHypothesisId", "loser"))
+    winner_label = _first_value(matchup, ("winner_label", "winner_title", "winner_name")) or winner_key
+    loser_label = _first_value(matchup, ("loser_label", "loser_title", "loser_name")) or loser_key
+    before = _as_mapping(_first_value(matchup, ("before_elo", "elo_before", "ratings_before", "beforeElo")))
+    after = _as_mapping(_first_value(matchup, ("after_elo", "elo_after", "ratings_after", "afterElo")))
+    delta = _as_mapping(_first_value(matchup, ("elo_delta", "rating_delta", "delta", "eloDelta")))
+    winner_before = _safe_number(_first_value(matchup, ("winner_elo_before", "winnerBeforeElo")))
+    if winner_before is None:
+        winner_before = _rating_lookup(before, winner_key, winner_label, matchup.get("winner"))
+    winner_after = _safe_number(_first_value(matchup, ("winner_elo_after", "winnerAfterElo")))
+    if winner_after is None:
+        winner_after = _rating_lookup(after, winner_key, winner_label, matchup.get("winner"))
+    winner_delta = _safe_number(_first_value(matchup, ("winner_elo_delta", "winnerEloDelta")))
+    if winner_delta is None:
+        winner_delta = _rating_lookup(delta, winner_key, winner_label, matchup.get("winner"))
+    loser_before = _safe_number(_first_value(matchup, ("loser_elo_before", "loserBeforeElo")))
+    if loser_before is None:
+        loser_before = _rating_lookup(before, loser_key, loser_label, matchup.get("loser"))
+    loser_after = _safe_number(_first_value(matchup, ("loser_elo_after", "loserAfterElo")))
+    if loser_after is None:
+        loser_after = _rating_lookup(after, loser_key, loser_label, matchup.get("loser"))
+    loser_delta = _safe_number(_first_value(matchup, ("loser_elo_delta", "loserEloDelta")))
+    if loser_delta is None:
+        loser_delta = _rating_lookup(delta, loser_key, loser_label, matchup.get("loser"))
+    if winner_delta is None and winner_before is not None and winner_after is not None:
+        winner_delta = winner_after - winner_before
+    if loser_delta is None and loser_before is not None and loser_after is not None:
+        loser_delta = loser_after - loser_before
+    return {
+        "index": index,
+        "winner": _compact_text(winner_label, max_length=120),
+        "loser": _compact_text(loser_label, max_length=120),
+        "confidence": _safe_number(_first_value(matchup, ("confidence", "judge_confidence", "confidence_score"))),
+        "winner_elo": {
+            "before": winner_before,
+            "after": winner_after,
+            "delta": winner_delta,
+        },
+        "loser_elo": {
+            "before": loser_before,
+            "after": loser_after,
+            "delta": loser_delta,
+        },
+        "reasoning_summary": _compact_text(
+            _first_value(matchup, ("reasoning", "rationale", "decision_reasoning", "summary")),
+            max_length=260,
+        ),
+        "comparison_mode": _first_value(matchup, ("comparison_mode", "mode", "comparisonMode")),
+    }
+
+
+def _rating_lookup(ratings: Mapping[str, Any], *keys: Any) -> Optional[float]:
+    for key in keys:
+        if key is None:
+            continue
+        value = ratings.get(str(key))
+        if value is None:
+            value = ratings.get(key)
+        number = _safe_number(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _ranking_status(items: list[Mapping[str, Any]], *, matchup_count: int) -> str:
+    if matchup_count == 0:
+        return "absent"
+    for item in items:
+        if not item.get("winner") or not item.get("loser"):
+            return "limited"
+    return "ready"
+
+
+def _ranking_hypothesis_summaries(hypotheses: list[Mapping[str, Any]]) -> list[Dict[str, Any]]:
+    sorted_hypotheses = sorted(
+        hypotheses,
+        key=lambda item: _safe_number(_first_value(item, ("elo_rating", "elo", "rating"))) or 0,
+        reverse=True,
+    )
+    return [
+        hypothesis_surface_summary(hypothesis, index=index)
+        for index, hypothesis in enumerate(sorted_hypotheses[:5])
+    ]
+
+
+def _ranking_confidence_summary(items: list[Mapping[str, Any]]) -> Dict[str, Any]:
+    values = [
+        value
+        for value in (_safe_number(item.get("confidence")) for item in items)
+        if value is not None
+    ]
+    if not values:
+        return {"available": False, "average": None, "minimum": None}
+    return {
+        "available": True,
+        "average": round(sum(values) / len(values), 4),
+        "minimum": min(values),
+    }
+
+
+def _ranking_next_actions(status: str) -> list[str]:
+    if status == "absent":
+        return ["run_ranking_phase", "inspect_review_scores"]
+    if status == "limited":
+        return ["inspect_matchup_details", "rerun_ranking_if_needed"]
+    return ["inspect_top_ranked_hypotheses", "inspect_matchup_details", "design_experiment"]
 
 
 def _worker_readiness_state(*, worker_enabled: bool, counts: Mapping[str, int]) -> str:
