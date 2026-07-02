@@ -1871,7 +1871,40 @@ loading、disabled、success、warning 状态不得改变控件外部尺寸。
 | evidence links | Reference drawer | source reliability + support level | 把未解析证据标成 fulltext support |
 | worker status | Runtime readiness / expert panel | enabled/counts/retrying | 首页默认展示内部队列表 |
 
-### 8.11 响应式与交互状态
+### 8.11 四项论文能力的页面落点矩阵
+
+四项论文级能力必须以“用户正在完成的研究任务”出现，而不是以内部系统名出现。每个能力都有一个主页面、一个默认摘要面和一个专家审计面；普通用户不应在首屏直接看到 `agent_id`、`checkpoint_id`、`lease_owner`、raw JSON 或 provider diagnostics。
+
+| 论文能力 | 用户看到的能力名称 | 第一次合理出现的位置 | 默认页面布局 | 展开/专家位置 | 不允许的默认呈现 |
+| --- | --- | --- | --- | --- | --- |
+| 自然语言界面 | 对话式研究控制 | 研究主页的目标输入、Workspace 左侧 chat/control 栏 | 输入框、可验证性提示、确认卡、下一步建议 | confirmation request preview、intent/debug summary | 把 intent router、prompt、raw request JSON 当成主要 UI |
+| 异步任务框架 | 后台运行状态 | Workspace run progress、Hypotheses detail 的运行条 | queued/running/retrying/complete/error、当前阶段、人类可理解恢复路径 | Runtime readiness、专家设置、work item detail | 首页或结果页直接铺 `lease_owner`、worker pid、内部队列表 |
+| 专业化智能体 | 研究步骤与评审角色 | 结果页“过程与证据”入口、Hypothesis detail 的过程摘要 | phase list、完成状态、输出摘要、质量/证据边界 | agent registry、prompt/template name、tool calls、token usage | 普通导航暴露 Agent 页面，或要求用户先理解 graph 才能看结果 |
+| 上下文记忆 | 使用的历史上下文 | Workspace confirmation、Hypotheses detail、Reports 边界说明 | parent run、反馈数量、证据来源数量、memory scope 摘要 | exact refs、feedback excerpts、checkpoint metadata、retrieval diagnostics | 默认铺开历史 chat messages、raw memory JSON 或把 LLM cache 称为科学记忆 |
+
+运行阶段也决定功能出现方式：
+
+| 阶段 | 主页面 | 应出现的能力 | 设计要求 |
+| --- | --- | --- | --- |
+| 运行前 | 研究主页、Workspace | 自然语言界面、证据准备、memory summary | 只要求用户确认目标、模式边界、用户假设和约束；不展示后台细节。 |
+| 排队中 | Workspace | 异步任务框架 | 显示“已排队/等待后台 worker”，保留取消或稍后查看入口；不要显示假进度。 |
+| 运行中 | Workspace、Hypotheses | 异步任务框架、专业化智能体 | 显示当前研究阶段摘要和可检查 timeline；agent trace 只以折叠摘要出现。 |
+| 完成后 | Hypotheses、Experiments、Reports | 专业化智能体、上下文记忆、证据记忆 | 默认聚焦候选假设比较、证据边界和下一步实验；过程与来源按需展开。 |
+| 继续迭代 | Workspace、Hypotheses | 自然语言反馈、上下文记忆 | 明确反馈会进入下一轮 continuation run；展示 parent run 和历史上下文摘要。 |
+| 失败/恢复 | Workspace、Runtime | 异步任务框架、execution memory | 普通用户看恢复路径；专家用户可看 checkpoint、retry、lease expiry 和诊断。 |
+
+页面落地顺序建议：
+
+```text
+1. 先把 ResearchGoalComposer、RunConfirmationCard、RunProgressStrip 放到 Workspace 主路径。
+2. 再把 HypothesisCard、EvidenceDrawer、FeedbackComposer、MemoryContextDisclosure 做成结果检查路径。
+3. 然后补 Experiments 和 Reports，把“可证伪实验设计”和“证据边界报告”做成自然下一步。
+4. 最后做 RuntimeReadinessPanel 和 AgentProcessDisclosure 的专家展开细节。
+```
+
+这保证论文级能力先服务研究者的主路径，再服务审计和调试，不会让产品变成后台任务管理器或 agent graph 展示器。
+
+### 8.12 响应式与交互状态
 
 桌面端：
 
@@ -1911,7 +1944,7 @@ disabled: 说明为什么不可用。
 focus-visible: 所有按钮、输入、tabs、drawer close 都必须可键盘访问。
 ```
 
-### 8.12 前端验收标准
+### 8.13 前端验收标准
 
 前端实现完成后，除类型和单元测试外，必须做浏览器验证：
 
