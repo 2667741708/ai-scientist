@@ -113,6 +113,25 @@ export type RunRequest = {
   library_id?: string | null;
 };
 
+export type ContinueRunRequest = {
+  research_goal?: string | null;
+  model_name?: string | null;
+  demo_mode?: boolean | null;
+  literature_review?: boolean | null;
+  initial_hypotheses?: number | null;
+  iterations?: number | null;
+  min_references?: number | null;
+  max_references?: number | null;
+  preferences?: string | null;
+  attributes?: string[];
+  constraints?: string[];
+  starting_hypotheses?: string[];
+  user_feedback?: FeedbackItem[];
+  refinement_mode?: "new_run" | "continue_from_run" | "revise_hypotheses";
+  memory_scope?: "current_run" | "project" | "library" | "global" | null;
+  library_id?: string | null;
+};
+
 export type RunRecord = {
   run_id: string;
   status: RunStatus;
