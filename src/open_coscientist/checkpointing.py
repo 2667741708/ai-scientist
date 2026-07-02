@@ -66,6 +66,41 @@ def checkpoint_state_serializability(state: Mapping[str, Any]) -> Dict[str, Any]
     return {"serializable": True, "error_type": None, "error": None}
 
 
+def summarize_langgraph_checkpoint_tuple(checkpoint_tuple: Any) -> Dict[str, Any]:
+    config = getattr(checkpoint_tuple, "config", {}) or {}
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    metadata = getattr(checkpoint_tuple, "metadata", {}) or {}
+    parent_config = getattr(checkpoint_tuple, "parent_config", {}) or {}
+    pending_writes = getattr(checkpoint_tuple, "pending_writes", []) or []
+
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    parent_configurable = (
+        parent_config.get("configurable", {}) if isinstance(parent_config, dict) else {}
+    )
+    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
+    channel_versions = checkpoint.get("channel_versions", {}) if isinstance(checkpoint, dict) else {}
+
+    return {
+        "thread_id": configurable.get("thread_id"),
+        "checkpoint_id": configurable.get("checkpoint_id") or checkpoint.get("id"),
+        "checkpoint_ns": configurable.get("checkpoint_ns", ""),
+        "parent_checkpoint_id": parent_configurable.get("checkpoint_id"),
+        "checkpoint_ts": checkpoint.get("ts") if isinstance(checkpoint, dict) else None,
+        "metadata": {
+            "source": metadata.get("source") if isinstance(metadata, dict) else None,
+            "step": metadata.get("step") if isinstance(metadata, dict) else None,
+        },
+        "channel_keys": sorted(str(key) for key in channel_values.keys())
+        if isinstance(channel_values, dict)
+        else [],
+        "channel_version_keys": sorted(str(key) for key in channel_versions.keys())
+        if isinstance(channel_versions, dict)
+        else [],
+        "pending_writes_count": len(pending_writes),
+        "boundary": "LangGraph checkpoint summary only; raw channel values are not exposed.",
+    }
+
+
 @asynccontextmanager
 async def open_sqlite_checkpointer(db_path: str | Path):
     try:
