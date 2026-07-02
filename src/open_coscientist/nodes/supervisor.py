@@ -53,10 +53,75 @@ def _append_feedback_guidance(
         )
 
 
+_PROMPT_PACKET_ITEM_FIELDS = (
+    "research_goal",
+    "status",
+    "hypothesis_count",
+    "support_level",
+    "elo_rating",
+    "summary",
+    "feedback_type",
+    "target_type",
+    "source",
+    "source_reliability",
+    "section_type",
+    "checkpoint_available",
+    "resume_supported",
+    "can_resume",
+    "should_retry",
+    "recovery_action",
+    "resume_mode",
+    "phase",
+)
+
+
+def _append_memory_prompt_packet_guidance(
+    constraints: List[str],
+    memory_prompt_packet: Any,
+) -> None:
+    if not isinstance(memory_prompt_packet, dict):
+        return
+
+    sections = memory_prompt_packet.get("sections")
+    if not isinstance(sections, list):
+        return
+
+    appended = 0
+    for section in sections[:6]:
+        if not isinstance(section, dict):
+            continue
+        section_name = _short_guidance_text(section.get("section") or "memory_section", 80)
+        items = section.get("items") if isinstance(section.get("items"), list) else []
+        for item in items[:2]:
+            if not isinstance(item, dict):
+                continue
+            fields: List[str] = []
+            for key in _PROMPT_PACKET_ITEM_FIELDS:
+                value = item.get(key)
+                if value in (None, "", []):
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(_short_guidance_text(entry, 80) for entry in value[:4])
+                fields.append(f"{key}={_short_guidance_text(value, 180)}")
+            if fields:
+                constraints.append(
+                    f"[memory_prompt_packet] section={section_name}; "
+                    f"{'; '.join(fields[:8])}."
+                )
+                appended += 1
+
+    if appended:
+        constraints.append(
+            "[memory_prompt_packet_policy] Use only these summary-only memory packet fields for planning; "
+            "do not expose checkpoint refs, tool JSON, provider payloads, raw feedback text, or internal ids."
+        )
+
+
 def build_supervisor_context_constraints(
     constraints: Optional[List[str]],
     memory_context: Any,
     user_feedback: Any,
+    memory_prompt_packet: Any = None,
 ) -> List[str]:
     combined = [item for item in (constraints or []) if str(item).strip()]
 
@@ -134,6 +199,7 @@ def build_supervisor_context_constraints(
                 "Do not treat cache hits, internal ids, or unstated evidence as scientific support."
             )
 
+    _append_memory_prompt_packet_guidance(combined, memory_prompt_packet)
     _append_feedback_guidance(combined, user_feedback, prefix="user_feedback")
     return combined
 
@@ -162,6 +228,7 @@ async def supervisor_node(state: WorkflowState) -> Dict[str, Any]:
         state.get("constraints"),
         state.get("memory_context"),
         state.get("user_feedback"),
+        state.get("memory_prompt_packet"),
     )
     user_hypotheses = state.get("starting_hypotheses")
     user_literature = state.get("literature")
