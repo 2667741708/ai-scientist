@@ -829,12 +829,14 @@ def agent_process_surface_summary(
     displayed_items = sorted_items[: max(0, max_items)]
     counts = _agent_process_counts(sorted_items)
     status = _agent_process_status(counts)
+    phase_coverage = _agent_process_phase_coverage(sorted_items, phase_index=phase_index)
     summary = {
         "status": status,
         "trace_count": len(sorted_items),
         "displayed_trace_count": len(displayed_items),
         "truncated_trace_count": max(0, len(sorted_items) - len(displayed_items)),
         "phase_order": [item["phase"] for item in sorted_items],
+        "phase_coverage": phase_coverage,
         "current_phase": _agent_process_current_phase(sorted_items),
         "counts": counts,
         "items": [_agent_process_default_item(item) for item in displayed_items],
@@ -3096,6 +3098,32 @@ def _agent_process_current_phase(items: list[Mapping[str, Any]]) -> Optional[Dic
         "phase": candidate.get("phase"),
         "label": candidate.get("label"),
         "status": candidate.get("status"),
+    }
+
+
+def _agent_process_phase_coverage(
+    items: list[Mapping[str, Any]],
+    *,
+    phase_index: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    expected = [
+        phase
+        for phase in AGENT_PROCESS_PHASE_ORDER
+        if phase in phase_index or not phase_index
+    ]
+    observed: list[str] = []
+    for item in items:
+        phase = _agent_process_canonical_phase(str(item.get("phase") or "")) or str(item.get("phase") or "")
+        if phase and phase not in observed:
+            observed.append(phase)
+    missing = [phase for phase in expected if phase not in observed]
+    return {
+        "expected_phases": expected,
+        "observed_phases": observed,
+        "missing_phases": missing,
+        "covered_count": len([phase for phase in expected if phase in observed]),
+        "expected_count": len(expected),
+        "complete": bool(expected) and not missing,
     }
 
 
