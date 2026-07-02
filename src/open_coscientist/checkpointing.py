@@ -132,6 +132,89 @@ def execution_recovery_policy(
     }
 
 
+def execution_resume_readiness(
+    *,
+    run_id: str,
+    execution_memory: Mapping[str, Any] | None = None,
+    checkpoint_metadata: Mapping[str, Any] | None = None,
+    work_item: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required to evaluate execution resume readiness")
+
+    memory = dict(execution_memory or {})
+    checkpoint = dict(checkpoint_metadata or {})
+    work = dict(work_item or {})
+    checkpoint_thread_id = _first_nonempty_text(checkpoint.get("thread_id")) or normalized_run_id
+    checkpoint_id = _first_nonempty_text(checkpoint.get("checkpoint_id"))
+    checkpoint_ns = _first_nonempty_text(checkpoint.get("checkpoint_ns"))
+    checkpoint_backend = _first_nonempty_text(
+        checkpoint.get("checkpoint_backend"),
+        memory.get("checkpoint_backend"),
+        "sqlite_metadata",
+    )
+    checkpoint_available = bool(checkpoint) or bool(memory.get("checkpoint_available"))
+    thread_matches = checkpoint_thread_id == normalized_run_id
+    memory_for_policy = {
+        **memory,
+        "checkpoint_available": checkpoint_available and thread_matches,
+    }
+    policy = execution_recovery_policy(
+        memory_for_policy,
+        work_item_status=_first_nonempty_text(work.get("status")) or None,
+    )
+    if checkpoint_available and not thread_matches:
+        status = "needs_attention"
+        next_actions = ["inspect_checkpoint_thread_mismatch", "start_new_run_or_requeue"]
+        can_resume = False
+        should_retry = False
+        recovery_mode = "checkpoint_thread_mismatch"
+    else:
+        recovery_mode = policy["recovery_mode"]
+        can_resume = bool(policy["can_resume"])
+        should_retry = bool(policy["should_retry"])
+        status = _resume_readiness_status(
+            checkpoint_available=checkpoint_available,
+            can_resume=can_resume,
+            should_retry=should_retry,
+            work_item_recoverable=bool(policy["work_item_recoverable"]),
+        )
+        next_actions = _resume_readiness_next_actions(status)
+
+    resume_config = (
+        langgraph_resume_config(
+            normalized_run_id,
+            checkpoint_id=checkpoint_id or None,
+            checkpoint_ns=checkpoint_ns or None,
+        )
+        if checkpoint_available and thread_matches
+        else langgraph_thread_config(normalized_run_id)
+    )
+    return {
+        "status": status,
+        "run_id": normalized_run_id,
+        "thread_id": checkpoint_thread_id,
+        "thread_id_matches_run_id": thread_matches,
+        "checkpoint_available": checkpoint_available,
+        "checkpoint_backend": checkpoint_backend,
+        "checkpoint_phase": _first_nonempty_text(checkpoint.get("phase")) or None,
+        "checkpoint_status": _first_nonempty_text(checkpoint.get("status")) or None,
+        "work_item_status": policy["work_item_status"],
+        "work_item_recoverable": policy["work_item_recoverable"],
+        "recovery_mode": recovery_mode,
+        "can_resume": can_resume,
+        "should_retry": should_retry,
+        "resume_config": resume_config,
+        "next_actions": next_actions,
+        "boundary": (
+            "Execution resume readiness combines checkpoint metadata, stable thread_id=run_id, "
+            "execution-memory capability, and durable work item status; raw checkpoint channel values, "
+            "prompts, provider payloads, and worker lease internals are not included."
+        ),
+    }
+
+
 def build_checkpoint_metadata_record(
     *,
     run_id: str,
@@ -300,6 +383,34 @@ async def open_sqlite_checkpointer(db_path: str | Path):
     async with AsyncSqliteSaver.from_conn_string(str(resolved)) as saver:
         await saver.setup()
         yield saver
+
+
+def _resume_readiness_status(
+    *,
+    checkpoint_available: bool,
+    can_resume: bool,
+    should_retry: bool,
+    work_item_recoverable: bool,
+) -> str:
+    if can_resume:
+        return "ready_to_resume"
+    if checkpoint_available and should_retry:
+        return "metadata_guided_retry"
+    if should_retry:
+        return "queue_retry_without_checkpoint"
+    if work_item_recoverable:
+        return "waiting_for_worker"
+    return "not_recoverable"
+
+
+def _resume_readiness_next_actions(status: str) -> list[str]:
+    return {
+        "ready_to_resume": ["resume_langgraph_thread", "monitor_progress"],
+        "metadata_guided_retry": ["retry_work_item", "monitor_progress"],
+        "queue_retry_without_checkpoint": ["retry_or_wait_for_worker", "monitor_queue"],
+        "waiting_for_worker": ["monitor_queue", "check_worker_status"],
+        "not_recoverable": ["start_new_run", "inspect_failure_summary"],
+    }.get(status, ["inspect_execution_memory"])
 
 
 def _first_nonempty_text(*values: Any) -> str:
