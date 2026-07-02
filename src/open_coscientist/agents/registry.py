@@ -116,6 +116,21 @@ RAW_TRACE_PAYLOAD_KEYS = [
 ]
 
 
+REQUIRED_AGENT_SPEC_FIELDS = [
+    "agent_id",
+    "phase",
+    "role",
+    "input_contract",
+    "output_contract",
+    "prompt_template",
+    "tool_policy",
+    "failure_policy",
+    "observability_fields",
+    "configurable",
+    "degradation_when_disabled",
+]
+
+
 AGENT_REGISTRY: list[AgentSpec] = [
     {
         "agent_id": "supervisor_agent",
@@ -491,6 +506,97 @@ def get_trace_contract_payload() -> Dict[str, Any]:
     }
 
 
+def agent_registry_contract_audit(
+    specs: Optional[List[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    registry = [dict(spec) for spec in (specs if specs is not None else AGENT_REGISTRY)]
+    items: list[Dict[str, Any]] = []
+    agent_ids = [str(spec.get("agent_id") or "") for spec in registry if spec.get("agent_id")]
+    phases = [str(spec.get("phase") or "") for spec in registry if spec.get("phase")]
+
+    for index, spec in enumerate(registry):
+        phase = str(spec.get("phase") or "")
+        input_contract = spec.get("input_contract") if isinstance(spec.get("input_contract"), Mapping) else {}
+        output_contract = spec.get("output_contract") if isinstance(spec.get("output_contract"), Mapping) else {}
+        tool_policy = spec.get("tool_policy") if isinstance(spec.get("tool_policy"), Mapping) else {}
+        failure_policy = spec.get("failure_policy") if isinstance(spec.get("failure_policy"), Mapping) else {}
+        observability_fields = spec.get("observability_fields") if isinstance(spec.get("observability_fields"), list) else []
+        configurable = bool(spec.get("configurable"))
+        degradation = str(spec.get("degradation_when_disabled") or "")
+        missing_fields = [
+            field
+            for field in REQUIRED_AGENT_SPEC_FIELDS
+            if field not in spec or spec.get(field) in (None, "", [], {})
+        ]
+        contract_gaps: list[str] = []
+        if not input_contract.get("required"):
+            contract_gaps.append("input_contract.required")
+        if not output_contract.get("required"):
+            contract_gaps.append("output_contract.required")
+        if "direct_tool_calls" not in tool_policy:
+            contract_gaps.append("tool_policy.direct_tool_calls")
+        if not tool_policy.get("allowed_phase"):
+            contract_gaps.append("tool_policy.allowed_phase")
+        elif phase and tool_policy.get("allowed_phase") != phase:
+            contract_gaps.append("tool_policy.allowed_phase_mismatch")
+        if "retryable" not in failure_policy:
+            contract_gaps.append("failure_policy.retryable")
+        if not failure_policy.get("fallback"):
+            contract_gaps.append("failure_policy.fallback")
+        if configurable and not degradation:
+            contract_gaps.append("degradation_when_disabled")
+        if not configurable and degradation != "not_supported":
+            contract_gaps.append("required_phase_degradation_boundary")
+        missing_observability = [
+            field for field in BASE_OBSERVABILITY_FIELDS if field not in observability_fields
+        ]
+        items.append(
+            {
+                "index": index,
+                "agent_id": spec.get("agent_id"),
+                "phase": phase or None,
+                "configurable": configurable,
+                "missing_fields": missing_fields,
+                "contract_gaps": contract_gaps,
+                "missing_observability_fields": missing_observability,
+                "tool_policy_valid": not any(gap.startswith("tool_policy.") for gap in contract_gaps),
+                "failure_policy_valid": not any(gap.startswith("failure_policy.") for gap in contract_gaps),
+                "degradation_declared": bool(degradation),
+            }
+        )
+
+    duplicate_agent_ids = _duplicates(agent_ids)
+    duplicate_phases = _duplicates(phases)
+    missing_phases = [phase for phase in PHASE_ORDER if phase not in phases]
+    extra_phases = sorted(phase for phase in set(phases) if phase not in PHASE_ORDER)
+    counts = {
+        "agents": len(registry),
+        "missing_fields": sum(1 for item in items if item["missing_fields"]),
+        "contract_gaps": sum(1 for item in items if item["contract_gaps"]),
+        "missing_observability": sum(1 for item in items if item["missing_observability_fields"]),
+        "duplicate_agent_ids": len(duplicate_agent_ids),
+        "duplicate_phases": len(duplicate_phases),
+        "missing_phases": len(missing_phases),
+        "extra_phases": len(extra_phases),
+    }
+    return {
+        "status": _agent_registry_audit_status(registry=registry, counts=counts),
+        "registry_version": "paper_level_v1",
+        "expected_phase_count": len(PHASE_ORDER),
+        "phase_order": PHASE_ORDER,
+        "counts": counts,
+        "duplicate_agent_ids": duplicate_agent_ids,
+        "duplicate_phases": duplicate_phases,
+        "missing_phases": missing_phases,
+        "extra_phases": extra_phases,
+        "items": items,
+        "boundary": (
+            "Registry contract audit reports metadata coverage and capability degradation labels only; "
+            "raw prompts, provider payloads, tool arguments, and runtime trace bodies are not included."
+        ),
+    }
+
+
 def get_phase_status_payload(*, disabled_phases: Optional[List[str]] = None) -> Dict[str, Any]:
     disabled = {str(phase) for phase in (disabled_phases or [])}
     specs_by_phase = {spec["phase"]: spec for spec in AGENT_REGISTRY}
@@ -573,6 +679,7 @@ def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
         "degradation_count": phase_status_payload["degradation_count"],
         "invalid_disabled_phases": phase_status_payload["invalid_disabled_phases"],
         "phase_status_boundary": phase_status_payload["boundary"],
+        "registry_contract_audit": agent_registry_contract_audit(agents),
         "observability_contract": BASE_OBSERVABILITY_FIELDS,
         "trace_contract": get_trace_contract_payload(),
         "registry_version": "paper_level_v1",
@@ -632,6 +739,28 @@ def _trace_contract_audit_status(
     if unknown_phase_count > 0 or raw_payload_risk_count > 0:
         return "partial"
     return "ready"
+
+
+def _agent_registry_audit_status(
+    *,
+    registry: list[Mapping[str, Any]],
+    counts: Mapping[str, int],
+) -> str:
+    if not registry:
+        return "absent"
+    if any(int(counts.get(key, 0)) > 0 for key in counts if key != "agents"):
+        return "needs_attention"
+    return "ready"
+
+
+def _duplicates(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return sorted(duplicates)
 
 
 def _compact_trace_text(value: Any, *, max_length: int = 280) -> str:
