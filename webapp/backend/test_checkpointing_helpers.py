@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -73,3 +75,17 @@ def test_unsanitized_runtime_callback_is_not_serializable() -> None:
 
     serializability = checkpoint_state_serializability({"progress_callback": lambda *_args: None})
     assert serializability["serializable"] is False
+
+
+def test_open_sqlite_checkpointer_creates_async_saver() -> None:
+    from open_coscientist.checkpointing import open_sqlite_checkpointer
+
+    async def run_probe(db_path: Path) -> None:
+        async with open_sqlite_checkpointer(db_path) as saver:
+            assert hasattr(saver, "aput")
+            assert hasattr(saver, "aget_tuple")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "checkpoints.sqlite"
+        asyncio.run(run_probe(db_path))
+        assert db_path.exists()
