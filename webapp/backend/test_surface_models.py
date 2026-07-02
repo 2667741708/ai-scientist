@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from surface_models import hypothesis_surface_collection, hypothesis_surface_summary, run_surface_summary
+from surface_models import (
+    evidence_surface_collection,
+    evidence_surface_summary,
+    hypothesis_surface_collection,
+    hypothesis_surface_summary,
+    run_surface_summary,
+)
 
 
 def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> None:
@@ -103,6 +109,82 @@ def test_run_surface_summary_distinguishes_complete_grounded_and_error_modes() -
     assert failed["mode_boundary"]["mode"] == "live_model"
     assert failed["recoverable"] is False
     assert failed["next_actions"] == ["start_new_run", "inspect_failure_summary"]
+
+
+def test_evidence_surface_summary_hides_internal_refs_by_default() -> None:
+    evidence = {
+        "paper_id": "paper-secret",
+        "chunk_id": "chunk-secret",
+        "library_id": "library-secret",
+        "parse_run_id": "parse-secret",
+        "artifact_path": "D:/secret/artifact.png",
+        "title": "Parsed evidence paper",
+        "text": "SECRET FULLTEXT should be summarized, not shown as an internal reference.",
+        "source": "local_pdf",
+        "source_reliability": "parsed_fulltext",
+        "support_level": "fulltext",
+        "experiment_data_summary": "n=42 benchmark improved accuracy.",
+        "citation_map": [{"doi": "10.0000/example"}],
+    }
+
+    summary = evidence_surface_summary(evidence, index=0)
+
+    assert summary["index"] == 0
+    assert summary["source_title"] == "Parsed evidence paper"
+    assert summary["status"] == "supported"
+    assert summary["source_reliability"] == "parsed_fulltext"
+    assert summary["support_level"] == "fulltext"
+    assert summary["source_type"] == "local_pdf"
+    assert "parse_fulltext" not in summary["next_actions"]
+    assert "internal_refs" not in summary
+    assert "paper-secret" not in str(summary)
+    assert "chunk-secret" not in str(summary)
+    assert "D:/secret" not in str(summary)
+    assert "citation_map" not in str(summary)
+
+    expert_summary = evidence_surface_summary(
+        evidence,
+        index=0,
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["paper_id"] == "paper-secret"
+    assert expert_summary["internal_refs"]["chunk_id"] == "chunk-secret"
+    assert expert_summary["internal_refs"]["artifact_path"] == "D:/secret/artifact.png"
+    assert expert_summary["internal_refs"]["citation_count"] == 1
+
+
+def test_evidence_surface_collection_reports_boundaries_and_next_actions() -> None:
+    evidence_items = [
+        {
+            "title": "Metadata-only source",
+            "snippet": "Only metadata was available.",
+            "source_reliability": "metadata",
+            "support_level": "limited",
+        },
+        {
+            "title": "Parsed source",
+            "snippet": "Parsed fulltext supports the claim.",
+            "source_reliability": "parsed_fulltext",
+            "support_level": "fulltext",
+        },
+        {
+            "title": "Counter evidence",
+            "snippet": "This source contradicts the claim.",
+            "source_reliability": "parsed_fulltext",
+            "support_level": "contradicted",
+        },
+    ]
+
+    collection = evidence_surface_collection(evidence_items)
+
+    assert collection["evidence_count"] == 3
+    assert collection["support_level_counts"] == {"limited": 1, "fulltext": 1, "contradicted": 1}
+    assert collection["source_reliability_counts"] == {"metadata": 1, "parsed_fulltext": 2}
+    assert collection["boundary"]["status"] == "contradicted"
+    assert collection["items"][0]["status"] == "limited"
+    assert "parse_fulltext" in collection["items"][0]["next_actions"]
+    assert collection["items"][1]["status"] == "supported"
+    assert collection["items"][2]["status"] == "contradicted"
 
 
 def test_hypothesis_surface_summary_marks_origin_and_hides_raw_details() -> None:
