@@ -4510,6 +4510,97 @@ def memory_context_prompt_constraints(memory_context: Dict[str, Any]) -> List[st
     return constraints[:18]
 
 
+def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any]:
+    parent_run = memory_context.get("parent_run") if isinstance(memory_context.get("parent_run"), dict) else None
+    prior_hypotheses = memory_context.get("prior_hypotheses") if isinstance(memory_context.get("prior_hypotheses"), list) else []
+    user_feedback = memory_context.get("user_feedback") if isinstance(memory_context.get("user_feedback"), list) else []
+    evidence_summaries = (
+        memory_context.get("evidence_summaries")
+        if isinstance(memory_context.get("evidence_summaries"), list)
+        else []
+    )
+    related_runs = memory_context.get("related_runs") if isinstance(memory_context.get("related_runs"), list) else []
+    source_types: List[str] = []
+    if parent_run:
+        source_types.append("parent_run")
+    if prior_hypotheses:
+        source_types.append("prior_hypotheses")
+    if user_feedback:
+        source_types.append("chat_feedback")
+    if evidence_summaries:
+        source_types.append("knowledge_base")
+    if related_runs:
+        source_types.append("related_runs")
+
+    sections: List[Dict[str, Any]] = []
+    if parent_run:
+        sections.append(
+            {
+                "type": "parent_run",
+                "title": "Parent run",
+                "summary": _short_prompt_text(
+                    parent_run.get("summary") or parent_run.get("research_goal") or "Parent run context available.",
+                    260,
+                ),
+                "count": 1,
+            }
+        )
+    if prior_hypotheses:
+        sections.append(
+            {
+                "type": "prior_hypotheses",
+                "title": "Prior hypotheses",
+                "summary": f"{len(prior_hypotheses)} prior hypothesis summaries are available.",
+                "count": len(prior_hypotheses),
+            }
+        )
+    if user_feedback:
+        sections.append(
+            {
+                "type": "chat_feedback",
+                "title": "User feedback",
+                "summary": f"{len(user_feedback)} feedback item(s) are available for the next run.",
+                "count": len(user_feedback),
+            }
+        )
+    if evidence_summaries:
+        reliability_counts: Dict[str, int] = {}
+        support_counts: Dict[str, int] = {}
+        for item in evidence_summaries:
+            if not isinstance(item, dict):
+                continue
+            reliability = str(item.get("source_reliability") or "unknown")
+            support = str(item.get("support_level") or "unknown")
+            reliability_counts[reliability] = reliability_counts.get(reliability, 0) + 1
+            support_counts[support] = support_counts.get(support, 0) + 1
+        sections.append(
+            {
+                "type": "knowledge_base",
+                "title": "Evidence memory",
+                "summary": f"{len(evidence_summaries)} knowledge-base evidence summary item(s) matched this run.",
+                "count": len(evidence_summaries),
+                "source_reliability_counts": reliability_counts,
+                "support_level_counts": support_counts,
+            }
+        )
+
+    return {
+        "memory_scope": memory_context.get("memory_scope"),
+        "source_types": source_types,
+        "has_parent_run": bool(parent_run),
+        "parent_run_id": parent_run.get("run_id") if parent_run else None,
+        "prior_hypotheses_count": len(prior_hypotheses),
+        "user_feedback_count": len(user_feedback),
+        "evidence_summary_count": len(evidence_summaries),
+        "related_run_count": len(related_runs),
+        "sections": sections,
+        "boundary": (
+            "Summary-only memory view for UI disclosure. Raw chat messages, raw records, "
+            "internal paths, and raw JSON are not included."
+        ),
+    }
+
+
 def persist_run_record(record: RunRecord) -> None:
     try:
         knowledge_base.record_research_run(run_record_payload(record))
@@ -9846,7 +9937,7 @@ async def get_run_memory(run_id: str) -> Dict[str, Any]:
         library_id=record.request.library_id,
         memory_scope=record.request.memory_scope,
     )
-    return {"run_id": run_id, "memory": memory}
+    return {"run_id": run_id, "summary": memory_context_user_summary(memory), "memory": memory}
 
 
 @app.get("/api/runs/{run_id}/checkpoints")
