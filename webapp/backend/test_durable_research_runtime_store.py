@@ -689,6 +689,10 @@ def test_checkpoint_status_summary_reports_resume_boundary() -> None:
         assert missing["status"] == "not_available"
         assert missing["checkpoint_available"] is False
         assert missing["resume_supported"] is False
+        assert missing["can_resume"] is False
+        assert missing["should_retry"] is False
+        assert missing["recovery_action"] == "none"
+        assert missing["next_actions"] == ["continue_without_checkpoint"]
 
         store.persist_checkpoint_metadata(
             checkpoint_id="checkpoint_limited",
@@ -701,6 +705,10 @@ def test_checkpoint_status_summary_reports_resume_boundary() -> None:
         )
         limited = store.checkpoint_status_summary("run_checkpoint")
         assert limited["status"] == "limited"
+        assert limited["can_resume"] is False
+        assert limited["should_retry"] is True
+        assert limited["recovery_action"] == "retry"
+        assert limited["next_actions"] == ["retry_from_durable_queue", "inspect_checkpoint_metadata"]
         assert limited["resume_mode"] == "metadata_only_retry"
         assert limited["resume_config_fields"] == ["thread_id"]
         assert limited["latest_checkpoint"]["state_summary"]["completed_phase"] == "review"
@@ -719,6 +727,10 @@ def test_checkpoint_status_summary_reports_resume_boundary() -> None:
         ready = store.checkpoint_status_summary("run_checkpoint")
         assert ready["status"] == "ready"
         assert ready["resume_supported"] is True
+        assert ready["can_resume"] is True
+        assert ready["should_retry"] is False
+        assert ready["recovery_action"] == "resume"
+        assert ready["next_actions"] == ["resume_langgraph_thread", "monitor_progress"]
         assert ready["resume_mode"] == "langgraph_thread_resume"
         assert ready["resume_config_fields"] == ["thread_id", "checkpoint_id", "checkpoint_ns"]
         assert ready["latest_checkpoint"]["checkpoint_id"] == "checkpoint_ready"
