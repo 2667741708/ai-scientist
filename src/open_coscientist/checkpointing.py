@@ -9,6 +9,26 @@ from typing import Any, Dict, Mapping, Tuple
 RUNTIME_ONLY_STATE_KEYS = frozenset({"progress_callback", "tool_registry"})
 
 
+def langgraph_thread_config(
+    run_id: str,
+    *,
+    recursion_limit: int | None = 100,
+    checkpoint_ns: str | None = None,
+) -> Dict[str, Any]:
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required to build a stable LangGraph thread config")
+
+    configurable: Dict[str, Any] = {"thread_id": normalized_run_id}
+    if checkpoint_ns is not None:
+        configurable["checkpoint_ns"] = str(checkpoint_ns)
+
+    config: Dict[str, Any] = {"configurable": configurable}
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
+    return config
+
+
 def module_available(module_name: str) -> bool:
     try:
         return importlib.util.find_spec(module_name) is not None
