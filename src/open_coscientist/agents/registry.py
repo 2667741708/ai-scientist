@@ -388,6 +388,7 @@ def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
         "invalid_disabled_phases": phase_status_payload["invalid_disabled_phases"],
         "phase_status_boundary": phase_status_payload["boundary"],
         "observability_contract": BASE_OBSERVABILITY_FIELDS,
+        "trace_contract": get_trace_contract_payload(),
         "registry_version": "paper_level_v1",
         "boundary": "Static registry metadata; LangGraph nodes remain the runtime implementation.",
     }
