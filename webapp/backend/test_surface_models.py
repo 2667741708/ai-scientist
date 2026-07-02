@@ -1,6 +1,108 @@
 from __future__ import annotations
 
-from surface_models import hypothesis_surface_collection, hypothesis_surface_summary
+from surface_models import hypothesis_surface_collection, hypothesis_surface_summary, run_surface_summary
+
+
+def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> None:
+    run = {
+        "run_id": "run-secret",
+        "status": "queued",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "request": {
+            "demo_mode": True,
+            "literature_review": False,
+            "starting_hypotheses": ["User seed"],
+            "user_feedback": [{"text": "SECRET FEEDBACK"}],
+            "parent_run_id": "parent-secret",
+        },
+    }
+    work_snapshot = {
+        "counts": {"active": 1, "queued": 1, "retrying": 0, "running": 0},
+        "items": [
+            {
+                "work_item_id": "work-secret",
+                "status": "queued",
+                "status_label": "Queued",
+                "phase": "generate",
+                "next_action": "Wait for worker.",
+            }
+        ],
+    }
+    memory_summary = {
+        "memory_scope": "project",
+        "memory_sources": ["parent_run", "chat_feedback"],
+        "counts": {"user_feedback": 1, "prior_hypotheses": 2, "evidence_sources": 3},
+        "execution_memory": {"status": "limited"},
+        "evidence_boundary": {"status": "parsed_fulltext"},
+    }
+    recovery_policy = {
+        "recovery_mode": "queue_retry_without_checkpoint",
+        "can_resume": False,
+        "should_retry": True,
+        "next_action": "Continue through queue.",
+    }
+
+    summary = run_surface_summary(
+        run,
+        work_item_snapshot=work_snapshot,
+        memory_summary=memory_summary,
+        recovery_policy=recovery_policy,
+    )
+
+    assert summary["status"] == "queued"
+    assert summary["status_label"] == "Queued"
+    assert summary["phase"] == "generate"
+    assert summary["phase_label"] == "Generate"
+    assert summary["mode_boundary"]["mode"] == "demo_only"
+    assert summary["mode_boundary"]["scientific_claim_level"] == "not_scientific_evidence"
+    assert summary["recoverable"] is True
+    assert summary["next_actions"] == ["monitor_queue", "check_worker_status"]
+    assert summary["counts"] == {"hypotheses": 0, "starting_hypotheses": 1, "user_feedback": 1}
+    assert summary["queue"]["active_work_item_count"] == 1
+    assert summary["queue"]["current_work_status"] == "queued"
+    assert summary["memory"]["feedback_count"] == 1
+    assert summary["memory"]["evidence_source_count"] == 3
+    assert summary["memory"]["execution_memory_status"] == "limited"
+    assert summary["recovery"]["recovery_mode"] == "queue_retry_without_checkpoint"
+    assert "internal_refs" not in summary
+    assert "run-secret" not in str(summary)
+    assert "work-secret" not in str(summary)
+    assert "parent-secret" not in str(summary)
+    assert "SECRET FEEDBACK" not in str(summary)
+
+    expert_summary = run_surface_summary(
+        run,
+        work_item_snapshot=work_snapshot,
+        recovery_policy={"latest_checkpoint": {"checkpoint_id": "checkpoint-secret"}},
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["run_id"] == "run-secret"
+    assert expert_summary["internal_refs"]["parent_run_id"] == "parent-secret"
+    assert expert_summary["internal_refs"]["work_item_ids"] == ["work-secret"]
+    assert expert_summary["internal_refs"]["checkpoint_id"] == "checkpoint-secret"
+
+
+def test_run_surface_summary_distinguishes_complete_grounded_and_error_modes() -> None:
+    complete = run_surface_summary(
+        {
+            "status": "complete",
+            "hypotheses": [{"id": "h1"}, {"id": "h2"}],
+            "request": {"demo_mode": False, "literature_review": True},
+        },
+        memory_summary={"evidence_boundary": {"status": "experimental_data"}},
+    )
+    assert complete["mode_boundary"]["mode"] == "literature_grounded"
+    assert complete["counts"]["hypotheses"] == 2
+    assert complete["next_actions"] == ["inspect_hypotheses", "inspect_evidence", "design_experiment"]
+
+    failed = run_surface_summary(
+        {"status": "error", "request": {"demo_mode": False, "literature_review": False}},
+        recovery_policy={"can_resume": False, "should_retry": False},
+    )
+    assert failed["mode_boundary"]["mode"] == "live_model"
+    assert failed["recoverable"] is False
+    assert failed["next_actions"] == ["start_new_run", "inspect_failure_summary"]
 
 
 def test_hypothesis_surface_summary_marks_origin_and_hides_raw_details() -> None:
