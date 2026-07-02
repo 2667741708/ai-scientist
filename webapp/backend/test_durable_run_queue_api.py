@@ -69,6 +69,75 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
             assert "result_ref" not in active_item
 
 
+def test_create_run_persists_extended_supervision_fields(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        parent = studio.RunRecord(
+            run_id="parent-for-direct-create",
+            status="complete",
+            created_at=1.0,
+            updated_at=2.0,
+            request=studio.RunRequest(
+                research_goal="Parent run for direct extended supervision persistence",
+                demo_mode=True,
+                literature_review=False,
+            ),
+        )
+        studio.persist_run_record(parent)
+
+        response = client.post(
+            "/api/runs",
+            json={
+                "research_goal": "Find falsifiable mechanisms for natural language supervision persistence",
+                "model_name": "deepseek/deepseek-v4-pro",
+                "demo_mode": True,
+                "literature_review": False,
+                "initial_hypotheses": 2,
+                "iterations": 0,
+                "preferences": "Prioritize minimal validation experiments.",
+                "attributes": ["falsifiable", "evidence-aware"],
+                "constraints": ["avoid raw JSON in ordinary UI"],
+                "starting_hypotheses": [
+                    "User seed hypothesis should enter the candidate pool.",
+                ],
+                "user_feedback": [
+                    {
+                        "feedback_id": "feedback-direct-request",
+                        "target_type": "run",
+                        "target_ref": {"source": "create_run"},
+                        "feedback_type": "constraint",
+                        "text": "Use this feedback in the next generation loop.",
+                        "created_at": 10.0,
+                    }
+                ],
+                "parent_run_id": "parent-for-direct-create",
+                "refinement_mode": "continue_from_run",
+                "memory_scope": "library",
+                "library_id": "library-supervision",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        run_id = response.json()["run_id"]
+        run = client.get(f"/api/runs/{run_id}").json()
+        request = run["request"]
+        assert request["preferences"] == "Prioritize minimal validation experiments."
+        assert request["attributes"] == ["falsifiable", "evidence-aware"]
+        assert request["constraints"] == ["avoid raw JSON in ordinary UI"]
+        assert request["starting_hypotheses"] == [
+            "User seed hypothesis should enter the candidate pool.",
+        ]
+        assert request["user_feedback"][0]["feedback_id"] == "feedback-direct-request"
+        assert request["user_feedback"][0]["feedback_type"] == "constraint"
+        assert request["user_feedback"][0]["text"] == "Use this feedback in the next generation loop."
+        assert request["parent_run_id"] == "parent-for-direct-create"
+        assert request["refinement_mode"] == "continue_from_run"
+        assert request["memory_scope"] == "library"
+        assert request["library_id"] == "library-supervision"
+
+
 def test_worker_status_keeps_active_items_visible_with_completed_noise(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
