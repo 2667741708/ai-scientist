@@ -7978,10 +7978,13 @@ def worker_status_counts() -> Dict[str, int]:
 
 @app.get("/api/worker/status")
 async def get_worker_status() -> Dict[str, Any]:
+    from open_coscientist.checkpointing import execution_memory_status
+
     runtime = worker_runtime or build_worker_runtime()
     return {
         **runtime.status(),
         "auto_start_enabled": WORKER_AUTOSTART_ENABLED,
+        "execution_memory": execution_memory_status(),
         **worker_status_counts(),
     }
 
