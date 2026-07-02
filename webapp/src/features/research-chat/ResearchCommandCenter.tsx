@@ -16,7 +16,7 @@ import {
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { MarkdownText } from "../../components/content/MarkdownText";
-import { fetchBackgroundJob, fetchRun, fetchRunCheckpoints, fetchRunMemory, fetchToolResult, fetchWorkerStatus } from "../../lib/api/workbench";
+import { fetchBackgroundJob, fetchRun, fetchRunCheckpoints, fetchRunMemory, fetchRunTrace, fetchToolResult, fetchWorkerStatus } from "../../lib/api/workbench";
 import {
   cancelResearchChatAction,
   confirmResearchChatAction,
@@ -92,6 +92,20 @@ type CheckpointReadinessSummary = {
   checkpoint_backend?: string | null;
   has_langgraph_summary?: boolean;
   resume_boundary?: string;
+};
+
+type TraceDegradationSummary = {
+  phase?: string;
+  agent_id?: string;
+  degradation_reason?: string;
+};
+
+type RunTraceSummary = {
+  trace_count?: number;
+  phase_order?: string[];
+  degraded_phases?: TraceDegradationSummary[];
+  degradation_count?: number;
+  boundary?: string;
 };
 
 const starterPrompts = [
@@ -282,6 +296,11 @@ function formatCheckpointReadiness(value: unknown) {
     default:
       return formatBackendText(status);
   }
+}
+
+function formatTracePhaseList(phases: string[] | undefined) {
+  if (!phases?.length) return "暂无阶段摘要";
+  return phases.map((phase) => formatBackendText(phase)).join("、");
 }
 
 function inferResultActionTab(action: string): DetailTab | null {
@@ -486,6 +505,7 @@ export function ResearchCommandCenter({
             onOpenRanking={() => onSetDetailTab("tournament")}
           />
         ) : null}
+        {record ? <RunTraceSummaryDisclosure runId={record.run_id} onOpenProcess={() => onSetDetailTab("agents")} /> : null}
         {record ? <RunMemoryContextDisclosure runId={record.run_id} /> : null}
         {record ? <RunCheckpointDisclosure runId={record.run_id} /> : null}
         {record && record.status !== "complete" ? <WorkerQueueDisclosure runStatus={record.status} /> : null}
@@ -855,6 +875,80 @@ function RunCheckpointDisclosure({ runId }: { runId: string }) {
         </div>
       </dl>
       <p>{summary?.resume_boundary || boundary || "只展示恢复摘要；raw checkpoint state 默认隐藏。"}</p>
+    </details>
+  );
+}
+
+function RunTraceSummaryDisclosure({ runId, onOpenProcess }: { runId: string; onOpenProcess: () => void }) {
+  const [summary, setSummary] = useState<RunTraceSummary | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    void fetchRunTrace(runId)
+      .then((response) => {
+        if (cancelled) return;
+        const nextSummary = (response as { summary?: RunTraceSummary }).summary ?? null;
+        setSummary(nextSummary);
+        setStatus(memoryCount(nextSummary?.trace_count) > 0 ? "ready" : "empty");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  if (status === "empty") return null;
+
+  if (status === "loading") {
+    return (
+      <details className="expert-summary agent-process-disclosure">
+        <summary>正在读取研究步骤摘要</summary>
+        <p>这里会按阶段展示已执行的研究步骤，不展示 raw provider payload 或 prompt。</p>
+      </details>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <details className="expert-summary agent-process-disclosure">
+        <summary>研究步骤摘要暂不可读</summary>
+        <p>运行结果仍可查看；稍后可打开过程与证据详情重新检查。</p>
+      </details>
+    );
+  }
+
+  const degraded = summary?.degraded_phases ?? [];
+  return (
+    <details className="expert-summary agent-process-disclosure">
+      <summary>研究步骤摘要 · {memoryCount(summary?.trace_count)} 条过程记录</summary>
+      <dl>
+        <div>
+          <dt>已覆盖阶段</dt>
+          <dd>{formatTracePhaseList(summary?.phase_order)}</dd>
+        </div>
+        <div>
+          <dt>降级阶段</dt>
+          <dd>{memoryCount(summary?.degradation_count)} 个</dd>
+        </div>
+      </dl>
+      {degraded.length ? (
+        <div className="chat-inline-options" aria-label="降级阶段">
+          {degraded.slice(0, 5).map((item, index) => (
+            <span key={`${item.phase ?? "phase"}-${index}`}>
+              {formatBackendText(item.phase || "unknown")}
+              {item.degradation_reason ? `：${formatBackendText(item.degradation_reason)}` : ""}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <p>{summary?.boundary || "只展示阶段摘要；完整 trace、工具调用和模板信息在专家详情中按需展开。"}</p>
+      <button type="button" className="button-secondary" onClick={onOpenProcess}>
+        打开过程与证据
+      </button>
     </details>
   );
 }
