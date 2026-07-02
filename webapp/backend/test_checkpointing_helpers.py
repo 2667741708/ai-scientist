@@ -22,12 +22,19 @@ def test_execution_memory_status_reports_sqlite_saver_boundary() -> None:
     assert status["thread_id_required"] is True
     assert status["thread_id_source"] == "run_id"
     assert status["checkpoint_backend"] in {"sqlite_metadata", "langgraph_sqlite"}
+    assert status["checkpointer_package"] == "langgraph-checkpoint-sqlite"
     assert "progress_callback" in status["runtime_only_state_keys"]
     assert "tool_registry" in status["runtime_only_state_keys"]
     if status["langgraph_checkpoint_sqlite_available"]:
         assert status["status"] == "ready"
+        assert status["resume_supported"] is True
+        assert status["resume_mode"] == "langgraph_thread_resume"
+        assert "thread_id=run_id" in status["resume_boundary"]
     else:
         assert status["status"] == "limited"
+        assert status["resume_supported"] is False
+        assert status["resume_mode"] == "metadata_only_retry"
+        assert "full LangGraph state resume remains limited" in status["resume_boundary"]
         assert "metadata-only" in status["boundary"]
 
 
