@@ -102,6 +102,36 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
         assert "required phases remain enabled" in status_payload["boundary"]
 
 
+def test_agent_trace_contract_canonicalizes_runtime_phase_aliases(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents.registry import (
+            canonical_trace_phase,
+            get_trace_contract_payload,
+        )
+
+        contract = get_trace_contract_payload()
+
+        assert canonical_trace_phase("rank") == "ranking"
+        assert canonical_trace_phase("literature") == "literature_review"
+        assert canonical_trace_phase("generation") == "generate"
+        assert canonical_trace_phase("unknown") is None
+        assert contract["phase_aliases"]["dedupe"] == "proximity"
+        assert contract["phase_index"]["review"]["agent_id"] == "hypothesis_review_agent"
+        assert contract["phase_index"]["review"]["prompt_template"] == "prompts/review.md"
+        assert contract["required_fields"] == [
+            "phase",
+            "agent_id",
+            "role",
+            "prompt_template",
+            "output_summary",
+        ]
+        assert "degradation_reason" in contract["optional_fields"]
+        assert "raw provider payloads" in contract["boundary"]
+
+
 def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
