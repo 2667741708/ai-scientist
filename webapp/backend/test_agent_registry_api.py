@@ -150,6 +150,42 @@ def test_agent_registry_payload_marks_requested_disabled_phases(monkeypatch) -> 
         ]
 
 
+def test_agent_registry_payload_normalizes_disabled_phase_aliases(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents import get_agent_registry_payload
+
+        payload = get_agent_registry_payload(
+            public=True,
+            disabled_phases=[" literature ", "rank", "unknown_vendor_phase"],
+        )
+        statuses = {item["phase"]: item for item in payload["phase_statuses"]}
+
+        assert payload["requested_disabled_phases"] == [
+            "literature_review",
+            "ranking",
+            "unknown_vendor_phase",
+        ]
+        assert statuses["literature_review"]["enabled"] is False
+        assert statuses["ranking"]["enabled"] is True
+        assert statuses["ranking"]["degradation_reason"] is None
+        assert payload["unknown_disabled_phases"] == ["unknown_vendor_phase"]
+        assert payload["invalid_disabled_phases"] == [
+            {
+                "phase": "unknown_vendor_phase",
+                "label": "Unknown Vendor Phase",
+                "reason": "unknown_phase",
+            },
+            {
+                "phase": "ranking",
+                "label": "Tournament ranking",
+                "reason": "required_phase_cannot_be_disabled",
+            },
+        ]
+
+
 def test_agent_registry_contract_audit_flags_incomplete_specs(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     load_studio_app(monkeypatch, tempdir.name)
