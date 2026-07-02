@@ -65,6 +65,7 @@ class ResearchWorkerRuntime:
                 self._running_tasks.add(task)
                 task.add_done_callback(self._running_tasks.discard)
         queue_status_counts = self._queue_status_counts()
+        queue_count_summary = self._queue_count_summary(queue_status_counts)
         return {
             "enabled": self.enabled,
             "owner": self.owner,
@@ -75,11 +76,13 @@ class ResearchWorkerRuntime:
             "leased_count": len(leased),
             "running_count": len(self._running_tasks),
             "queue_status_counts": queue_status_counts,
+            **queue_count_summary,
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
 
     def status(self) -> Dict[str, Any]:
+        queue_status_counts = self._queue_status_counts()
         return {
             "enabled": self.enabled,
             "owner": self.owner,
@@ -87,7 +90,8 @@ class ResearchWorkerRuntime:
             "lease_seconds": self.lease_seconds,
             "poll_seconds": self.poll_seconds,
             "running_count": len([task for task in self._running_tasks if not task.done()]),
-            "queue_status_counts": self._queue_status_counts(),
+            "queue_status_counts": queue_status_counts,
+            **self._queue_count_summary(queue_status_counts),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
@@ -101,6 +105,15 @@ class ResearchWorkerRuntime:
         except Exception as exc:  # pragma: no cover - defensive status reporting
             self._last_error = str(exc)
             return {}
+
+    def _queue_count_summary(self, counts: Dict[str, int]) -> Dict[str, int]:
+        return {
+            "queued_count": int(counts.get("queued", 0)),
+            "leased_count_total": int(counts.get("leased", 0)),
+            "retrying_count": int(counts.get("retrying", 0)),
+            "active_work_item_count": int(counts.get("active", 0)),
+            "error_count": int(counts.get("error", 0)),
+        }
 
     async def _run_loop(self) -> None:
         assert self._stop_event is not None
