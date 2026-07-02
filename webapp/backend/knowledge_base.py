@@ -2915,6 +2915,144 @@ class KnowledgeBaseStore:
             }
         return summary
 
+    def memory_context_prompt_packet(self, memory_context: Dict[str, Any]) -> Dict[str, Any]:
+        policy = (
+            memory_context.get("injection_policy")
+            if isinstance(memory_context.get("injection_policy"), dict)
+            else {}
+        )
+        parent_run = memory_context.get("parent_run") if isinstance(memory_context.get("parent_run"), dict) else {}
+        related_runs = (
+            memory_context.get("related_runs")
+            if isinstance(memory_context.get("related_runs"), list)
+            else []
+        )
+        prior_hypotheses = (
+            memory_context.get("prior_hypotheses")
+            if isinstance(memory_context.get("prior_hypotheses"), list)
+            else []
+        )
+        user_feedback = (
+            memory_context.get("user_feedback")
+            if isinstance(memory_context.get("user_feedback"), list)
+            else []
+        )
+        evidence_summaries = (
+            memory_context.get("evidence_summaries")
+            if isinstance(memory_context.get("evidence_summaries"), list)
+            else []
+        )
+        known_gaps = (
+            memory_context.get("known_gaps")
+            if isinstance(memory_context.get("known_gaps"), list)
+            else []
+        )
+        sections: list[Dict[str, Any]] = []
+        if parent_run:
+            sections.append(
+                {
+                    "section": "parent_run_summary",
+                    "items": [
+                        {
+                            "research_goal": self._safe_work_item_text(parent_run.get("research_goal"), max_length=240),
+                            "status": parent_run.get("status"),
+                            "hypothesis_count": int(parent_run.get("hypothesis_count") or 0),
+                        }
+                    ],
+                }
+            )
+        if related_runs:
+            sections.append(
+                {
+                    "section": "related_run_summaries",
+                    "items": [
+                        {
+                            "research_goal": self._safe_work_item_text(item.get("research_goal"), max_length=220),
+                            "status": item.get("status"),
+                            "hypothesis_count": int(item.get("hypothesis_count") or 0),
+                        }
+                        for item in related_runs[:5]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        if prior_hypotheses:
+            sections.append(
+                {
+                    "section": "prior_hypothesis_summaries",
+                    "items": [
+                        {
+                            "support_level": item.get("support_level"),
+                            "elo_rating": item.get("elo_rating"),
+                            "summary": self._safe_work_item_text(
+                                item.get("explanation") or item.get("text"),
+                                max_length=240,
+                            ),
+                        }
+                        for item in prior_hypotheses[:8]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        if user_feedback:
+            sections.append(
+                {
+                    "section": "feedback_type_and_target_summary",
+                    "items": [
+                        {
+                            "feedback_type": item.get("feedback_type") or "unknown",
+                            "target_type": item.get("target_type") or "unknown",
+                            "source": item.get("source") or "user",
+                        }
+                        for item in user_feedback[:20]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        if evidence_summaries:
+            sections.append(
+                {
+                    "section": "evidence_boundary_and_snippet_summaries",
+                    "items": [
+                        {
+                            "title": self._safe_work_item_text(item.get("title"), max_length=160),
+                            "section_type": item.get("section_type"),
+                            "source_reliability": item.get("source_reliability"),
+                            "support_level": item.get("support_level"),
+                            "summary": self._safe_work_item_text(
+                                item.get("experiment_data_summary") or item.get("snippet"),
+                                max_length=280,
+                            ),
+                        }
+                        for item in evidence_summaries[:8]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        if known_gaps:
+            sections.append(
+                {
+                    "section": "memory_limitations",
+                    "items": [
+                        {"summary": self._safe_work_item_text(str(item), max_length=180)}
+                        for item in known_gaps[:5]
+                    ],
+                }
+            )
+        return {
+            "mode": "summary_only",
+            "memory_scope": memory_context.get("memory_scope") or policy.get("memory_scope") or "project",
+            "target_prompts": list(policy.get("target_prompts") or ["supervisor", "generate", "review", "ranking"]),
+            "section_count": len(sections),
+            "sections": sections,
+            "raw_injection_allowed": False,
+            "excluded_raw_fields": list(policy.get("excluded_raw_fields") or []),
+            "boundary": (
+                "Prompt packet is summary-only. It excludes raw feedback text, chat messages, full hypothesis text, "
+                "checkpoint state, tool result JSON, provider payloads, and full PDF chunks."
+            ),
+        }
+
     def _active_work_item_row(
         self,
         connection: sqlite3.Connection,
