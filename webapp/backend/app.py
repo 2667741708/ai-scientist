@@ -1298,6 +1298,62 @@ def _looks_like_hypothesis_inspection_request(text: str) -> bool:
     return bool(_extract_hypothesis_index(text) is not None or (has_hypothesis_ref and asks_to_read))
 
 
+def _extract_feedback_type(text: str) -> Literal["accept", "reject", "edit", "prefer", "critique", "constraint"]:
+    if _contains_any(text, ["更偏好", "偏好", "优先", "prefer", "prioritize"]):
+        return "prefer"
+    if _contains_any(text, ["接受", "同意", "支持", "保留", "accept", "agree", "support", "keep"]):
+        return "accept"
+    if _contains_any(text, ["拒绝", "不要", "不接受", "错误", "不成立", "reject", "discard", "wrong", "invalid"]):
+        return "reject"
+    if _contains_any(text, ["修改", "改成", "重写", "修订", "edit", "rewrite", "revise"]):
+        return "edit"
+    if _contains_any(text, ["约束", "限制", "必须", "不能", "constraint", "must", "should not"]):
+        return "constraint"
+    return "critique"
+
+
+def _looks_like_hypothesis_feedback_request(text: str) -> bool:
+    has_hypothesis_ref = _extract_hypothesis_index(text) is not None or _contains_any(
+        text,
+        [
+            "这个假设",
+            "这条假设",
+            "当前假设",
+            "选中假设",
+            "selected hypothesis",
+            "this hypothesis",
+        ],
+    )
+    if not has_hypothesis_ref:
+        return False
+    return _contains_any(
+        text,
+        [
+            "太弱",
+            "不够",
+            "不成立",
+            "错误",
+            "问题",
+            "风险",
+            "反馈",
+            "偏好",
+            "更偏好",
+            "接受",
+            "拒绝",
+            "修改",
+            "修订",
+            "critique",
+            "feedback",
+            "prefer",
+            "accept",
+            "reject",
+            "revise",
+            "weak",
+            "risky",
+        ],
+    )
+
+
 def _asks_for_all_hypotheses(text: str) -> bool:
     return _contains_any(
         text,
@@ -1391,6 +1447,19 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
             "extractedInputs": {},
             "missingInputs": [],
             "userFacingReason": "用户请求解释当前研究运行状态。",
+        }
+    if _looks_like_hypothesis_feedback_request(text):
+        feedback_type = _extract_feedback_type(text)
+        return {
+            "intent": "apply_expert_feedback" if feedback_type in {"accept", "prefer", "constraint"} else "critique_generated_hypothesis",
+            "confidence": 0.84,
+            "extractedInputs": {
+                "hypothesis_index": hypothesis_index,
+                "feedback_type": feedback_type,
+                "feedback_text": text,
+            },
+            "missingInputs": [],
+            "userFacingReason": "用户正在对候选假设提供专家反馈，反馈应进入下一轮 continuation/refinement。",
         }
     if _looks_like_hypothesis_inspection_request(text):
         extracted: Dict[str, Any] = {}
@@ -1759,6 +1828,75 @@ def _inspect_hypothesis_result(context: ResearchChatContext, inputs: Dict[str, A
         "modeBoundary": _summarize_mode_boundary(record),
         "nextActions": ["解释 Elo 排名", "本地核验证据支撑", "生成可证伪实验设计", "解析更多 fulltext PDF"],
         "groundingBoundary": "run_audit",
+    }
+
+
+def _record_hypothesis_feedback_result(context: ResearchChatContext, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    record = _active_run_record(context)
+    if not record:
+        return {
+            "intent": inputs.get("intent") or "apply_expert_feedback",
+            "status": "needs_run",
+            "title": "还没有可记录反馈的研究运行",
+            "summary": "请先打开一个已有 run，或在假设详情中选中一条候选假设后再提交反馈。",
+            "nextActions": ["打开历史运行", "启动研究流程", "选中一个候选假设"],
+            "groundingBoundary": "human_feedback_memory",
+        }
+
+    index, hypothesis = _selected_hypothesis(record, context, inputs)
+    target_ref: Dict[str, Any] = {}
+    target_type: Literal["run", "hypothesis"] = "run"
+    hypothesis_title = "当前 run"
+    if hypothesis is not None and index is not None:
+        target_type = "hypothesis"
+        hypothesis_id = hypothesis.get("id") or hypothesis.get("hypothesis_id")
+        target_ref = {
+            "hypothesis_index": index,
+            "hypothesis_id": hypothesis_id,
+            "hypothesis_title": _hypothesis_title(hypothesis, index)[:240],
+        }
+        hypothesis_title = f"候选假设 {index + 1}"
+    elif context.selected_hypothesis_id:
+        target_type = "hypothesis"
+        target_ref = {"hypothesis_id": context.selected_hypothesis_id}
+        hypothesis_title = "选中假设"
+
+    feedback_text = str(inputs.get("feedback_text") or "").strip()[:4000]
+    feedback_type = str(inputs.get("feedback_type") or "critique")
+    item = knowledge_base.store_feedback_item(
+        run_id=record.run_id,
+        target_type=target_type,
+        target_ref=target_ref,
+        feedback_type=feedback_type,
+        text=feedback_text,
+        source="chat",
+    )
+    if not isinstance(record.expert_feedback, dict) or not record.expert_feedback:
+        initialize_expert_feedback_state(record)
+    feedback_items = record.expert_feedback.get("feedback_items")
+    if not isinstance(feedback_items, list):
+        feedback_items = []
+    feedback_items.append(item)
+    record.expert_feedback["status"] = "feedback_recorded"
+    record.expert_feedback["feedback_items"] = feedback_items[-50:]
+    record.expert_feedback["latest_feedback_id"] = item.get("feedback_id")
+    record.updated_at = time.time()
+    persist_run_record(record)
+
+    return {
+        "intent": inputs.get("intent") or "apply_expert_feedback",
+        "status": "complete",
+        "title": "反馈已记录",
+        "summary": (
+            f"我已把你对{hypothesis_title}的反馈保存到本地反馈记忆。"
+            "这条反馈会影响下一次 run 或 continuation，不会伪装成正在运行中的即时改写。"
+        ),
+        "runId": record.run_id,
+        "targetType": target_type,
+        "targetRef": target_ref,
+        "feedback": item,
+        "nextActions": ["基于当前 run 继续", "修订候选假设", "查看本 run 的反馈记录"],
+        "groundingBoundary": "human_feedback_memory",
     }
 
 
@@ -6434,6 +6572,14 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             session_id=session_id,
             assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
             state="complete",
+        )
+
+    if intent in {"critique_generated_hypothesis", "apply_expert_feedback"}:
+        result = _record_hypothesis_feedback_result(request.context, {**inputs, "intent": intent})
+        return _chat_turn_response(
+            session_id=session_id,
+            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
+            state="complete" if result.get("status") == "complete" else "needs_input",
         )
 
     if intent == "inspect_hypothesis":
