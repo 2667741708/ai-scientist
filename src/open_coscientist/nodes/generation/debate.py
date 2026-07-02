@@ -57,11 +57,66 @@ def _append_generation_feedback_focus(focus_areas: List[str], feedback_items: An
     return appended
 
 
+_GENERATION_PACKET_FIELDS = (
+    "status",
+    "support_level",
+    "elo_rating",
+    "summary",
+    "feedback_type",
+    "target_type",
+    "source",
+    "source_reliability",
+    "checkpoint_available",
+    "resume_supported",
+    "should_retry",
+    "recovery_action",
+    "resume_mode",
+    "phase",
+)
+
+
+def _append_generation_memory_prompt_packet_focus(
+    focus_areas: List[str],
+    memory_prompt_packet: Any,
+) -> int:
+    if not isinstance(memory_prompt_packet, dict):
+        return 0
+    sections = memory_prompt_packet.get("sections")
+    if not isinstance(sections, list):
+        return 0
+
+    appended = 0
+    for section in sections[:6]:
+        if not isinstance(section, dict):
+            continue
+        section_name = _short_generation_guidance(section.get("section") or "memory_section", 80)
+        items = section.get("items") if isinstance(section.get("items"), list) else []
+        for item in items[:2]:
+            if not isinstance(item, dict):
+                continue
+            fields: List[str] = []
+            for key in _GENERATION_PACKET_FIELDS:
+                value = item.get(key)
+                if value in (None, "", []):
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(_short_generation_guidance(entry, 80) for entry in value[:4])
+                fields.append(f"{key}={_short_generation_guidance(value, 180)}")
+            if fields:
+                focus_areas.append(
+                    f"[memory_prompt_packet] section={section_name}; "
+                    f"{'; '.join(fields[:8])}."
+                )
+                appended += 1
+    return appended
+
+
 def augment_generation_supervisor_guidance(
     supervisor_guidance: Dict[str, Any] | None,
     starting_hypotheses: Any,
     memory_context: Any,
     user_feedback: Any,
+    memory_prompt_packet: Any = None,
 ) -> Dict[str, Any] | None:
     generated_focus: List[str] = []
 
@@ -110,6 +165,10 @@ def augment_generation_supervisor_guidance(
             )
 
     _append_generation_feedback_focus(generated_focus, user_feedback, "user_feedback")
+    prompt_packet_count = _append_generation_memory_prompt_packet_focus(
+        generated_focus,
+        memory_prompt_packet,
+    )
     if not generated_focus:
         return supervisor_guidance
 
@@ -122,6 +181,11 @@ def augment_generation_supervisor_guidance(
         "[memory_generation_policy] Treat memory and feedback as summary-only guidance; "
         "do not expose raw ids or claim unsupported evidence."
     )
+    if prompt_packet_count:
+        focus_areas.append(
+            "[memory_prompt_packet_policy] Use summary-only packet fields to guide generation; "
+            "do not expose checkpoint refs, raw tool payloads, provider payloads, or internal ids."
+        )
     generation_phase["focus_areas"] = focus_areas
     workflow_plan["generation_phase"] = generation_phase
     augmented["workflow_plan"] = workflow_plan
@@ -171,6 +235,7 @@ async def _run_single_debate(
         state.get("starting_hypotheses"),
         state.get("memory_context"),
         state.get("user_feedback"),
+        state.get("memory_prompt_packet"),
     )
     preferences = state.get("preferences")
     attributes = state.get("attributes")
