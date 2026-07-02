@@ -2555,6 +2555,14 @@ class KnowledgeBaseStore:
                 for item in self.search_chunks(research_goal, limit=max(1, max_evidence), library_id=evidence_library_id)
             ]
             known_gaps = []
+        memory_sources = self._memory_source_types(
+            parent_run=parent_run,
+            related_runs=related_runs,
+            prior_hypotheses=prior_hypotheses,
+            feedback_items=feedback_items,
+            evidence_summaries=evidence_summaries,
+            known_gaps=known_gaps,
+        )
         return {
             "memory_scope": normalized_scope,
             "parent_run": self._run_memory_summary(parent_run) if isinstance(parent_run, dict) else None,
@@ -2562,6 +2570,8 @@ class KnowledgeBaseStore:
             "prior_hypotheses": prior_hypotheses,
             "user_feedback": feedback_items,
             "evidence_summaries": evidence_summaries,
+            "memory_sources": memory_sources,
+            "evidence_boundary": self._evidence_memory_boundary(evidence_summaries),
             "known_gaps": known_gaps,
             "memory_boundary": "Summaries only; raw records are not injected.",
         }
@@ -2669,6 +2679,62 @@ class KnowledgeBaseStore:
             "support_level": evidence.get("support_level"),
             "snippet": str(evidence.get("text") or evidence.get("snippet") or "")[:700],
             "experiment_data_summary": evidence.get("experiment_data_summary"),
+        }
+
+    def _memory_source_types(
+        self,
+        *,
+        parent_run: Optional[Dict[str, Any]],
+        related_runs: list[Dict[str, Any]],
+        prior_hypotheses: list[Dict[str, Any]],
+        feedback_items: list[Dict[str, Any]],
+        evidence_summaries: list[Dict[str, Any]],
+        known_gaps: list[str],
+    ) -> list[str]:
+        sources: list[str] = []
+        if isinstance(parent_run, dict):
+            sources.append("parent_run")
+        if related_runs:
+            sources.append("related_runs")
+        if prior_hypotheses:
+            sources.append("prior_hypotheses")
+        if feedback_items:
+            sources.append("chat_feedback")
+        if evidence_summaries:
+            sources.append("knowledge_base")
+        if known_gaps:
+            sources.append("memory_limitations")
+        return sources
+
+    def _evidence_memory_boundary(self, evidence_summaries: list[Dict[str, Any]]) -> Dict[str, Any]:
+        source_reliability_counts: Dict[str, int] = {}
+        support_level_counts: Dict[str, int] = {}
+        for evidence in evidence_summaries:
+            reliability = str(evidence.get("source_reliability") or "unknown")
+            support_level = str(evidence.get("support_level") or "unknown")
+            source_reliability_counts[reliability] = source_reliability_counts.get(reliability, 0) + 1
+            support_level_counts[support_level] = support_level_counts.get(support_level, 0) + 1
+
+        evidence_count = len(evidence_summaries)
+        parsed_fulltext_count = source_reliability_counts.get("parsed_fulltext", 0)
+        experimental_data_count = support_level_counts.get("experimental_data", 0)
+        status = "absent"
+        if evidence_count:
+            status = "parsed_fulltext" if parsed_fulltext_count else "limited"
+            if experimental_data_count:
+                status = "experimental_data"
+
+        return {
+            "status": status,
+            "evidence_count": evidence_count,
+            "parsed_fulltext_count": parsed_fulltext_count,
+            "experimental_data_count": experimental_data_count,
+            "source_reliability_counts": source_reliability_counts,
+            "support_level_counts": support_level_counts,
+            "boundary": (
+                "Evidence memory is summary-only. parsed_fulltext and experimental_data are stronger "
+                "than abstract, metadata, public_html, or unknown sources; absent evidence is not support."
+            ),
         }
 
     def create_research_task(
