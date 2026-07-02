@@ -168,6 +168,8 @@ def test_agent_trace_endpoint_returns_stable_phase_summary(monkeypatch) -> None:
         summary = payload["summary"]
         assert summary["trace_count"] == 3
         assert summary["phase_order"] == ["literature_review", "review", "ranking"]
+        assert summary["phase_labels"][0] == {"phase": "literature_review", "label": "Literature grounding"}
         assert summary["degradation_count"] == 1
         assert summary["degraded_phases"][0]["phase"] == "literature_review"
+        assert summary["degraded_phases"][0]["label"] == "Literature grounding"
         assert "raw provider payloads" in summary["boundary"]
