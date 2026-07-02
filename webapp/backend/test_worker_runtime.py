@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from knowledge_base import KnowledgeBaseStore
-from worker_runtime import ResearchWorkerRuntime
+from worker_runtime import ResearchWorkerRuntime, work_item_recovery_action
 
 
 @pytest.fixture
@@ -365,3 +365,69 @@ async def test_worker_user_facing_status_hides_worker_internals() -> None:
         assert "owner-secret" not in str(user_status)
         assert "SECRET ARGUMENT" not in str(user_status)
         assert "raw errors" in user_status["visibility_boundary"]
+
+
+def test_work_item_recovery_action_maps_queue_and_checkpoint_states_without_raw_refs() -> None:
+    resumable = work_item_recovery_action(
+        {
+            "work_item_id": "work-secret",
+            "run_id": "run-secret",
+            "status": "running",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "lease_owner": "owner-secret",
+            "arguments": {"provider_key": "SECRET PROVIDER KEY"},
+        },
+        resume_readiness={
+            "status": "ready_to_resume",
+            "can_resume": True,
+            "should_retry": False,
+            "checkpoint_id": "checkpoint-secret",
+        },
+    )
+
+    assert resumable == {
+        "status": "running",
+        "action": "resume",
+        "resume_readiness_status": "ready_to_resume",
+        "can_resume": True,
+        "should_retry": False,
+        "attempts": {"current": 1, "max": 3, "remaining": 2},
+        "next_actions": ["resume_langgraph_thread", "monitor_progress"],
+        "safe_default_fields": [
+            "status",
+            "action",
+            "resume_readiness_status",
+            "can_resume",
+            "should_retry",
+            "attempts",
+            "next_actions",
+        ],
+        "visibility_boundary": (
+            "Work item recovery action summarizes queue status, checkpoint readiness, retry budget, "
+            "and user-safe next actions; raw arguments, result refs, lease owners, internal IDs, "
+            "and provider payloads require expert disclosure."
+        ),
+    }
+    assert "work-secret" not in str(resumable)
+    assert "run-secret" not in str(resumable)
+    assert "owner-secret" not in str(resumable)
+    assert "checkpoint-secret" not in str(resumable)
+    assert "SECRET" not in str(resumable)
+
+    retrying = work_item_recovery_action(
+        {"status": "retrying", "attempt_count": 2, "max_attempts": 3},
+        resume_readiness={"status": "metadata_guided_retry", "should_retry": True},
+    )
+    assert retrying["action"] == "retry"
+    assert retrying["attempts"] == {"current": 2, "max": 3, "remaining": 1}
+    assert retrying["next_actions"] == ["retry_or_wait_for_worker", "monitor_queue"]
+
+    exhausted_error = work_item_recovery_action({"status": "error", "attempt_count": 3, "max_attempts": 3})
+    assert exhausted_error["action"] == "escalate"
+    assert exhausted_error["should_retry"] is False
+    assert exhausted_error["next_actions"] == ["inspect_failure_summary", "start_new_run_or_cancel"]
+
+    queued = work_item_recovery_action({"status": "queued", "attempt_count": 0, "max_attempts": 3})
+    assert queued["action"] == "wait"
+    assert queued["next_actions"] == ["monitor_queue", "check_worker_status"]
