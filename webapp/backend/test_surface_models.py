@@ -124,6 +124,8 @@ def test_runtime_readiness_surface_summary_hides_internal_refs_by_default() -> N
         "queue_status_counts": {"active": 2, "queued": 2, "running": 0, "retrying": 1, "error": 0},
         "active_work_item_snapshot": {
             "counts": {"active": 2, "queued": 2, "running": 0, "retrying": 1, "error": 0},
+            "recovery_action": "wait",
+            "recovery_action_counts": {"wait": 1, "retry": 1, "unblock": 0, "escalate": 0, "inspect": 0, "none": 0},
         },
     }
     execution_memory = {
@@ -168,6 +170,10 @@ def test_runtime_readiness_surface_summary_hides_internal_refs_by_default() -> N
     assert "raw errors" in summary["disclosure"]["expert_fields"]
     assert summary["worker"]["state"] == "disabled"
     assert summary["worker"]["queue_counts"]["queued"] == 2
+    assert summary["worker"]["recovery_action"] == "wait"
+    assert summary["worker"]["recovery_action_counts"]["retry"] == 1
+    assert "worker.recovery_action" in summary["disclosure"]["safe_default_fields"]
+    assert "worker.recovery_action_counts" in summary["disclosure"]["safe_default_fields"]
     assert summary["execution_memory"]["resume_supported"] is False
     assert summary["service_counts"]["permission_denied"] == 1
     assert "start_worker_or_manual_tick" in summary["next_actions"]
