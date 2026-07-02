@@ -26,6 +26,80 @@ RUN_STATUS_LABELS = {
 }
 
 
+def runtime_readiness_surface_summary(
+    *,
+    worker_status: Optional[Mapping[str, Any]] = None,
+    execution_memory: Optional[Mapping[str, Any]] = None,
+    service_statuses: Optional[Mapping[str, Any]] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    worker = _as_mapping(worker_status)
+    memory = _as_mapping(execution_memory)
+    services = _service_surface_items(_as_mapping(service_statuses))
+    queue_counts = _as_mapping(worker.get("queue_status_counts"))
+    active_snapshot = _as_mapping(worker.get("active_work_item_snapshot"))
+    active_counts = _as_mapping(active_snapshot.get("counts"))
+    counts = {
+        "active_work_items": _safe_int(active_counts.get("active") or queue_counts.get("active")) or 0,
+        "queued": _safe_int(active_counts.get("queued") or queue_counts.get("queued")) or 0,
+        "running": _safe_int(active_counts.get("running") or queue_counts.get("running")) or 0,
+        "retrying": _safe_int(active_counts.get("retrying") or queue_counts.get("retrying")) or 0,
+        "error": _safe_int(active_counts.get("error") or queue_counts.get("error")) or 0,
+    }
+    worker_enabled = bool(worker.get("enabled"))
+    worker_state = _worker_readiness_state(worker_enabled=worker_enabled, counts=counts)
+    execution_status = str(memory.get("status") or "not_available")
+    service_counts = _service_counts(services)
+    overall_status = _runtime_overall_status(
+        worker_state=worker_state,
+        execution_status=execution_status,
+        service_counts=service_counts,
+    )
+    summary = {
+        "status": overall_status,
+        "worker": {
+            "enabled": worker_enabled,
+            "state": worker_state,
+            "concurrency": _safe_int(worker.get("concurrency")) or 0,
+            "running_count": _safe_int(worker.get("running_count")) or counts["running"],
+            "queue_counts": counts,
+            "guidance": _worker_guidance(worker_state),
+        },
+        "execution_memory": {
+            "status": execution_status,
+            "resume_supported": bool(memory.get("resume_supported")),
+            "checkpoint_backend": memory.get("checkpoint_backend"),
+            "resume_mode": memory.get("resume_mode"),
+        },
+        "services": services,
+        "service_counts": service_counts,
+        "next_actions": _runtime_next_actions(
+            overall_status=overall_status,
+            worker_state=worker_state,
+            service_counts=service_counts,
+            execution_status=execution_status,
+        ),
+        "visibility_boundary": (
+            "Runtime readiness summaries expose worker state, queue counts, execution-memory state, "
+            "service availability, and recovery actions by default; owner IDs, endpoints, environment "
+            "variables, raw errors, and debug payloads require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "worker_owner": worker.get("owner"),
+            "lease_seconds": worker.get("lease_seconds"),
+            "poll_seconds": worker.get("poll_seconds"),
+            "last_tick_at": worker.get("last_tick_at"),
+            "last_error": worker.get("last_error"),
+            "service_debug": {
+                name: _as_mapping(status)
+                for name, status in _as_mapping(service_statuses).items()
+            },
+        }
+    return summary
+
+
 def run_confirmation_surface_summary(
     request_preview: Any,
     *,
@@ -430,6 +504,103 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _worker_readiness_state(*, worker_enabled: bool, counts: Mapping[str, int]) -> str:
+    if not worker_enabled:
+        return "disabled"
+    if int(counts.get("error", 0)) > 0:
+        return "needs_attention"
+    if int(counts.get("retrying", 0)) > 0:
+        return "retrying"
+    if int(counts.get("running", 0)) > 0:
+        return "running"
+    return "ready"
+
+
+def _worker_guidance(worker_state: str) -> str:
+    return {
+        "disabled": "Background worker is disabled; queued runs need an admin worker or manual tick.",
+        "needs_attention": "Some work items failed; inspect failures before retrying.",
+        "retrying": "Retryable work is waiting for the next worker tick.",
+        "running": "Worker is actively processing queued research work.",
+        "ready": "Worker is available for durable background execution.",
+    }.get(worker_state, "Inspect worker readiness before starting long-running work.")
+
+
+def _service_surface_items(service_statuses: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    items: list[Dict[str, Any]] = []
+    for name, raw_status in service_statuses.items():
+        status = _as_mapping(raw_status)
+        available = bool(status.get("available", status.get("ready", False)))
+        state = str(status.get("status") or ("ready" if available else "limited"))
+        items.append(
+            {
+                "service": str(name),
+                "status": state,
+                "available": available,
+                "summary": _compact_text(status.get("summary") or status.get("message") or "", max_length=180),
+                "required": bool(status.get("required", False)),
+            }
+        )
+    return items
+
+
+def _service_counts(services: list[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"ready": 0, "limited": 0, "offline": 0, "permission_denied": 0, "required_unavailable": 0}
+    for service in services:
+        status = str(service.get("status") or "limited")
+        if status in counts:
+            counts[status] += 1
+        elif service.get("available"):
+            counts["ready"] += 1
+        else:
+            counts["limited"] += 1
+        if service.get("required") and not service.get("available"):
+            counts["required_unavailable"] += 1
+    return counts
+
+
+def _runtime_overall_status(
+    *,
+    worker_state: str,
+    execution_status: str,
+    service_counts: Mapping[str, int],
+) -> str:
+    if service_counts.get("permission_denied", 0):
+        return "permission_denied"
+    if service_counts.get("required_unavailable", 0) or service_counts.get("offline", 0):
+        return "offline"
+    if worker_state == "disabled":
+        return "limited"
+    if worker_state in {"needs_attention", "retrying"}:
+        return "limited"
+    if execution_status in {"limited", "not_available"} or service_counts.get("limited", 0):
+        return "limited"
+    return "ready"
+
+
+def _runtime_next_actions(
+    *,
+    overall_status: str,
+    worker_state: str,
+    service_counts: Mapping[str, int],
+    execution_status: str,
+) -> list[str]:
+    actions: list[str] = []
+    if worker_state == "disabled":
+        actions.append("start_worker_or_manual_tick")
+    if worker_state in {"needs_attention", "retrying"}:
+        actions.append("inspect_queue")
+    if service_counts.get("required_unavailable", 0) or service_counts.get("offline", 0):
+        actions.append("restore_required_services")
+    if service_counts.get("permission_denied", 0):
+        actions.append("resolve_permissions")
+    if execution_status in {"limited", "not_available"}:
+        actions.append("continue_with_metadata_only_execution_memory")
+    if not actions:
+        actions.append("start_or_continue_research_run" if overall_status == "ready" else "inspect_readiness_details")
+    return actions
 
 
 def _confirmation_validity(*, research_goal: str, mode_boundary: Mapping[str, Any]) -> Dict[str, Any]:
