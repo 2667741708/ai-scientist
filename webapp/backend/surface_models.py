@@ -31,7 +31,7 @@ def hypothesis_surface_summary(
     technical_text = _first_text(source, ("technical_hypothesis", "hypothesis", "text"))
     plain_summary = _first_text(source, ("plain_explanation", "explanation", "summary", "rationale"))
     if not title:
-        title = _title_from_text(technical_text or plain_summary or f"Hypothesis {index + 1 if index is not None else ''}")
+        title = _title_from_text(plain_summary or technical_text or f"Hypothesis {index + 1 if index is not None else ''}")
     if not plain_summary:
         plain_summary = _compact_text(technical_text, max_length=220)
 
