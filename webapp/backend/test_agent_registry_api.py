@@ -116,3 +116,58 @@ def test_agent_trace_entries_include_registry_metadata(monkeypatch) -> None:
         assert by_live_phase["literature_review"].agent_id == "literature_grounding_agent"
         assert by_live_phase["literature_review"].degradation_reason == "literature_review_disabled_latent_knowledge_boundary"
         assert "not evidence" in by_live_phase["literature_review"].output
+
+
+def test_agent_trace_endpoint_returns_stable_phase_summary(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        record = studio.RunRecord(
+            run_id="run-trace-summary",
+            status="complete",
+            created_at=1.0,
+            updated_at=1.0,
+            request=studio.RunRequest(
+                research_goal="Verify agent trace endpoint summary",
+                demo_mode=False,
+                literature_review=False,
+            ),
+            agent_trace=[
+                studio.agent_trace_from_registry(
+                    agent="Ranking",
+                    event_id="trace-ranking",
+                    phase="rank",
+                    output="Ranked hypotheses.",
+                    confidence=1.0,
+                ),
+                studio.agent_trace_from_registry(
+                    agent="Review",
+                    event_id="trace-review",
+                    phase="review",
+                    output="Reviewed hypotheses.",
+                    confidence=1.0,
+                ),
+                studio.agent_trace_from_registry(
+                    agent="Literature",
+                    event_id="trace-literature",
+                    phase="literature_review",
+                    output="Literature review disabled.",
+                    confidence=1.0,
+                    degradation_reason="literature_review_disabled_latent_knowledge_boundary",
+                ),
+            ],
+        )
+        studio.persist_run_record(record)
+
+        response = client.get("/api/runs/run-trace-summary/trace")
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert len(payload["agent_trace"]) == 3
+        summary = payload["summary"]
+        assert summary["trace_count"] == 3
+        assert summary["phase_order"] == ["literature_review", "review", "ranking"]
+        assert summary["degradation_count"] == 1
+        assert summary["degraded_phases"][0]["phase"] == "literature_review"
+        assert "raw provider payloads" in summary["boundary"]
