@@ -219,10 +219,13 @@ def test_continue_run_enqueues_child_with_parent_memory(monkeypatch) -> None:
         summary = memory["summary"]
         assert summary["has_parent_run"] is True
         assert summary["prior_hypotheses_count"] == 1
-        assert summary["user_feedback_count"] == 1
+        assert summary["user_feedback_count"] == 2
         assert "parent_run" in summary["source_types"]
         assert "chat_feedback" in summary["source_types"]
         assert "raw JSON" in summary["boundary"]
+        memory_feedback = {item["text"] for item in memory["memory"]["user_feedback"]}
+        assert "Prefer continuation hypotheses with falsifiable evidence checks." in memory_feedback
+        assert "Use feedback only for the next run, not as instant result editing." in memory_feedback
 
         worker_status = client.get("/api/worker/status").json()
         active_child_items = [
