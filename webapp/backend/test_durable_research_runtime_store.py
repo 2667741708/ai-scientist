@@ -66,6 +66,41 @@ def test_research_work_item_failure_uses_retry_budget() -> None:
         assert failed["error_message"] == "parse failed"
 
 
+def test_research_work_item_lease_can_be_renewed_by_owner() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.long_running",
+            arguments={},
+        )
+        leased = store.lease_work_items(owner="worker-renew", limit=1, lease_seconds=1)[0]
+        assert store.renew_work_item_lease(item["work_item_id"], "other-worker", lease_seconds=30) is False
+
+        assert store.renew_work_item_lease(item["work_item_id"], "worker-renew", lease_seconds=30) is True
+        renewed = store.get_work_item(item["work_item_id"])
+        assert renewed["lease_owner"] == "worker-renew"
+        assert renewed["lease_expires_at"] > leased["lease_expires_at"]
+
+        store.complete_work_item(item["work_item_id"], {"ok": True})
+        assert store.renew_work_item_lease(item["work_item_id"], "worker-renew", lease_seconds=30) is False
+
+        expired = store.enqueue_work_item(
+            workflow_name="workflow.expired",
+            arguments={},
+        )
+        store.lease_work_items(owner="worker-expired", limit=1, lease_seconds=1)
+        with store._connection() as connection:
+            connection.execute(
+                """
+                UPDATE research_work_items
+                SET lease_expires_at = ?
+                WHERE work_item_id = ?
+                """,
+                (0, expired["work_item_id"]),
+            )
+        assert store.renew_work_item_lease(expired["work_item_id"], "worker-expired", lease_seconds=30) is False
+
+
 def test_research_work_item_can_be_blocked_for_manual_recovery() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
