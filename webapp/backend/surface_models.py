@@ -153,6 +153,17 @@ def runtime_readiness_surface_summary(
     }
     worker_enabled = bool(worker.get("enabled"))
     worker_state = _worker_readiness_state(worker_enabled=worker_enabled, counts=counts)
+    worker_recovery_action = _work_queue_surface_recovery_action(
+        snapshot={},
+        active_snapshot=active_snapshot,
+        worker=worker,
+        item_previews=[],
+    )
+    worker_recovery_action_counts = _work_queue_surface_recovery_action_counts(
+        snapshot={},
+        active_snapshot=active_snapshot,
+        worker=worker,
+    )
     execution_status = str(memory.get("status") or "not_available")
     service_counts = _service_counts(services)
     overall_status = _runtime_overall_status(
@@ -174,6 +185,8 @@ def runtime_readiness_surface_summary(
             "concurrency": _safe_int(worker.get("concurrency")) or 0,
             "running_count": _safe_int(worker.get("running_count")) or counts["running"],
             "queue_counts": counts,
+            "recovery_action": worker_recovery_action,
+            "recovery_action_counts": worker_recovery_action_counts,
             "guidance": _worker_guidance(worker_state),
         },
         "execution_memory": {
@@ -198,6 +211,8 @@ def runtime_readiness_surface_summary(
                 "audience",
                 "worker.state",
                 "worker.queue_counts",
+                "worker.recovery_action",
+                "worker.recovery_action_counts",
                 "execution_memory.status",
                 "service_counts",
                 "next_actions",
