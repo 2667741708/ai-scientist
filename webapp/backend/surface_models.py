@@ -354,6 +354,89 @@ def ranking_surface_summary(
     return summary
 
 
+def experiment_design_surface_summary(
+    experiment: Any,
+    *,
+    evidence_items: Optional[Iterable[Any]] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = _as_mapping(experiment)
+    plan_text = _first_text(source, ("experiment_plan", "experiment", "validation_plan", "plan", "summary"))
+    evidence_collection = evidence_surface_collection(
+        evidence_items if evidence_items is not None else _first_value(source, ("experimental_support_summaries", "evidence_items", "evidence")),
+        include_internal_refs=include_internal_refs,
+    )
+    sections = {
+        "observable_variables": _surface_text_items(
+            _first_value(source, ("observable_variables", "observables", "variables", "measured_variables")),
+            max_items=6,
+            max_length=140,
+        ),
+        "controls": _surface_text_items(
+            _first_value(source, ("controls", "control_conditions", "baselines", "negative_controls")),
+            max_items=6,
+            max_length=140,
+        ),
+        "metrics": _surface_text_items(
+            _first_value(source, ("metrics", "key_metrics", "success_metrics", "evaluation_metrics")),
+            max_items=6,
+            max_length=140,
+        ),
+        "failure_conditions": _surface_text_items(
+            _first_value(source, ("failure_conditions", "failure_criteria", "falsification_criteria", "falsification_tests", "failure_modes")),
+            max_items=8,
+            max_length=180,
+        ),
+        "alternative_explanations": _surface_text_items(
+            _first_value(source, ("alternative_explanations", "confounds", "counter_hypotheses", "alternative_explanation_tests")),
+            max_items=6,
+            max_length=180,
+        ),
+        "required_data": _surface_text_items(
+            _first_value(source, ("required_data", "data_requirements", "needed_evidence", "datasets")),
+            max_items=6,
+            max_length=160,
+        ),
+    }
+    minimal_path = _first_text(source, ("minimal_validation_path", "minimum_viable_experiment", "validation_path", "next_step"))
+    if not minimal_path:
+        minimal_path = _compact_text(plan_text, max_length=220)
+    missing_sections = _experiment_missing_sections(plan_text=plan_text, sections=sections, minimal_path=minimal_path)
+    status = _experiment_design_status(missing_sections=missing_sections, evidence_boundary=evidence_collection.get("boundary"))
+    summary = {
+        "status": status,
+        "hypothesis": hypothesis_surface_summary(source) if source else None,
+        "plan_summary": _compact_text(plan_text, max_length=420),
+        "observable_variables": sections["observable_variables"],
+        "controls": sections["controls"],
+        "metrics": sections["metrics"],
+        "failure_conditions": sections["failure_conditions"],
+        "alternative_explanations": sections["alternative_explanations"],
+        "required_data": sections["required_data"],
+        "minimal_validation_path": _compact_text(minimal_path, max_length=260),
+        "evidence": {
+            "evidence_count": evidence_collection.get("evidence_count", 0),
+            "boundary": evidence_collection.get("boundary"),
+            "support_level_counts": evidence_collection.get("support_level_counts", {}),
+        },
+        "missing_sections": missing_sections,
+        "next_actions": _experiment_next_actions(status=status, missing_sections=missing_sections),
+        "visibility_boundary": (
+            "Experiment design summaries expose the selected hypothesis, plan summary, variables, controls, "
+            "metrics, failure conditions, alternative explanations, required data, and evidence boundary by default; "
+            "execution job IDs, scripts, local paths, raw tool payloads, and provider diagnostics require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "hypothesis_id": _first_value(source, ("id", "hypothesis_id")),
+            "experiment_id": _first_value(source, ("experiment_id", "job_id", "experiment_job_id")),
+            "script_path": _first_value(source, ("script_path", "local_path", "artifact_path")),
+            "raw_source": dict(source),
+        }
+    return summary
+
+
 def evidence_surface_summary(
     evidence: Any,
     *,
@@ -466,6 +549,22 @@ def _record_items(values: Any) -> list[Mapping[str, Any]]:
         except TypeError:
             candidates = [values]
     return [item for item in (_as_mapping(value) for value in candidates) if item]
+
+
+def _surface_text_items(value: Any, *, max_items: int, max_length: int) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        candidates = [f"{key}: {item}" for key, item in value.items() if item is not None and item != ""]
+    elif isinstance(value, (list, tuple, set)):
+        candidates = list(value)
+    else:
+        candidates = [value]
+    return [
+        compact
+        for compact in (_compact_text(item, max_length=max_length) for item in candidates)
+        if compact
+    ][:max_items]
 
 
 def _first_value(source: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
@@ -674,6 +773,49 @@ def _ranking_next_actions(status: str) -> list[str]:
     if status == "limited":
         return ["inspect_matchup_details", "rerun_ranking_if_needed"]
     return ["inspect_top_ranked_hypotheses", "inspect_matchup_details", "design_experiment"]
+
+
+def _experiment_missing_sections(
+    *,
+    plan_text: str,
+    sections: Mapping[str, list[str]],
+    minimal_path: str,
+) -> list[str]:
+    missing: list[str] = []
+    if not plan_text:
+        missing.append("plan_summary")
+    for section in ("observable_variables", "controls", "metrics", "failure_conditions", "alternative_explanations", "required_data"):
+        if not sections.get(section):
+            missing.append(section)
+    if not minimal_path:
+        missing.append("minimal_validation_path")
+    return missing
+
+
+def _experiment_design_status(*, missing_sections: list[str], evidence_boundary: Any) -> str:
+    boundary = _as_mapping(evidence_boundary)
+    if "plan_summary" in missing_sections:
+        return "absent"
+    if boundary.get("status") == "contradicted":
+        return "needs_review"
+    required_sections = {"observable_variables", "controls", "metrics", "failure_conditions", "minimal_validation_path"}
+    if required_sections.intersection(missing_sections):
+        return "limited"
+    return "ready"
+
+
+def _experiment_next_actions(*, status: str, missing_sections: list[str]) -> list[str]:
+    if status == "absent":
+        return ["draft_experiment_plan", "select_hypothesis"]
+    actions: list[str] = []
+    if missing_sections:
+        actions.append("complete_missing_sections")
+    if status == "needs_review":
+        actions.append("inspect_counter_evidence")
+    actions.extend(["inspect_evidence", "export_to_report"])
+    if status == "ready":
+        actions.insert(1, "prepare_execution_workflow")
+    return actions
 
 
 def _worker_readiness_state(*, worker_enabled: bool, counts: Mapping[str, int]) -> str:
