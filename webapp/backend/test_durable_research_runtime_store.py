@@ -251,6 +251,8 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         assert memory["parent_run"]["run_id"] == "run_memory"
         assert memory["prior_hypotheses"][0]["hypothesis_id"] == "hyp_1"
         assert {item["feedback_type"] for item in memory["user_feedback"]} == {"critique", "prefer"}
+        assert memory["execution_memory"]["status"] == "limited"
+        assert memory["execution_memory"]["latest_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
         assert memory["memory_sources"] == [
             "parent_run",
             "prior_hypotheses",
@@ -328,6 +330,7 @@ def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
         assert current_memory["evidence_summaries"] == []
         assert current_memory["memory_sources"] == ["memory_limitations"]
         assert current_memory["evidence_boundary"]["status"] == "absent"
+        assert current_memory["execution_memory"]["status"] == "not_available"
         assert "current_run scope" in current_memory["known_gaps"][0]
         assert project_memory["evidence_summaries"]
         assert "knowledge_base" in project_memory["memory_sources"]
