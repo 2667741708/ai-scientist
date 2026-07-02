@@ -149,6 +149,15 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+class FeedbackItem(BaseModel):
+    feedback_id: Optional[str] = None
+    target_type: Literal["run", "hypothesis", "ranking", "evidence", "experiment"] = "run"
+    target_ref: Dict[str, Any] = Field(default_factory=dict)
+    feedback_type: Literal["accept", "reject", "edit", "prefer", "critique", "constraint"] = "critique"
+    text: str = Field(..., min_length=1, max_length=4000)
+    created_at: Optional[float] = None
+
+
 class RunRequest(BaseModel):
     research_goal: str = Field(..., min_length=8)
     model_name: str = "deepseek/deepseek-v4-pro"
@@ -158,6 +167,15 @@ class RunRequest(BaseModel):
     iterations: int = Field(0, ge=0, le=3)
     min_references: int = Field(2, ge=0, le=12)
     max_references: int = Field(6, ge=0, le=12)
+    preferences: Optional[str] = Field(default=None, max_length=4000)
+    attributes: List[str] = Field(default_factory=list, max_length=20)
+    constraints: List[str] = Field(default_factory=list, max_length=40)
+    starting_hypotheses: List[str] = Field(default_factory=list, max_length=20)
+    user_feedback: List[FeedbackItem] = Field(default_factory=list, max_length=50)
+    parent_run_id: Optional[str] = Field(default=None, max_length=80)
+    refinement_mode: Literal["new_run", "continue_from_run", "revise_hypotheses"] = "new_run"
+    memory_scope: Literal["current_run", "project", "library", "global"] = "project"
+    library_id: Optional[str] = Field(default=None, max_length=120)
 
 
 class TranslationRequest(BaseModel):
@@ -4754,6 +4772,19 @@ async def run_real(record: RunRecord) -> None:
             "literature evidence is below the requested minimum, explicitly mark the evidence "
             "gap instead of overstating certainty."
         )
+        memory_context = knowledge_base.build_memory_context(
+            research_goal=record.request.research_goal,
+            parent_run_id=record.request.parent_run_id,
+            library_id=record.request.library_id,
+            memory_scope=record.request.memory_scope,
+        )
+        combined_constraints = [
+            f"[user_constraint] {constraint}"
+            for constraint in record.request.constraints
+            if constraint.strip()
+        ]
+        combined_constraints.append(f"[reference_policy] {reference_constraints}")
+        combined_constraints.append("[memory_boundary] Memory context is summary-only; raw records are not injected.")
 
         result = await generator.generate_hypotheses(
             research_goal=record.request.research_goal,
@@ -4761,7 +4792,15 @@ async def run_real(record: RunRecord) -> None:
             opts={
                 "enable_literature_review_node": record.request.literature_review,
                 "enable_tool_calling_generation": False,
-                "constraints": reference_constraints,
+                "preferences": record.request.preferences,
+                "attributes": record.request.attributes,
+                "constraints": combined_constraints,
+                "memory_context": memory_context,
+                "user_feedback": [item.model_dump() for item in record.request.user_feedback],
+                "user_inputs": {
+                    "starting_hypotheses": record.request.starting_hypotheses,
+                    "literature": memory_context.get("evidence_summaries", []),
+                },
             },
             stream=False,
         )
@@ -4783,6 +4822,13 @@ async def run_real(record: RunRecord) -> None:
         record.metrics = serialize_value(result.get("metrics", {}))
         record.metrics["workflow_tool_policy_enforced"] = True
         record.metrics["direct_tool_calling_generation"] = False
+        record.metrics["memory_context_used"] = {
+            "memory_scope": memory_context.get("memory_scope"),
+            "parent_run_id": record.request.parent_run_id,
+            "feedback_count": len(record.request.user_feedback),
+            "starting_hypotheses_count": len(record.request.starting_hypotheses),
+            "evidence_summary_count": len(memory_context.get("evidence_summaries", [])),
+        }
         apply_citation_provenance_qa(record)
         initialize_expert_feedback_state(record)
         add_event(record, "Complete", "Run finalized", f"{len(record.hypotheses)} hypotheses returned", "complete")
@@ -9057,6 +9103,14 @@ async def create_run(request: RunRequest) -> Dict[str, str]:
                 "message": "Research goal failed the pre-run safety gate and was not sent to the generation workflow.",
             },
         )
+    if request.parent_run_id and not knowledge_base.get_research_run(request.parent_run_id):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "invalid_refinement_parent_run",
+                "message": "Continuation requested a parent run that does not exist.",
+            },
+        )
 
     run_id = uuid.uuid4().hex[:12]
     record = RunRecord(
@@ -9069,6 +9123,17 @@ async def create_run(request: RunRequest) -> Dict[str, str]:
     )
     runs[run_id] = record
     persist_run_record(record)
+    for feedback in request.user_feedback:
+        knowledge_base.store_feedback_item(
+            feedback_id=feedback.feedback_id,
+            run_id=run_id,
+            target_type=feedback.target_type,
+            target_ref=feedback.target_ref,
+            feedback_type=feedback.feedback_type,
+            text=feedback.text,
+            source="run_request",
+            created_at=feedback.created_at,
+        )
 
     work_item = knowledge_base.enqueue_work_item(
         workflow_name="workflow.open_coscientist_run",
@@ -9090,6 +9155,45 @@ async def get_run(run_id: str) -> RunRecord:
     if not record:
         raise HTTPException(status_code=404, detail="Run not found")
     return record
+
+
+@app.post("/api/runs/{run_id}/feedback")
+async def record_run_feedback(run_id: str, feedback: FeedbackItem) -> Dict[str, Any]:
+    if not load_run_record(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    item = knowledge_base.store_feedback_item(
+        feedback_id=feedback.feedback_id,
+        run_id=run_id,
+        target_type=feedback.target_type,
+        target_ref=feedback.target_ref,
+        feedback_type=feedback.feedback_type,
+        text=feedback.text,
+        source="user",
+        created_at=feedback.created_at,
+    )
+    return {"feedback": item}
+
+
+@app.get("/api/runs/{run_id}/feedback")
+async def list_run_feedback(run_id: str, limit: int = 50) -> Dict[str, Any]:
+    if not load_run_record(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    feedback = knowledge_base.list_feedback_items(run_id=run_id, limit=max(1, min(limit, 200)))
+    return {"feedback": feedback, "count": len(feedback), "run_id": run_id}
+
+
+@app.get("/api/runs/{run_id}/memory")
+async def get_run_memory(run_id: str) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    memory = knowledge_base.build_memory_context(
+        research_goal=record.request.research_goal,
+        parent_run_id=record.request.parent_run_id or run_id,
+        library_id=record.request.library_id,
+        memory_scope=record.request.memory_scope,
+    )
+    return {"run_id": run_id, "memory": memory}
 
 
 @app.get("/api/runs/{run_id}/trace")
