@@ -168,3 +168,69 @@ def test_run_real_passes_parent_memory_summary_constraints(monkeypatch) -> None:
     assert "Prefer hypotheses that keep evidence provenance explicit" in joined_constraints
     assert "[memory_usage_policy]" in joined_constraints
     assert "parent-run-memory" not in joined_constraints
+
+
+def test_run_real_annotates_hypothesis_origins(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    class FakeHypothesisGenerator:
+        def __init__(self, **kwargs):
+            pass
+
+        async def generate_hypotheses(self, **kwargs):
+            return {
+                "hypotheses": [
+                    {"id": "hyp_user", "text": "User seed hypothesis about provenance-aware ranking."},
+                    {"id": "hyp_model", "text": "Model-only hypothesis about evidence triage."},
+                    {
+                        "id": "hyp_evolved",
+                        "text": "Evolved hypothesis about feedback-guided validation.",
+                        "generation_method": "evolved_from_review",
+                    },
+                ],
+                "research_plan": {},
+                "tournament_matchups": [],
+                "metrics": {},
+                "workflow_tool_policy": {},
+            }
+
+    with tempdir:
+        import open_coscientist
+
+        monkeypatch.setattr(open_coscientist, "HypothesisGenerator", FakeHypothesisGenerator)
+
+        request = studio.RunRequest(
+            research_goal="Annotate hypothesis origins for UI audit badges",
+            demo_mode=False,
+            literature_review=False,
+            initial_hypotheses=3,
+            iterations=0,
+            min_references=0,
+            max_references=1,
+            starting_hypotheses=["User seed hypothesis about provenance-aware ranking."],
+        )
+        record = studio.RunRecord(
+            run_id="run-origin-badges",
+            status="queued",
+            created_at=1.0,
+            updated_at=1.0,
+            request=request,
+        )
+
+        asyncio.run(studio.run_real(record))
+
+    assert record.status == "complete"
+    origins = {item["id"]: item["origin"] for item in record.hypotheses}
+    assert origins == {
+        "hyp_user": "user_seeded",
+        "hyp_model": "model_generated",
+        "hyp_evolved": "evolved",
+    }
+    assert record.hypotheses[0]["origin_label"] == "user seeded"
+    assert record.metrics["hypothesis_origin_counts"] == {
+        "user_seeded": 1,
+        "model_generated": 1,
+        "evolved": 1,
+    }
+    assert "not scientific evidence" in record.metrics["hypothesis_origin_boundary"]
