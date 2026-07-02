@@ -73,3 +73,7 @@ def test_run_real_passes_record_run_id_to_generator(monkeypatch) -> None:
     assert generate_kwargs["run_id"] == "run-webapp-identity"
     assert generate_kwargs["stream"] is False
     assert generate_kwargs["opts"]["enable_literature_review_node"] is False
+    if record.metrics["execution_memory"]["langgraph_checkpoint_sqlite_available"]:
+        assert generate_kwargs["opts"]["checkpointer"] is not None
+    else:
+        assert "checkpointer" not in generate_kwargs["opts"]
