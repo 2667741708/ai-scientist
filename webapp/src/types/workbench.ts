@@ -36,10 +36,39 @@ export type Hypothesis = {
 };
 
 export type AgentTrace = {
+  event_id?: string;
+  parent_event_id?: string | null;
   agent: string;
   role: string;
+  phase?: string;
+  status?: EventStatus;
   output: string;
+  tool_calls?: Record<string, unknown>[];
+  token_usage?: Record<string, unknown>;
+  synthetic?: boolean;
   confidence: number;
+};
+
+export type AgentSpec = {
+  agent_id: string;
+  phase: string;
+  role: string;
+  input_contract: Record<string, unknown>;
+  output_contract: Record<string, unknown>;
+  prompt_template: string;
+  tool_policy: Record<string, unknown>;
+  failure_policy: Record<string, unknown>;
+  observability_fields: string[];
+  configurable: boolean;
+  degradation_when_disabled: string;
+};
+
+export type AgentRegistryResponse = {
+  agents: AgentSpec[];
+  count: number;
+  phases: string[];
+  registry_version: string;
+  boundary: string;
 };
 
 export type ProviderStatus = {
