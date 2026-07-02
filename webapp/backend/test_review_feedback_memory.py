@@ -40,6 +40,13 @@ def test_review_guidance_includes_feedback_memory_without_raw_refs() -> None:
                     "support_level": "limited",
                 }
             ],
+            "evidence_boundary": {
+                "status": "absent",
+                "evidence_count": 0,
+                "parsed_fulltext_count": 0,
+                "experimental_data_count": 0,
+                "raw_debug_ref": "raw-review-boundary-ref",
+            },
         },
         [
             {
@@ -61,6 +68,8 @@ def test_review_guidance_includes_feedback_memory_without_raw_refs() -> None:
     assert "Prefer hypotheses with falsifiable negative controls" in joined
     assert "Parsed fulltext support is limited" in joined
     assert "Penalize hypotheses without a clear failure condition" in joined
+    assert "status=absent" in joined
+    assert "evidence_count=0" in joined
     assert "comparative" in review_phase["review_depth"]
     assert "instant rewrite" in review_phase["review_depth"]
     assert "raw-memory-feedback-id" not in joined
@@ -68,5 +77,6 @@ def test_review_guidance_includes_feedback_memory_without_raw_refs() -> None:
     assert "raw-current-feedback-id" not in joined
     assert "raw-current-hyp-id" not in joined
     assert "raw-checkpoint-id" not in joined
+    assert "raw-review-boundary-ref" not in joined
     assert "D:/private/source.pdf" not in joined
     assert "target_ref" not in joined
