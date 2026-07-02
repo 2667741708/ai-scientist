@@ -228,6 +228,33 @@ def test_runtime_readiness_surface_summary_reports_ready_state() -> None:
     assert summary["next_actions"] == ["start_or_continue_research_run"]
 
 
+def test_runtime_readiness_surface_summary_reports_queued_worker_state() -> None:
+    summary = runtime_readiness_surface_summary(
+        worker_status={
+            "enabled": True,
+            "concurrency": 1,
+            "running_count": 0,
+            "queue_status_counts": {"active": 1, "queued": 1, "running": 0, "retrying": 0, "error": 0},
+        },
+        execution_memory={
+            "status": "ready",
+            "resume_supported": True,
+            "checkpoint_backend": "langgraph_sqlite",
+            "resume_mode": "langgraph_thread_resume",
+        },
+        service_statuses={
+            "llm": {"available": True, "status": "ready"},
+            "pdf": {"available": True, "status": "ready"},
+        },
+    )
+
+    assert summary["status"] == "ready"
+    assert summary["worker"]["state"] == "queued"
+    assert summary["worker"]["queue_counts"]["queued"] == 1
+    assert summary["worker"]["guidance"] == "Research work is queued and waiting for the worker."
+    assert summary["next_actions"] == ["monitor_queue"]
+
+
 def test_work_queue_surface_summary_hides_raw_work_items_by_default() -> None:
     snapshot = {
         "counts": {"active": 2, "queued": 1, "running": 1, "retrying": 0, "error": 0},
