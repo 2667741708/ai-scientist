@@ -165,6 +165,28 @@ def test_work_item_status_counts_can_scope_worker_progress() -> None:
         assert store.get_work_item(leased["work_item_id"])["status"] == "leased"
 
 
+def test_cancel_work_item_does_not_override_terminal_status() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.terminal",
+            arguments={},
+        )
+        assert store.cancel_work_item(item["work_item_id"], "User cancelled.") is True
+        assert store.get_work_item(item["work_item_id"])["status"] == "cancelled"
+
+        completed = store.enqueue_work_item(
+            workflow_name="workflow.terminal",
+            arguments={},
+        )
+        store.complete_work_item(completed["work_item_id"], {"ok": True})
+
+        assert store.cancel_work_item(completed["work_item_id"], "Too late.") is False
+        still_completed = store.get_work_item(completed["work_item_id"])
+        assert still_completed["status"] == "complete"
+        assert still_completed["error_message"] is None
+
+
 def test_research_feedback_checkpoints_and_memory_context() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
