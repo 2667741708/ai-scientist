@@ -4785,6 +4785,18 @@ AGENT_TRACE_PHASE_ALIASES = {
     "planning": "supervisor",
 }
 
+AGENT_TRACE_STABLE_PHASE_ORDER = [
+    "supervisor",
+    "literature_review",
+    "generate",
+    "reflection",
+    "review",
+    "ranking",
+    "meta_review",
+    "evolve",
+    "proximity",
+]
+
 
 def registry_agent_for_phase(phase: str) -> Optional[Dict[str, Any]]:
     canonical_phase = AGENT_TRACE_PHASE_ALIASES.get(str(phase).lower(), str(phase).lower())
@@ -4809,6 +4821,36 @@ def agent_trace_from_registry(**kwargs: Any) -> AgentTrace:
         if kwargs.get("degradation_reason") is None:
             kwargs["degradation_reason"] = None
     return AgentTrace(**kwargs)
+
+
+def canonical_trace_phase(phase: Any) -> str:
+    normalized = str(phase or "").lower()
+    return AGENT_TRACE_PHASE_ALIASES.get(normalized, normalized or "unknown")
+
+
+def agent_trace_user_summary(traces: List[AgentTrace]) -> Dict[str, Any]:
+    seen_phases = {canonical_trace_phase(trace.phase) for trace in traces}
+    ordered_phases = [phase for phase in AGENT_TRACE_STABLE_PHASE_ORDER if phase in seen_phases]
+    ordered_phases.extend(sorted(phase for phase in seen_phases if phase not in set(ordered_phases)))
+    degraded = [
+        {
+            "phase": canonical_trace_phase(trace.phase),
+            "agent_id": trace.agent_id,
+            "degradation_reason": trace.degradation_reason,
+        }
+        for trace in traces
+        if trace.degradation_reason
+    ]
+    return {
+        "trace_count": len(traces),
+        "phase_order": ordered_phases,
+        "degraded_phases": degraded,
+        "degradation_count": len(degraded),
+        "boundary": (
+            "Phase order is a user-facing summary. Full trace entries remain available for expert audit; "
+            "raw provider payloads and prompts are not exposed here."
+        ),
+    }
 
 
 def extract_trace_metadata(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -10034,8 +10076,8 @@ async def list_run_checkpoints(run_id: str, limit: int = 20) -> Dict[str, Any]:
 
 
 @app.get("/api/runs/{run_id}/trace")
-async def get_run_trace(run_id: str) -> Dict[str, List[AgentTrace]]:
+async def get_run_trace(run_id: str) -> Dict[str, Any]:
     record = load_run_record(run_id)
     if not record:
         raise HTTPException(status_code=404, detail="Run not found")
-    return {"agent_trace": record.agent_trace}
+    return {"agent_trace": record.agent_trace, "summary": agent_trace_user_summary(record.agent_trace)}
