@@ -108,6 +108,13 @@ class HypothesisGenerator:
         self._mcp_available: Optional[bool] = None
         self._pubmed_available: Optional[bool] = None
 
+    @staticmethod
+    def _workflow_run_config(run_id: str) -> Dict[str, Any]:
+        return {
+            "recursion_limit": 100,
+            "configurable": {"thread_id": run_id},
+        }
+
     def _build_graph(self, enable_literature_review_node: bool = True) -> StateGraph:
         """
         Build the LangGraph workflow.
@@ -470,7 +477,10 @@ class HypothesisGenerator:
 
         try:
             # Run the workflow. Uses 100 recursion limit to support higher max iterations.
-            final_state = await self._graph.ainvoke(initial_state, config={"recursion_limit": 100})
+            final_state = await self._graph.ainvoke(
+                initial_state,
+                config=self._workflow_run_config(run_id),
+            )
 
             # Format result to match expected interface
             execution_time = time.time() - start_time
@@ -556,7 +566,10 @@ class HypothesisGenerator:
             }
 
             # Stream the workflow execution
-            async for chunk in self._graph.astream(initial_state, config={"recursion_limit": 100}):
+            async for chunk in self._graph.astream(
+                initial_state,
+                config=self._workflow_run_config(str(initial_state["run_id"])),
+            ):
                 # chunk is a dict with node names as keys
                 for node_name, node_state in chunk.items():
                     logger.debug(f"streaming node: {node_name}")
