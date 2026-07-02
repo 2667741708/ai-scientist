@@ -204,3 +204,61 @@ def test_continue_run_enqueues_child_with_parent_memory(monkeypatch) -> None:
         ]
         assert active_child_items
         assert active_child_items[0]["work_item_id"] == payload["work_item_id"]
+
+
+def test_chat_continue_request_proposes_parent_run_continuation(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        parent = studio.RunRecord(
+            run_id="chat-parent-continuation",
+            status="complete",
+            created_at=1.0,
+            updated_at=2.0,
+            request=studio.RunRequest(
+                research_goal="Find mechanisms for chat continuation routing",
+                demo_mode=True,
+                literature_review=False,
+            ),
+            hypotheses=[
+                {
+                    "id": "hyp-chat-parent",
+                    "text": "The parent run should be referenced by the continuation request.",
+                }
+            ],
+        )
+        studio.persist_run_record(parent)
+
+        turn = client.post(
+            "/api/research-chat/turn",
+            json={
+                "message": "基于当前结果继续研究：沿着证据更强、实验更可证伪的方向重新生成并排序",
+                "context": {
+                    "mode": "workspace",
+                    "run_id": "chat-parent-continuation",
+                    "demo_mode": True,
+                    "literature_review": False,
+                    "language": "zh",
+                },
+            },
+        )
+
+        assert turn.status_code == 200, turn.text
+        proposal = turn.json()["assistant_message"]["proposal"]
+        preview = proposal["requestPreview"]
+        assert proposal["executionTarget"] == "workflow.start_run"
+        assert preview["parent_run_id"] == "chat-parent-continuation"
+        assert preview["refinement_mode"] == "continue_from_run"
+
+        confirm = client.post(
+            f"/api/research-chat/actions/{proposal['actionId']}/confirm",
+            json={"approval": {"confirmed": True, "scope": proposal["approvalScope"], "reason": "test"}},
+        )
+
+        assert confirm.status_code == 200, confirm.text
+        child_run_id = confirm.json()["assistant_message"]["result"]["runId"]
+        child = client.get(f"/api/runs/{child_run_id}").json()
+        assert child["status"] == "queued"
+        assert child["request"]["parent_run_id"] == "chat-parent-continuation"
+        assert child["request"]["refinement_mode"] == "continue_from_run"
