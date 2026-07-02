@@ -64,6 +64,7 @@ class ResearchWorkerRuntime:
                 task = asyncio.create_task(self._execute_work_item(item))
                 self._running_tasks.add(task)
                 task.add_done_callback(self._running_tasks.discard)
+        queue_status_counts = self._queue_status_counts()
         return {
             "enabled": self.enabled,
             "owner": self.owner,
@@ -73,6 +74,7 @@ class ResearchWorkerRuntime:
             "recovered_count": recovered_count,
             "leased_count": len(leased),
             "running_count": len(self._running_tasks),
+            "queue_status_counts": queue_status_counts,
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
@@ -85,9 +87,20 @@ class ResearchWorkerRuntime:
             "lease_seconds": self.lease_seconds,
             "poll_seconds": self.poll_seconds,
             "running_count": len([task for task in self._running_tasks if not task.done()]),
+            "queue_status_counts": self._queue_status_counts(),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
+
+    def _queue_status_counts(self) -> Dict[str, int]:
+        counter = getattr(self.store, "work_item_status_counts", None)
+        if not callable(counter):
+            return {}
+        try:
+            return dict(counter())
+        except Exception as exc:  # pragma: no cover - defensive status reporting
+            self._last_error = str(exc)
+            return {}
 
     async def _run_loop(self) -> None:
         assert self._stop_event is not None
