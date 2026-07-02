@@ -1,6 +1,7 @@
 from open_coscientist.agents.registry import (
     AgentSpec,
     PhaseStatus,
+    agent_trace_contract_audit,
     agent_trace_surface_summary,
     canonical_trace_phase,
     get_agent_registry_payload,
@@ -14,6 +15,7 @@ from open_coscientist.agents.registry import (
 __all__ = [
     "AgentSpec",
     "PhaseStatus",
+    "agent_trace_contract_audit",
     "agent_trace_surface_summary",
     "canonical_trace_phase",
     "get_agent_registry_payload",
