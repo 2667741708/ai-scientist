@@ -2312,18 +2312,21 @@ class KnowledgeBaseStore:
         finally:
             connection.close()
 
-    def mark_work_item_running(self, work_item_id: str, owner: str) -> None:
+    def mark_work_item_running(self, work_item_id: str, owner: str) -> bool:
+        now = time.time()
         with self._connection() as connection:
-            connection.execute(
+            result = connection.execute(
                 """
                 UPDATE research_work_items
                 SET status = 'running', updated_at = ?
                 WHERE work_item_id = ?
                   AND lease_owner = ?
                   AND status IN ('leased', 'running')
+                  AND (lease_expires_at IS NULL OR lease_expires_at > ?)
                 """,
-                (time.time(), work_item_id, owner),
+                (now, work_item_id, owner, now),
             )
+        return result.rowcount > 0
 
     def complete_work_item(self, work_item_id: str, result_ref: Optional[Dict[str, Any]] = None) -> None:
         with self._connection() as connection:
