@@ -126,13 +126,13 @@ class ResearchWorkerRuntime:
         if self._running_tasks:
             await asyncio.gather(*self._running_tasks, return_exceptions=True)
 
-    async def tick(self) -> Dict[str, Any]:
+    async def tick(self, *, force: bool = False) -> Dict[str, Any]:
         self._last_tick_at = time.time()
         recovered_count = self.store.recover_expired_leases()
         self._running_tasks = {task for task in self._running_tasks if not task.done()}
         available_slots = max(0, int(self.concurrency or 1) - len(self._running_tasks))
         leased: list[WorkItem] = []
-        if self.enabled and available_slots > 0:
+        if (self.enabled or force) and available_slots > 0:
             leased = self.store.lease_work_items(
                 owner=self.owner,
                 limit=available_slots,
@@ -149,6 +149,7 @@ class ResearchWorkerRuntime:
         running_count = len(self._running_tasks)
         return {
             "enabled": self.enabled,
+            "forced_tick": bool(force),
             "owner": self.owner,
             "concurrency": self.concurrency,
             "lease_seconds": self.lease_seconds,
