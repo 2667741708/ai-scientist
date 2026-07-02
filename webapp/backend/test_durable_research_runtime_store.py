@@ -117,6 +117,14 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         assert memory["parent_run"]["run_id"] == "run_memory"
         assert memory["prior_hypotheses"][0]["hypothesis_id"] == "hyp_1"
         assert memory["user_feedback"][0]["feedback_type"] == "prefer"
+        assert memory["memory_sources"] == [
+            "parent_run",
+            "prior_hypotheses",
+            "chat_feedback",
+        ]
+        assert memory["evidence_boundary"]["status"] == "absent"
+        assert memory["evidence_boundary"]["evidence_count"] == 0
+        assert "absent evidence is not support" in memory["evidence_boundary"]["boundary"]
         assert memory["memory_boundary"] == "Summaries only; raw records are not injected."
 
 
@@ -140,8 +148,13 @@ def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
         )
 
         assert current_memory["evidence_summaries"] == []
+        assert current_memory["memory_sources"] == ["memory_limitations"]
+        assert current_memory["evidence_boundary"]["status"] == "absent"
         assert "current_run scope" in current_memory["known_gaps"][0]
         assert project_memory["evidence_summaries"]
+        assert "knowledge_base" in project_memory["memory_sources"]
+        assert project_memory["evidence_boundary"]["status"] == "parsed_fulltext"
+        assert project_memory["evidence_boundary"]["parsed_fulltext_count"] >= 1
 
 
 def test_research_runtime_schema_migrates_legacy_work_item_table() -> None:
