@@ -186,6 +186,114 @@ chat 启动 run 时没有把用户 starting hypotheses、preferences、constrain
 用户反馈主要是 post-run inspection，不是下一轮生成的输入 contract。
 ```
 
+### 2.1.1 默认 RAG 问答与 SQL 知识库设计
+
+研究聊天的默认问答必须统一走 SQLite RAG + live model，不再由规则分支或静态模板直接生成最终自然语言回复。
+
+目标链路：
+
+```text
+用户问题
+-> deterministic intent router
+-> 如果是写入/外部动作，生成确认卡
+-> 如果是只读问答，构造结构化上下文
+-> 检索 SQLite knowledge_base / FTS5
+-> 拼接 prompt
+-> 调用 live model
+-> 返回模型生成回答 + 可展开结构化审计数据
+```
+
+路由器职责只保留三类：
+
+```text
+1. 安全路由：识别启动 workflow、PDF 解析、网页抓取、外部 Web Search、MCP 文献检查、terminal、SSH 等需要确认的动作。
+2. 上下文路由：识别当前 run、候选假设、Elo ranking、报告草稿、历史搜索、知识库检索、证据核验等只读场景，并构造 structured_context。
+3. 默认问答：无法归入写入动作的问题全部作为 ask_project_ai，走 SQL RAG + LLM。
+```
+
+规则函数允许继续存在，但只能作为 context builder，不允许直接把 `summary` 当成用户可见最终回答。典型映射：
+
+| Intent | 规则层输出 | 最终回答 |
+| --- | --- | --- |
+| `discover_capabilities` | capability map / mode boundary | LLM 基于 capability map 和 RAG snippets 回答 |
+| `explain_current_run` | run status、timeline、mode boundary | LLM 基于 run audit 回答 |
+| `inspect_hypothesis` | hypothesis brief、review、evidence support | LLM 基于假设结构化上下文回答 |
+| `explain_ranking` | tournament matchups、winner/loser、Elo delta | LLM 基于真实 ranking audit 回答 |
+| `design_experiment` | hypothesis preview、failure tests、missing evidence | LLM 生成实验设计说明 |
+| `draft_report` | sections、top hypotheses、mode boundary | LLM 生成报告草稿 |
+| `search_knowledge_evidence` | SQLite FTS 命中片段 | LLM 解释证据命中和边界 |
+| `check_hypothesis_grounding` | local evidence report | LLM 总结 supported/limited/ungrounded 和下一步 |
+
+SQLite knowledge base 是唯一默认检索源：
+
+```text
+papers
+paper_chunks
+evidence_chunks_fts
+paper_parse_runs
+paper_parse_evidence
+research_runs / hypotheses / tournament audit summaries
+project system knowledge documents
+```
+
+检索优先级：
+
+```text
+1. scoped evidence：paper_id、library_id、run_id、selected_hypothesis_index 对应内容。
+2. run/audit structured_context：当前运行、候选假设、ranking、证据核验、报告结构。
+3. project system knowledge fallback：项目能力、确认卡边界、Elo 概念、键盘交互、证据边界。
+```
+
+Prompt 必须包含：
+
+```text
+用户问题
+intent 与 userFacingReason
+当前 run context
+structured_context
+SQL RAG snippets
+可用任务入口
+安全约束和 attribution 边界
+证据边界要求
+```
+
+默认回答不得展示：
+
+```text
+raw JSON
+provider key
+stack trace
+内部文件路径
+work_item_id / checkpoint_id / lease_owner
+完整 prompt
+未经用户请求的大型 audit payload
+```
+
+模型不可用时必须返回明确状态：
+
+```text
+status = model_missing | model_disabled | model_error
+verdict = limited
+knowledgeHitCount = 已检索到的 SQL 知识片段数量
+groundingBoundary = knowledge_base 或 model_without_local_evidence
+```
+
+即使模型不可用，也不能退回“模板答案”。只能说明无法生成 RAG+LLM 回答，并给出配置模型、解析证据或重新发送问题等下一步。
+
+确认卡仍然必须是确定性边界：
+
+```text
+start_research_run
+parse_pdf_to_knowledge_base
+extract_web_evidence
+search_public_web
+verify_evidence_with_literature
+run_terminal_command
+run_ssh_training_command
+```
+
+这些 intent 不得被默认 RAG 问答吞掉，也不得由模型直接执行。
+
 ### 2.2 目标行为
 
 自然语言界面应支持科研用户用一段话完成以下操作：

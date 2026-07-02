@@ -1069,7 +1069,7 @@ class KnowledgeBaseStore:
         if not normalized:
             return []
         resolved_library_id = self.resolve_library_id(library_id) if library_id else None
-        terms = re.findall(r"[A-Za-z0-9_\-\u4e00-\u9fff]{2,}", normalized)
+        terms = re.findall(r"[A-Za-z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}", normalized)
         fts_query = " OR ".join(f'"{term}"' for term in terms[:12]) or normalized
         where = ["evidence_chunks_fts MATCH ?"]
         params: list[Any] = [fts_query]

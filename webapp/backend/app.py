@@ -654,6 +654,7 @@ WEB_SEARCH_SITE_PATTERN = re.compile(
     r"(?:^|\s)site:(?P<domain>[A-Za-z0-9][A-Za-z0-9.-]{0,250}[A-Za-z0-9])",
     re.IGNORECASE,
 )
+PROJECT_CHAT_KNOWLEDGE_VERSION = "project-chat-rag-v1"
 
 
 def _path_summary(value: str) -> str:
@@ -1150,9 +1151,70 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
     ]
 
 
+def _ensure_project_chat_knowledge_index() -> None:
+    try:
+        for document in knowledge_base.list_documents():
+            metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            if (
+                metadata.get("knowledge_kind") == "project_chat_system"
+                and metadata.get("version") == PROJECT_CHAT_KNOWLEDGE_VERSION
+            ):
+                return
+        capability_lines = [
+            f"- {item['userTitle']}: {item['userSummary']} intent={item['intent']} mode={item['executionMode']} boundary={item['groundingBoundary']}"
+            for item in _chat_capabilities()
+        ]
+        content = "\n\n".join(
+            [
+                "# Open Co-Scientist Workbench Project Knowledge",
+                "## Project AI answer pipeline",
+                "普通项目问答应先检索本地 SQLite knowledge_base / FTS5 证据片段，再把命中的片段、当前 run context、能力入口和用户问题拼接成 prompt，交给 live model 回答。不要用静态模板伪装成 AI 问答。",
+                "执行类动作仍然必须走确认卡，包括启动 live research workflow、解析 PDF、抓取网页证据、外部 Web Search、MCP 文献检查、本地 terminal 命令和 SSH 命令。",
+                "## Keyboard interaction",
+                "研究聊天输入框使用 Enter 换行，Ctrl+Enter 或 Cmd+Enter 发送。这个约定适用于项目 AI、研究工作台命令中心和侧边聊天。",
+                "## Evidence boundary",
+                "回答必须区分 project system knowledge、parsed fulltext、knowledge base snippets、run audit、tournament audit 和 model_without_local_evidence。Demo simulation 只能验证 UI/schema/流程，不能当作真实科学证据。",
+                "## Elo and tournament ranking",
+                "Elo 是一种基于成对比较结果更新相对评分的排序方法。在本工作台里，候选假设会通过 pairwise / tournament 比较产生 winner、loser、confidence、before/after Elo 和 delta。Elo 不是绝对真理分数，只是当前评审条件和证据边界下的相对优先级信号。",
+                "## User-facing task map",
+                "\n".join(capability_lines),
+            ]
+        )
+        knowledge_base.ingest(
+            title="Open Co-Scientist Workbench Project Knowledge",
+            content=content,
+            authors=["open-coscientist"],
+            source="project_system",
+            source_reliability="project_runtime_contract",
+            metadata={"knowledge_kind": "project_chat_system", "version": PROJECT_CHAT_KNOWLEDGE_VERSION},
+            library_id=DEFAULT_LIBRARY_ID,
+        )
+    except Exception as exc:
+        print(f"Failed to index project chat knowledge: {exc}", file=sys.stderr)
+
+
 def _contains_any(text: str, terms: List[str]) -> bool:
     lowered = text.lower()
     return any(term.lower() in lowered for term in terms)
+
+
+def _looks_like_concept_question(text: str) -> bool:
+    return _contains_any(
+        text,
+        [
+            "什么是",
+            "是什么",
+            "什么意思",
+            "怎么理解",
+            "解释一下",
+            "介绍一下",
+            "概念",
+            "define",
+            "what is",
+            "what does",
+            "explain",
+        ],
+    )
 
 
 def _extract_hypothesis_index(text: str) -> Optional[int]:
@@ -1470,7 +1532,15 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
             "missingInputs": [] if web_search.get("query") else ["query"],
             "userFacingReason": "用户请求通用公开 Web Search。",
         }
-    if _contains_any(text, ["elo", "锦标赛", "tournament", "winner", "loser", "排名", "为什么排", "排序依据"]):
+    if _contains_any(text, ["elo", "锦标赛", "tournament"]) and _looks_like_concept_question(text):
+        return {
+            "intent": "ask_project_ai",
+            "confidence": 0.86,
+            "extractedInputs": {"query": text},
+            "missingInputs": [],
+            "userFacingReason": "用户在询问项目概念，应检索 SQL 知识库后交给 live model 回答。",
+        }
+    if _contains_any(text, ["锦标赛", "tournament", "winner", "loser", "排名", "为什么排", "排序依据", "审计 Elo", "Elo 排名", "elo ranking"]):
         return {
             "intent": "explain_ranking",
             "confidence": 0.92,
@@ -1620,11 +1690,11 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
             "userFacingReason": "用户请求搜索知识库证据。",
         }
     return {
-        "intent": "clarify",
-        "confidence": 0.4,
-        "extractedInputs": {},
-        "missingInputs": ["task"],
-        "userFacingReason": "需要确认用户要解析 PDF、抓取网页、搜索知识库还是检查假设支撑。",
+        "intent": "ask_project_ai",
+        "confidence": 0.62,
+        "extractedInputs": {"query": text},
+        "missingInputs": [],
+        "userFacingReason": "普通项目问答默认走 SQL 知识库检索和 live model prompt。",
     }
 
 
@@ -2255,12 +2325,87 @@ def _format_research_chat_run_context(context: ResearchChatContext) -> str:
     )
 
 
+def _dedupe_knowledge_results(results: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in results:
+        key = str(item.get("chunk_id") or item.get("evidence_id") or item.get("title") or item.get("text_preview") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        deduped.append(item)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _project_chat_knowledge_fallback(*, limit: int = 2) -> List[Dict[str, Any]]:
+    fallback: List[Dict[str, Any]] = []
+    for document in knowledge_base.list_documents():
+        metadata = document.metadata if isinstance(document.metadata, dict) else {}
+        if (
+            metadata.get("knowledge_kind") != "project_chat_system"
+            or metadata.get("version") != PROJECT_CHAT_KNOWLEDGE_VERSION
+        ):
+            continue
+        for chunk in document.chunks[:limit]:
+            fallback.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "paper_id": document.paper_id,
+                    "library_id": document.library_id,
+                    "parse_run_id": document.parse_run_id,
+                    "parse_item_key": "project_chat_system",
+                    "title": document.title,
+                    "section_path": chunk.section_path,
+                    "section_type": chunk.section_type,
+                    "text_preview": chunk.text[:700],
+                    "evidence_summary": chunk.experiment_data_summary or chunk.title,
+                    "support_level": chunk.support_level,
+                    "source_reliability": document.source_reliability,
+                    "evidence_path": document.url,
+                    "evidence_id": chunk.evidence_id,
+                    "rank": 0,
+                }
+            )
+            if len(fallback) >= limit:
+                return fallback
+    return fallback
+
+
+def _research_chat_knowledge_results(message: str, context: ResearchChatContext, *, limit: int = 6) -> List[Dict[str, Any]]:
+    _ensure_project_chat_knowledge_index()
+    results = paper_parse_store.rag_search(
+        message,
+        limit=limit,
+        paper_id=context.paper_id,
+        library_id=context.library_id,
+    )
+    if context.paper_id or context.library_id:
+        results.extend(paper_parse_store.rag_search(message, limit=limit, paper_id=None, library_id=None))
+    results.extend(_project_chat_knowledge_fallback(limit=2))
+    return _dedupe_knowledge_results(results, limit=limit)
+
+
+def _format_research_chat_structured_context(structured_context: Optional[Dict[str, Any]]) -> str:
+    if not structured_context:
+        return "当前没有额外结构化上下文。"
+    try:
+        payload = serialize_value(structured_context)
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception:
+        text = str(structured_context)
+    return text[:8000]
+
+
 def _build_research_chat_llm_prompt(
     *,
     message: str,
     context: ResearchChatContext,
     knowledge_results: List[Dict[str, Any]],
     routed: Dict[str, Any],
+    structured_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     language = "中文" if context.language == "zh" else "English"
     capabilities = _chat_capabilities()
@@ -2278,6 +2423,8 @@ def _build_research_chat_llm_prompt(
 - 事实性科研结论必须区分 parsed fulltext / knowledge base / run audit / ungrounded。
 - 不要直接执行命令、访问外部 Web、解析 PDF 或启动 live workflow；这些动作必须让用户通过确认卡授权。
 - 如果知识库没有命中，就明确说证据不足，并建议解析 PDF、抓取网页证据或启动 literature-grounded workflow。
+- 如果结构化上下文与知识库片段不一致，要说明证据边界，不要把结构化 run audit 当作外部文献事实。
+- 最终回答文本必须由你基于上下文生成；不要照抄旧模板或 raw JSON。
 - 回答保持简洁、可操作，优先给当前用户下一步。
 
 当前 route:
@@ -2286,6 +2433,9 @@ reason: {routed.get("userFacingReason")}
 
 当前 run context:
 {_format_research_chat_run_context(context)}
+
+结构化上下文:
+{_format_research_chat_structured_context(structured_context)}
 
 知识库检索片段:
 {_format_research_chat_knowledge_context(knowledge_results)}
@@ -2321,67 +2471,115 @@ async def _research_chat_llm_result(
     message: str,
     context: ResearchChatContext,
     routed: Dict[str, Any],
+    structured_context: Optional[Dict[str, Any]] = None,
+    knowledge_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     model_name = _research_chat_model_name(context)
+    resolved_knowledge_results = (
+        _dedupe_knowledge_results(knowledge_results, limit=8)
+        if knowledge_results is not None
+        else _research_chat_knowledge_results(message, context, limit=6)
+    )
+    base_result: Dict[str, Any] = dict(structured_context or {})
     if not _is_research_chat_llm_enabled():
         return {
+            **base_result,
             "intent": routed.get("intent", "clarify"),
             "title": "模型问答未启用",
-            "summary": "当前研究助手只启用了任务路由。可以继续启动研究流程、解析证据或检查假设；启用模型问答后，普通项目问题会走 live model + 知识库上下文。",
+            "summary": "模型问答当前未启用，因此无法生成 SQL RAG + LLM 回答。写入型动作仍可通过确认卡准备，启用模型后请重新发送问题。",
             "status": "model_disabled",
             "verdict": "limited",
+            "items": resolved_knowledge_results[:5],
+            "knowledgeHitCount": len(resolved_knowledge_results),
+            "modelName": model_name,
+            "structuredContext": serialize_value(structured_context) if structured_context else None,
             "nextActions": ["配置模型问答开关", "输入 research goal", "解析 PDF 并入库"],
-            "groundingBoundary": "project_capability_registry",
+            "groundingBoundary": "knowledge_base" if resolved_knowledge_results else "model_without_local_evidence",
         }
     if not has_model_provider_key(model_name):
-        greeting = "我在。当前后端还没有可用的 live model 凭据，所以普通聊天暂时只能走本地任务路由；配置模型后，我会结合知识库片段和工作台 prompt 模版回答。"
         return {
+            **base_result,
             "intent": routed.get("intent", "clarify"),
             "title": "模型通道尚未配置",
-            "summary": greeting if _looks_like_plain_greeting(message) else "这个问题适合由 live model 结合知识库回答，但当前后端没有可用模型通道。你仍然可以使用确认卡启动研究流程、解析 PDF、抓取网页证据或搜索知识库。",
+            "summary": "这个问题需要由 live model 基于 SQL 知识库检索片段回答，但当前后端没有可用模型凭据。请配置模型 API 后重新发送；写入型动作仍会通过确认卡处理。",
             "status": "model_missing",
             "verdict": "limited",
+            "items": resolved_knowledge_results[:5],
+            "knowledgeHitCount": len(resolved_knowledge_results),
+            "modelName": model_name,
+            "structuredContext": serialize_value(structured_context) if structured_context else None,
             "nextActions": ["配置模型 API 环境变量", "选择对应模型", "重启 FastAPI bridge", "重新发送问题"],
-            "groundingBoundary": "project_capability_registry",
+            "groundingBoundary": "knowledge_base" if resolved_knowledge_results else "model_without_local_evidence",
         }
 
-    knowledge_results = paper_parse_store.rag_search(
-        message,
-        limit=5,
-        paper_id=context.paper_id,
-        library_id=context.library_id,
-    )
     prompt = _build_research_chat_llm_prompt(
         message=message,
         context=context,
-        knowledge_results=knowledge_results,
+        knowledge_results=resolved_knowledge_results,
         routed=routed,
+        structured_context=structured_context,
     )
     try:
         answer = await call_research_chat_llm(prompt=prompt, model_name=model_name)
     except Exception as exc:
         print(f"Research chat LLM call failed: {exc}", file=sys.stderr)
         return {
+            **base_result,
             "intent": routed.get("intent", "clarify"),
             "title": "模型回答暂时不可用",
-            "summary": "我已经识别到这是普通问答，但 live model 调用失败了。请检查模型服务、key、网络或稍后重试；写入型任务仍会通过确认卡执行。",
+            "summary": "SQL 知识库检索已完成，但 live model 调用失败，因此没有生成模型回答。请检查模型服务、key、网络或稍后重试；写入型任务仍会通过确认卡执行。",
             "status": "model_error",
             "verdict": "limited",
+            "items": resolved_knowledge_results[:5],
+            "knowledgeHitCount": len(resolved_knowledge_results),
+            "modelName": model_name,
+            "structuredContext": serialize_value(structured_context) if structured_context else None,
             "nextActions": ["检查模型配置", "改用项目能力入口", "搜索知识库证据"],
-            "groundingBoundary": "project_capability_registry",
+            "groundingBoundary": "knowledge_base" if resolved_knowledge_results else "model_without_local_evidence",
         }
 
     return {
+        **base_result,
         "intent": routed.get("intent", "clarify"),
-        "title": "研究助手回答",
+        "title": base_result.get("title") or "研究助手回答",
         "summary": answer.strip(),
         "status": "complete",
-        "verdict": "grounded" if knowledge_results else "limited",
-        "items": knowledge_results[:5],
-        "knowledgeHitCount": len(knowledge_results),
-        "nextActions": ["继续追问", "解析更多 PDF 作为证据", "启动 research workflow"],
-        "groundingBoundary": "model_plus_knowledge_base" if knowledge_results else "model_without_local_evidence",
+        "verdict": base_result.get("verdict") or ("grounded" if resolved_knowledge_results else "limited"),
+        "items": resolved_knowledge_results[:5],
+        "knowledgeHitCount": len(resolved_knowledge_results),
+        "modelName": model_name,
+        "structuredContext": serialize_value(structured_context) if structured_context else None,
+        "nextActions": base_result.get("nextActions") or ["继续追问", "解析更多 PDF 作为证据", "启动 research workflow"],
+        "groundingBoundary": "model_plus_knowledge_base" if resolved_knowledge_results else "model_without_local_evidence",
     }
+
+
+async def _chat_turn_llm_response(
+    *,
+    session_id: str,
+    request: ResearchChatTurnRequest,
+    routed: Dict[str, Any],
+    structured_context: Optional[Dict[str, Any]] = None,
+    knowledge_results: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    result = await _research_chat_llm_result(
+        message=request.message,
+        context=request.context,
+        routed=routed,
+        structured_context=structured_context,
+        knowledge_results=knowledge_results,
+    )
+    state = "needs_input" if result.get("status") in {"model_missing", "model_disabled"} else "complete"
+    return _chat_turn_response(
+        session_id=session_id,
+        assistant_message={
+            "kind": "result_summary",
+            "text": result["summary"],
+            "result": result,
+            "suggestions": _chat_capabilities(),
+        },
+        state=state,
+    )
 
 
 def _hypothesis_grounding_summary(hypothesis_text: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -6887,17 +7085,13 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             state="needs_input",
         )
 
-    if intent == "discover_capabilities":
-        result = _capability_map_result()
-        return _chat_turn_response(
+    if intent in {"ask_project_ai", "discover_capabilities"}:
+        structured = _capability_map_result() if intent == "discover_capabilities" else None
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={
-                "kind": "result_summary",
-                "text": result["summary"],
-                "result": result,
-                "suggestions": _chat_capabilities(),
-            },
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=structured,
         )
 
     if intent == "start_research_run":
@@ -6957,10 +7151,11 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
 
     if intent == "explain_current_run":
         result = _run_summary_result(request.context)
-        return _chat_turn_response(
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=result,
         )
 
     if intent in {"critique_generated_hypothesis", "apply_expert_feedback"}:
@@ -6973,43 +7168,48 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
 
     if intent == "inspect_hypothesis":
         result = _inspect_hypothesis_result(request.context, inputs)
-        return _chat_turn_response(
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=result,
         )
 
     if intent == "explain_ranking":
         result = _ranking_explanation_result(request.context, inputs)
-        return _chat_turn_response(
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=result,
         )
 
     if intent == "design_experiment":
         result = _experiment_design_result(request.context, inputs)
-        return _chat_turn_response(
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=result,
         )
 
     if intent == "draft_report":
         result = _report_draft_result(request.context)
-        return _chat_turn_response(
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=result,
         )
 
     if intent == "search_session_history":
         query = str(inputs.get("query") or request.message).strip()
         result = _session_search_result(request.context, query)
-        return _chat_turn_response(
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={"kind": "result_summary", "text": result["summary"], "result": result},
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=result,
         )
 
     if intent == "run_terminal_command":
@@ -7151,19 +7351,18 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             library_id=request.context.library_id,
         )
         summary = _rag_result_summary(query, results)
-        return _chat_turn_response(
+        structured = {
+            "intent": intent,
+            "query": query,
+            **summary,
+            "groundingBoundary": "knowledge_base",
+        }
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={
-                "kind": "result_summary",
-                "text": summary["summary"],
-                "result": {
-                    "intent": intent,
-                    "query": query,
-                    **summary,
-                    "groundingBoundary": "knowledge_base",
-                },
-            },
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=structured,
+            knowledge_results=_dedupe_knowledge_results(results + _project_chat_knowledge_fallback(limit=2), limit=8),
         )
 
     if intent == "verify_evidence_with_literature":
@@ -7199,17 +7398,21 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             context=request.context,
             store_report=True,
         )
-        return _chat_turn_response(
+        structured = {
+            "intent": intent,
+            **report,
+        }
+        local_evidence = [
+            item
+            for item in (report.get("supportingEvidence") or []) + (report.get("possibleCounterEvidence") or [])
+            if isinstance(item, dict)
+        ]
+        return await _chat_turn_llm_response(
             session_id=session_id,
-            assistant_message={
-                "kind": "result_summary",
-                "text": report["summary"],
-                "result": {
-                    "intent": intent,
-                    **report,
-                },
-            },
-            state="complete",
+            request=request,
+            routed=routed,
+            structured_context=structured,
+            knowledge_results=_dedupe_knowledge_results(local_evidence + _project_chat_knowledge_fallback(limit=2), limit=8),
         )
 
     return _chat_turn_response(
