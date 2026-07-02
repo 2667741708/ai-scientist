@@ -2803,6 +2803,7 @@ class KnowledgeBaseStore:
             related_runs=related_runs,
             prior_hypotheses=prior_hypotheses,
             feedback_items=feedback_items,
+            execution_memory=execution_memory,
             evidence_summaries=evidence_summaries,
             known_gaps=known_gaps,
         )
@@ -2824,6 +2825,7 @@ class KnowledgeBaseStore:
                 related_runs=related_runs,
                 prior_hypotheses=prior_hypotheses,
                 feedback_items=feedback_items,
+                execution_memory=execution_memory,
                 evidence_summaries=evidence_summaries,
                 known_gaps=known_gaps,
             ),
@@ -2979,6 +2981,11 @@ class KnowledgeBaseStore:
             if isinstance(memory_context.get("user_feedback"), list)
             else []
         )
+        execution_memory = (
+            memory_context.get("execution_memory")
+            if isinstance(memory_context.get("execution_memory"), dict)
+            else {}
+        )
         evidence_summaries = (
             memory_context.get("evidence_summaries")
             if isinstance(memory_context.get("evidence_summaries"), list)
@@ -3049,6 +3056,13 @@ class KnowledgeBaseStore:
                         for item in user_feedback[:20]
                         if isinstance(item, dict)
                     ],
+                }
+            )
+        if self._has_promptable_execution_memory(execution_memory):
+            sections.append(
+                {
+                    "section": "execution_memory_summary",
+                    "items": [self._execution_memory_surface_summary(execution_memory)],
                 }
             )
         if evidence_summaries:
@@ -3444,6 +3458,7 @@ class KnowledgeBaseStore:
         related_runs: list[Dict[str, Any]],
         prior_hypotheses: list[Dict[str, Any]],
         feedback_items: list[Dict[str, Any]],
+        execution_memory: Dict[str, Any],
         evidence_summaries: list[Dict[str, Any]],
         known_gaps: list[str],
     ) -> list[str]:
@@ -3456,6 +3471,8 @@ class KnowledgeBaseStore:
             sources.append("prior_hypotheses")
         if feedback_items:
             sources.append("chat_feedback")
+        if self._has_promptable_execution_memory(execution_memory):
+            sources.append("execution_memory")
         if evidence_summaries:
             sources.append("knowledge_base")
         if known_gaps:
@@ -3471,6 +3488,7 @@ class KnowledgeBaseStore:
         related_runs: list[Dict[str, Any]],
         prior_hypotheses: list[Dict[str, Any]],
         feedback_items: list[Dict[str, Any]],
+        execution_memory: Dict[str, Any],
         evidence_summaries: list[Dict[str, Any]],
         known_gaps: list[str],
     ) -> Dict[str, Any]:
@@ -3484,6 +3502,8 @@ class KnowledgeBaseStore:
             prompt_sections.append("prior_hypothesis_summaries")
         if feedback_items:
             prompt_sections.append("feedback_type_and_target_summary")
+        if self._has_promptable_execution_memory(execution_memory):
+            prompt_sections.append("execution_memory_summary")
         if evidence_summaries:
             prompt_sections.append("evidence_boundary_and_snippet_summaries")
         if known_gaps:
@@ -3497,6 +3517,7 @@ class KnowledgeBaseStore:
                 "related_runs": len(related_runs),
                 "prior_hypotheses": len(prior_hypotheses),
                 "feedback_items": len(feedback_items),
+                "execution_memory": 1 if self._has_promptable_execution_memory(execution_memory) else 0,
                 "evidence_summaries": len(evidence_summaries),
                 "known_gaps": len(known_gaps),
             },
@@ -3517,6 +3538,13 @@ class KnowledgeBaseStore:
                 "raw chat, feedback, checkpoint, tool result, provider, and fulltext payloads stay out of prompts."
             ),
         }
+
+    @staticmethod
+    def _has_promptable_execution_memory(execution_memory: Dict[str, Any]) -> bool:
+        if not isinstance(execution_memory, dict) or not execution_memory:
+            return False
+        status = str(execution_memory.get("status") or "not_available")
+        return bool(execution_memory.get("checkpoint_available")) or status in {"ready", "limited"}
 
     def _evidence_memory_boundary(self, evidence_summaries: list[Dict[str, Any]]) -> Dict[str, Any]:
         source_reliability_counts: Dict[str, int] = {}
