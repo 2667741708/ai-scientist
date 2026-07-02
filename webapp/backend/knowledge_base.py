@@ -2545,11 +2545,16 @@ class KnowledgeBaseStore:
 
         feedback_run_id = parent_run_id if parent_run_id else None
         feedback_items = self.list_feedback_items(run_id=feedback_run_id, limit=20) if feedback_run_id else []
-        evidence_library_id = library_id if normalized_scope in {"project", "library"} else None
-        evidence_summaries = [
-            self._evidence_memory_summary(item)
-            for item in self.search_chunks(research_goal, limit=max(1, max_evidence), library_id=evidence_library_id)
-        ]
+        if normalized_scope == "current_run":
+            evidence_summaries = []
+            known_gaps = ["current_run scope does not retrieve project, library, or global evidence memory."]
+        else:
+            evidence_library_id = library_id if normalized_scope in {"project", "library"} else None
+            evidence_summaries = [
+                self._evidence_memory_summary(item)
+                for item in self.search_chunks(research_goal, limit=max(1, max_evidence), library_id=evidence_library_id)
+            ]
+            known_gaps = []
         return {
             "memory_scope": normalized_scope,
             "parent_run": self._run_memory_summary(parent_run) if isinstance(parent_run, dict) else None,
@@ -2557,7 +2562,7 @@ class KnowledgeBaseStore:
             "prior_hypotheses": prior_hypotheses,
             "user_feedback": feedback_items,
             "evidence_summaries": evidence_summaries,
-            "known_gaps": [],
+            "known_gaps": known_gaps,
             "memory_boundary": "Summaries only; raw records are not injected.",
         }
 
