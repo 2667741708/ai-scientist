@@ -26,6 +26,60 @@ RUN_STATUS_LABELS = {
 }
 
 
+def research_goal_readiness_surface_summary(
+    request_preview: Any,
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    request = _as_mapping(request_preview)
+    if not request and isinstance(request_preview, str):
+        request = {"research_goal": request_preview}
+    research_goal = str(_first_value(request, ("research_goal", "goal", "input")) or "").strip()
+    constraints = [str(item).strip() for item in _as_list(request.get("constraints")) if str(item).strip()]
+    attributes = [str(item).strip() for item in _as_list(request.get("attributes")) if str(item).strip()]
+    starting_hypotheses = [str(item).strip() for item in _as_list(request.get("starting_hypotheses")) if str(item).strip()]
+    user_feedback = [_as_mapping(item) for item in _as_list(request.get("user_feedback"))]
+    signals = _goal_readiness_signals(
+        research_goal=research_goal,
+        preferences=str(request.get("preferences") or ""),
+        constraints=constraints,
+        attributes=attributes,
+        starting_hypotheses=starting_hypotheses,
+    )
+    missing = [key for key, available in signals.items() if not available]
+    status = _goal_readiness_status(research_goal=research_goal, missing=missing)
+    summary = {
+        "status": status,
+        "research_goal": _compact_text(research_goal, max_length=360),
+        "signals": signals,
+        "missing_elements": missing,
+        "counts": {
+            "constraints": len(constraints),
+            "attributes": len(attributes),
+            "starting_hypotheses": len(starting_hypotheses),
+            "user_feedback": len(user_feedback),
+        },
+        "constraint_previews": _preview_list(constraints, max_items=3, max_length=140),
+        "attribute_previews": _preview_list(attributes, max_items=6, max_length=80),
+        "starting_hypothesis_previews": _preview_list(starting_hypotheses, max_items=3, max_length=180),
+        "guidance": _goal_readiness_guidance(status=status, missing=missing),
+        "next_actions": _goal_readiness_next_actions(status=status, missing=missing),
+        "visibility_boundary": (
+            "Research goal readiness summaries expose the goal, validation signals, missing elements, "
+            "short previews, counts, and task guidance by default; raw RunRequest JSON, intent-router "
+            "debug, full feedback text, internal IDs, and provider diagnostics require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "request_preview": dict(request),
+            "parent_run_id": request.get("parent_run_id"),
+            "library_id": request.get("library_id"),
+            "memory_scope": request.get("memory_scope"),
+        }
+    return summary
+
+
 def runtime_readiness_surface_summary(
     *,
     worker_status: Optional[Mapping[str, Any]] = None,
@@ -839,6 +893,137 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _goal_readiness_signals(
+    *,
+    research_goal: str,
+    preferences: str,
+    constraints: list[str],
+    attributes: list[str],
+    starting_hypotheses: list[str],
+) -> Dict[str, bool]:
+    combined = " ".join([research_goal, preferences, *constraints, *attributes, *starting_hypotheses]).lower()
+    return {
+        "mechanism_or_method": _contains_marker(
+            combined,
+            (
+                "mechanism",
+                "method",
+                "protocol",
+                "causal",
+                "pathway",
+                "intervention",
+                "\u673a\u5236",
+                "\u65b9\u6cd5",
+                "\u8def\u5f84",
+            ),
+        ),
+        "observable_variables": _contains_marker(
+            combined,
+            (
+                "observable",
+                "variable",
+                "metric",
+                "measure",
+                "benchmark",
+                "accuracy",
+                "rate",
+                "\u53d8\u91cf",
+                "\u6307\u6807",
+                "\u53ef\u89c2\u6d4b",
+            ),
+        ),
+        "validation_path": _contains_marker(
+            combined,
+            (
+                "experiment",
+                "validate",
+                "validation",
+                "ablation",
+                "baseline",
+                "trial",
+                "test",
+                "\u5b9e\u9a8c",
+                "\u9a8c\u8bc1",
+                "\u5bf9\u7167",
+            ),
+        ),
+        "failure_conditions": _contains_marker(
+            combined,
+            (
+                "falsif",
+                "failure",
+                "fail",
+                "negative control",
+                "counter",
+                "threshold",
+                "\u8bc1\u4f2a",
+                "\u5931\u8d25",
+                "\u53cd\u8bc1",
+            ),
+        ),
+        "evidence_scope": _contains_marker(
+            combined,
+            (
+                "evidence",
+                "fulltext",
+                "citation",
+                "dataset",
+                "paper",
+                "literature",
+                "parsed",
+                "\u8bc1\u636e",
+                "\u6587\u732e",
+                "\u5168\u6587",
+                "\u6570\u636e",
+            ),
+        ),
+    }
+
+
+def _contains_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _goal_readiness_status(*, research_goal: str, missing: list[str]) -> str:
+    if len(research_goal.strip()) < 8:
+        return "empty"
+    if len(missing) >= 3:
+        return "needs_refinement"
+    if missing:
+        return "partial"
+    return "ready"
+
+
+def _goal_readiness_guidance(*, status: str, missing: list[str]) -> str:
+    if status == "empty":
+        return "Add a concrete research goal before starting a run."
+    if status == "ready":
+        return "Goal is specific enough to review before starting or continuing a run."
+    labels = {
+        "mechanism_or_method": "mechanism or method",
+        "observable_variables": "observable variables or metrics",
+        "validation_path": "minimal validation path",
+        "failure_conditions": "failure or falsification conditions",
+        "evidence_scope": "evidence or literature scope",
+    }
+    missing_text = ", ".join(labels.get(item, item.replace("_", " ")) for item in missing[:3])
+    return f"Refine the goal by adding {missing_text}."
+
+
+def _goal_readiness_next_actions(*, status: str, missing: list[str]) -> list[str]:
+    if status == "empty":
+        return ["write_research_goal", "parse_evidence_first"]
+    actions: list[str] = []
+    if missing:
+        actions.append("refine_research_goal")
+    if "evidence_scope" in missing:
+        actions.append("add_or_select_evidence")
+    if "failure_conditions" in missing or "validation_path" in missing:
+        actions.append("add_validation_constraints")
+    actions.extend(["review_confirmation", "start_run"])
+    return actions
 
 
 def _sum_int(records: Iterable[Mapping[str, Any]], keys: tuple[str, ...]) -> int:
