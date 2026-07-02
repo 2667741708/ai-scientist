@@ -758,7 +758,7 @@ def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default(
         "mode": "summary_only",
         "memory_scope": "project",
         "target_prompts": ["supervisor", "generate", "review", "ranking"],
-        "section_count": 4,
+        "section_count": 5,
         "sections": [
             {
                 "section": "parent_run_summary",
@@ -777,6 +777,18 @@ def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default(
                         "feedback_type": "critique",
                         "target_type": "hypothesis",
                         "text": "SECRET feedback text should stay hidden.",
+                    }
+                ],
+            },
+            {
+                "section": "execution_memory_summary",
+                "items": [
+                    {
+                        "status": "limited",
+                        "checkpoint_id": "execution-checkpoint-secret",
+                        "checkpoint_ref": "SECRET execution checkpoint ref should stay hidden.",
+                        "phase": "review",
+                        "recovery_action": "retry",
                     }
                 ],
             },
@@ -815,10 +827,10 @@ def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default(
     assert summary["mode"] == "summary_only"
     assert summary["memory_scope"] == "project"
     assert summary["target_prompts"] == ["supervisor", "generate", "review", "ranking"]
-    assert summary["section_count"] == 4
+    assert summary["section_count"] == 5
     assert summary["counts"] == {
-        "sections": 4,
-        "items": 5,
+        "sections": 5,
+        "items": 6,
         "target_prompts": 4,
         "excluded_raw_fields": 4,
     }
@@ -839,13 +851,20 @@ def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default(
         },
         {
             "index": 3,
+            "section": "execution_memory_summary",
+            "label": "Execution memory summary",
+            "item_count": 1,
+            "default_state": "collapsed",
+        },
+        {
+            "index": 4,
             "section": "evidence_boundary_and_snippet_summaries",
             "label": "Evidence boundary summaries",
             "item_count": 2,
             "default_state": "collapsed",
         },
         {
-            "index": 4,
+            "index": 5,
             "section": "memory_limitations",
             "label": "Memory limitations",
             "item_count": 1,
@@ -862,6 +881,7 @@ def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default(
     assert "feedback-secret" not in str(summary)
     assert "paper-secret" not in str(summary)
     assert "checkpoint-secret" not in str(summary)
+    assert "execution-checkpoint-secret" not in str(summary)
     assert "raw_prompt_packet" not in str(summary)
 
     expert_summary = memory_prompt_packet_surface_summary(packet, include_internal_refs=True)
@@ -869,6 +889,7 @@ def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default(
     assert expert_summary["internal_refs"]["section_item_counts"] == {
         "parent_run_summary": 1,
         "feedback_type_and_target_summary": 1,
+        "execution_memory_summary": 1,
         "evidence_boundary_and_snippet_summaries": 2,
         "memory_limitations": 1,
     }
