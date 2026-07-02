@@ -69,6 +69,34 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
             assert "result_ref" not in active_item
 
 
+def test_worker_status_keeps_active_items_visible_with_completed_noise(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        active = studio.knowledge_base.enqueue_work_item(
+            workflow_name="workflow.open_coscientist_run",
+            run_id="run-active-visible",
+            arguments={"run_id": "run-active-visible"},
+            priority=5,
+        )
+        for index in range(25):
+            noise = studio.knowledge_base.enqueue_work_item(
+                workflow_name=f"workflow.completed_noise_{index}",
+                arguments={"index": index},
+                priority=1,
+            )
+            studio.knowledge_base.complete_work_item(noise["work_item_id"], {"status": "complete"})
+
+        worker_status = client.get("/api/worker/status").json()
+
+        assert worker_status["queued_count"] >= 1
+        assert worker_status["active_work_item_count"] >= 1
+        active_ids = {item["work_item_id"] for item in worker_status["active_work_items"]}
+        assert active["work_item_id"] in active_ids
+        assert all(item["status"] != "complete" for item in worker_status["active_work_items"])
+
+
 def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
