@@ -175,6 +175,80 @@ def hypothesis_surface_collection(
     }
 
 
+def evidence_surface_summary(
+    evidence: Any,
+    *,
+    index: Optional[int] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = _as_mapping(evidence)
+    title = _first_text(source, ("source_title", "paper_title", "title", "document_title"))
+    if not title:
+        title = "Untitled evidence source"
+    reliability = str(_first_value(source, ("source_reliability", "reliability")) or "unknown")
+    support_level = str(_first_value(source, ("support_level", "verdict", "grounding_status")) or "unknown")
+    snippet = _first_text(source, ("matched_snippet", "snippet", "text_preview", "text", "content"))
+    experiment_summary = _first_text(source, ("experiment_data_summary", "experiment_summary", "benchmark_summary"))
+    summary = {
+        "index": index,
+        "source_title": _compact_text(title, max_length=140),
+        "support_level": support_level,
+        "source_reliability": reliability,
+        "status": _evidence_status(support_level=support_level, reliability=reliability),
+        "matched_snippet_summary": _compact_text(snippet, max_length=360),
+        "experiment_data_summary": _compact_text(experiment_summary, max_length=240),
+        "source_type": str(_first_value(source, ("source", "source_type", "kind")) or "unknown"),
+        "next_actions": _evidence_next_actions(support_level=support_level, reliability=reliability),
+        "visibility_boundary": (
+            "Evidence surface summaries expose source title, support level, reliability, and short snippets by default; "
+            "chunk IDs, artifact paths, citation maps, and parser internals require explicit detail disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "paper_id": _first_value(source, ("paper_id", "source_id")),
+            "chunk_id": _first_value(source, ("chunk_id", "evidence_chunk_id")),
+            "library_id": _first_value(source, ("library_id",)),
+            "parse_run_id": _first_value(source, ("parse_run_id",)),
+            "artifact_path": _first_value(source, ("artifact_path", "media_path", "local_path")),
+            "citation_count": _citation_count(source),
+        }
+    return summary
+
+
+def evidence_surface_collection(
+    evidence_items: Iterable[Any],
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    items = [
+        evidence_surface_summary(
+            evidence,
+            index=index,
+            include_internal_refs=include_internal_refs,
+        )
+        for index, evidence in enumerate(evidence_items or [])
+    ]
+    support_counts: Dict[str, int] = {}
+    reliability_counts: Dict[str, int] = {}
+    for item in items:
+        support = str(item.get("support_level") or "unknown")
+        reliability = str(item.get("source_reliability") or "unknown")
+        support_counts[support] = support_counts.get(support, 0) + 1
+        reliability_counts[reliability] = reliability_counts.get(reliability, 0) + 1
+    return {
+        "evidence_count": len(items),
+        "support_level_counts": support_counts,
+        "source_reliability_counts": reliability_counts,
+        "items": items,
+        "boundary": _evidence_collection_boundary(items),
+        "visibility_boundary": (
+            "Evidence collection summaries are safe for default reference drawers; raw chunks, "
+            "media paths, parser artifacts, and full citation maps remain in details."
+        ),
+    }
+
+
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -288,6 +362,53 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _evidence_status(*, support_level: str, reliability: str) -> str:
+    support = support_level.lower()
+    source_reliability = reliability.lower()
+    if support in {"contradicted", "unsupported"}:
+        return "contradicted"
+    if support in {"experimental_data", "supported"}:
+        return "supported"
+    if source_reliability == "parsed_fulltext" or support == "fulltext":
+        return "supported"
+    if support in {"limited", "abstract", "metadata", "unknown", "ungrounded", ""}:
+        return "limited"
+    return "limited"
+
+
+def _evidence_next_actions(*, support_level: str, reliability: str) -> list[str]:
+    actions = ["inspect_source"]
+    status = _evidence_status(support_level=support_level, reliability=reliability)
+    if status in {"limited", "contradicted"}:
+        actions.append("verify_more_evidence")
+    if reliability != "parsed_fulltext":
+        actions.append("parse_fulltext")
+    actions.append("use_in_experiment_design")
+    return actions
+
+
+def _evidence_collection_boundary(items: list[Dict[str, Any]]) -> Dict[str, Any]:
+    if not items:
+        return {
+            "status": "absent",
+            "summary": "No evidence has been attached to this surface.",
+        }
+    if any(item.get("status") == "contradicted" for item in items):
+        return {
+            "status": "contradicted",
+            "summary": "At least one evidence item contradicts or fails to support the claim.",
+        }
+    if any(item.get("source_reliability") == "parsed_fulltext" for item in items):
+        return {
+            "status": "parsed_fulltext",
+            "summary": "At least one source is backed by parsed fulltext evidence.",
+        }
+    return {
+        "status": "limited",
+        "summary": "Evidence is limited to metadata, abstract, snippets, or unparsed sources.",
+    }
 
 
 def _first_work_item(work_snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
