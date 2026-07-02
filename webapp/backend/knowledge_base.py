@@ -2678,9 +2678,21 @@ class KnowledgeBaseStore:
             known_gaps = ["current_run scope does not retrieve project, library, or global evidence memory."]
         else:
             evidence_library_id = (library_id or DEFAULT_LIBRARY_ID) if normalized_scope == "library" else None
+            retrieved_evidence = self.search_chunks(
+                research_goal,
+                limit=max(1, max_evidence),
+                library_id=evidence_library_id,
+            )
+            prioritized_evidence = [
+                item
+                for _, item in sorted(
+                    enumerate(retrieved_evidence),
+                    key=lambda pair: (-self._evidence_memory_priority(pair[1]), pair[0]),
+                )
+            ]
             evidence_summaries = [
                 self._evidence_memory_summary(item)
-                for item in self.search_chunks(research_goal, limit=max(1, max_evidence), library_id=evidence_library_id)
+                for item in prioritized_evidence
             ]
             known_gaps = []
         memory_sources = self._memory_source_types(
@@ -2809,7 +2821,21 @@ class KnowledgeBaseStore:
             "support_level": evidence.get("support_level"),
             "snippet": str(evidence.get("text") or evidence.get("snippet") or evidence.get("text_preview") or "")[:700],
             "experiment_data_summary": evidence.get("experiment_data_summary"),
+            "memory_priority": self._evidence_memory_priority(evidence),
         }
+
+    def _evidence_memory_priority(self, evidence: Dict[str, Any]) -> int:
+        support_level = str(evidence.get("support_level") or "")
+        source_reliability = str(evidence.get("source_reliability") or "")
+        if support_level == "experimental_data":
+            return 40
+        if source_reliability == "parsed_fulltext":
+            return 30
+        if support_level == "fulltext":
+            return 20
+        if support_level == "abstract":
+            return 10
+        return 0
 
     def _memory_source_types(
         self,
