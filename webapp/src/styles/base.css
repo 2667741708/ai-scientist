@@ -1,0 +1,155 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
+  background: var(--bg);
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+textarea,
+select,
+input {
+  font: inherit;
+}
+
+button,
+.button-primary,
+.button-secondary,
+.button-ghost {
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+textarea:disabled,
+select:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+textarea[readonly],
+input[readonly] {
+  cursor: default;
+  background: var(--surface-2);
+  color: var(--muted-strong);
+}
+
+button:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--color-focus-ring);
+}
+
+textarea,
+select,
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="search"],
+input[type="number"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease;
+}
+
+textarea:hover,
+select:hover,
+input[type="text"]:hover,
+input[type="email"]:hover,
+input[type="password"]:hover,
+input[type="search"]:hover,
+input[type="number"]:hover {
+  border-color: var(--line-strong);
+}
+
+textarea[aria-invalid="true"],
+select[aria-invalid="true"],
+input[aria-invalid="true"] {
+  border-color: rgba(180, 35, 24, 0.45);
+  background: var(--red-soft);
+}
+
+[data-status="success"] {
+  border-color: rgba(24, 121, 78, 0.28);
+}
+
+[data-status="warning"] {
+  border-color: rgba(154, 91, 16, 0.28);
+}
+
+textarea {
+  min-height: 144px;
+  padding: 14px 16px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+select,
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="search"],
+input[type="number"] {
+  min-height: var(--control-height-sm);
+  padding: 0 14px;
+}
+
+input[type="search"] {
+  appearance: none;
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.spin {
+  animation: rotate 1s linear infinite;
+}
+
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}

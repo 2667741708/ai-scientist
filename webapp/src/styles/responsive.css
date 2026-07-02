@@ -1,4 +1,13 @@
 @media (max-width: 1279px) {
+  .app-shell {
+    --side-panel-width: 320px;
+    --side-panel-reserved-width: 352px;
+  }
+
+  .app-side-panel {
+    width: min(var(--side-panel-width), calc(100vw - var(--space-sm) * 2));
+  }
+
   .card-grid > *,
   .compact-grid > * {
     grid-column: span 6;
@@ -47,6 +56,15 @@
   .report-evidence-panel {
     position: static;
   }
+
+  .library-paper-row {
+    grid-template-columns: 1fr;
+  }
+
+  .library-paper-actions .button-secondary,
+  .library-paper-actions a {
+    width: 100%;
+  }
 }
 
 @media (max-width: 959px) {
@@ -82,6 +100,24 @@
     height: auto;
     overflow: visible;
     margin-left: 0;
+    margin-right: 0;
+  }
+
+  .side-panel-open .workspace {
+    margin-right: var(--side-panel-reserved-width);
+  }
+
+  .side-panel-controls {
+    top: var(--space-xs);
+    right: var(--space-xs);
+  }
+
+  .app-side-panel {
+    top: 64px;
+    right: var(--space-xs);
+    bottom: var(--space-xs);
+    width: min(var(--side-panel-width), calc(100vw - var(--space-sm)));
+    max-height: calc(100vh - 72px);
   }
 
   .primary-nav {
@@ -294,6 +330,10 @@
 }
 
 @media (max-width: 639px) {
+  .side-panel-open .workspace {
+    margin-right: 0;
+  }
+
   .workspace {
     padding: var(--space-sm);
   }
@@ -332,6 +372,16 @@
   .research-chat-launcher {
     right: var(--space-sm);
     bottom: var(--space-sm);
+  }
+
+  .side-panel-icon-button[data-tooltip]::after {
+    display: none;
+  }
+
+  .app-side-panel {
+    left: var(--space-sm);
+    right: var(--space-sm);
+    width: auto;
   }
 
   .research-chat-drawer {
@@ -389,6 +439,20 @@
   .decision-actions a,
   .decision-actions button {
     width: 100%;
+  }
+
+  .detail-section-header,
+  .matchup-brief-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .hypothesis-card-actions .button-ghost {
+    flex: 1 1 calc(50% - var(--space-xs));
+  }
+
+  .evidence-explainer-grid {
+    grid-template-columns: 1fr;
   }
 
   .research-flow-steps {
