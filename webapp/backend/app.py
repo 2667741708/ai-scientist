@@ -4303,24 +4303,28 @@ def persist_run_checkpoint_metadata(
     status: str,
     phase: str,
     checkpoint_ref: Optional[str] = None,
+    checkpoint_backend: str = "sqlite_metadata",
+    checkpoint_id: Optional[str] = None,
+    state_summary: Optional[Dict[str, Any]] = None,
 ) -> None:
+    summary = state_summary or {
+        "run_status": status,
+        "record_status": record.status,
+        "timeline_count": len(record.timeline),
+        "hypothesis_count": len(record.hypotheses),
+        "error": record.error,
+        "boundary": "Execution metadata index only; LangGraph state saver is not enabled.",
+    }
     try:
         knowledge_base.persist_checkpoint_metadata(
-            checkpoint_id=f"{record.run_id}:{status}:{phase}",
+            checkpoint_id=checkpoint_id or f"{record.run_id}:{status}:{phase}",
             run_id=record.run_id,
             thread_id=record.run_id,
             status=status,
             phase=phase,
-            checkpoint_backend="sqlite_metadata",
+            checkpoint_backend=checkpoint_backend,
             checkpoint_ref=checkpoint_ref,
-            state_summary={
-                "run_status": status,
-                "record_status": record.status,
-                "timeline_count": len(record.timeline),
-                "hypothesis_count": len(record.hypotheses),
-                "error": record.error,
-                "boundary": "Execution metadata index only; LangGraph state saver is not enabled.",
-            },
+            state_summary=summary,
         )
     except Exception as exc:
         print(f"Research checkpoint metadata failed for {record.run_id}: {exc}", file=sys.stderr)
@@ -4863,7 +4867,11 @@ async def run_real(record: RunRecord) -> None:
     try:
         normalize_provider_env()
         from open_coscientist import HypothesisGenerator
-        from open_coscientist.checkpointing import execution_memory_status, open_sqlite_checkpointer
+        from open_coscientist.checkpointing import (
+            execution_memory_status,
+            open_sqlite_checkpointer,
+            summarize_langgraph_checkpoint_tuple,
+        )
         from open_coscientist.mcp_client import (
             reset_mcp_tool_call_observer,
             set_mcp_tool_call_observer,
@@ -4925,6 +4933,7 @@ async def run_real(record: RunRecord) -> None:
             },
         }
         checkpoint_status = execution_memory_status()
+        langgraph_checkpoint_summary: Optional[Dict[str, Any]] = None
 
         if checkpoint_status.get("langgraph_checkpoint_sqlite_available"):
             async with open_sqlite_checkpointer(KB_ROOT / "langgraph_checkpoints.sqlite") as checkpointer:
@@ -4936,6 +4945,11 @@ async def run_real(record: RunRecord) -> None:
                     run_id=record.run_id,
                     stream=False,
                 )
+                async for checkpoint_tuple in checkpointer.alist(
+                    {"configurable": {"thread_id": record.run_id}}
+                ):
+                    langgraph_checkpoint_summary = summarize_langgraph_checkpoint_tuple(checkpoint_tuple)
+                    break
         else:
             result = await generator.generate_hypotheses(
                 research_goal=record.request.research_goal,
@@ -4976,6 +4990,17 @@ async def run_real(record: RunRecord) -> None:
         record.status = "complete"
         record.agent_trace = build_live_agent_trace(record, result)
         record.updated_at = time.time()
+        if langgraph_checkpoint_summary:
+            latest_checkpoint_id = langgraph_checkpoint_summary.get("checkpoint_id")
+            persist_run_checkpoint_metadata(
+                record,
+                status="complete",
+                phase="langgraph",
+                checkpoint_backend="langgraph_sqlite",
+                checkpoint_ref=str(latest_checkpoint_id) if latest_checkpoint_id else None,
+                checkpoint_id=f"{record.run_id}:langgraph:{latest_checkpoint_id or 'latest'}",
+                state_summary=langgraph_checkpoint_summary,
+            )
         persist_run_record(record)
     except Exception as exc:
         record.status = "error"
