@@ -77,3 +77,94 @@ def test_run_real_passes_record_run_id_to_generator(monkeypatch) -> None:
         assert generate_kwargs["opts"]["checkpointer"] is not None
     else:
         assert "checkpointer" not in generate_kwargs["opts"]
+
+
+def test_run_real_passes_parent_memory_summary_constraints(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+    captured: dict[str, object] = {}
+
+    class FakeHypothesisGenerator:
+        def __init__(self, **kwargs):
+            captured["init_kwargs"] = kwargs
+
+        async def generate_hypotheses(self, **kwargs):
+            captured["generate_kwargs"] = kwargs
+            return {
+                "hypotheses": [],
+                "research_plan": {},
+                "tournament_matchups": [],
+                "metrics": {},
+                "workflow_tool_policy": {},
+            }
+
+    with tempdir:
+        import open_coscientist
+
+        monkeypatch.setattr(open_coscientist, "HypothesisGenerator", FakeHypothesisGenerator)
+
+        parent_request = studio.RunRequest(
+            research_goal="Find parent memory mechanisms for durable research continuation",
+            demo_mode=False,
+            literature_review=False,
+            initial_hypotheses=1,
+            iterations=0,
+            min_references=0,
+            max_references=1,
+        )
+        parent_record = studio.RunRecord(
+            run_id="parent-run-memory",
+            status="complete",
+            created_at=1.0,
+            updated_at=1.0,
+            request=parent_request,
+            hypotheses=[
+                {
+                    "id": "hyp-parent-1",
+                    "text": "Parent hypothesis should be reused as summarized context.",
+                    "explanation": "The earlier run found a plausible continuation path.",
+                    "support_level": "limited",
+                }
+            ],
+            metrics={"summary": "Parent run favored falsifiable continuation hypotheses."},
+        )
+        studio.persist_run_record(parent_record)
+        studio.knowledge_base.store_feedback_item(
+            run_id="parent-run-memory",
+            target_type="hypothesis",
+            target_ref={"hypothesis_id": "hyp-parent-1"},
+            feedback_type="prefer",
+            text="Prefer hypotheses that keep evidence provenance explicit.",
+            source="user",
+        )
+
+        request = studio.RunRequest(
+            research_goal="Continue parent memory mechanisms with stricter provenance",
+            demo_mode=False,
+            literature_review=False,
+            initial_hypotheses=1,
+            iterations=0,
+            min_references=0,
+            max_references=1,
+            parent_run_id="parent-run-memory",
+        )
+        record = studio.RunRecord(
+            run_id="child-run-memory",
+            status="queued",
+            created_at=2.0,
+            updated_at=2.0,
+            request=request,
+        )
+
+        asyncio.run(studio.run_real(record))
+
+    constraints = captured["generate_kwargs"]["opts"]["constraints"]
+    joined_constraints = "\n".join(constraints)
+    assert "[memory_parent_run]" in joined_constraints
+    assert "Parent run favored falsifiable continuation hypotheses" in joined_constraints
+    assert "[memory_prior_hypothesis]" in joined_constraints
+    assert "Parent hypothesis should be reused" in joined_constraints
+    assert "[memory_user_feedback]" in joined_constraints
+    assert "Prefer hypotheses that keep evidence provenance explicit" in joined_constraints
+    assert "[memory_usage_policy]" in joined_constraints
+    assert "parent-run-memory" not in joined_constraints
