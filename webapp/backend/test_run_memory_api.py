@@ -86,6 +86,7 @@ def test_run_memory_endpoint_returns_ui_summary_without_raw_details(monkeypatch)
         assert summary["prior_hypotheses_count"] == 1
         assert summary["user_feedback_count"] == 1
         assert summary["evidence_summary_count"] >= 1
+        assert summary["evidence_library_count"] >= 1
         assert "parent_run" in summary["source_types"]
         assert "prior_hypotheses" in summary["source_types"]
         assert "chat_feedback" in summary["source_types"]
@@ -97,6 +98,7 @@ def test_run_memory_endpoint_returns_ui_summary_without_raw_details(monkeypatch)
             "knowledge_base",
         }
         evidence_section = next(section for section in summary["sections"] if section["type"] == "knowledge_base")
+        assert evidence_section["library_count"] >= 1
         assert evidence_section["source_reliability_counts"]["parsed_fulltext"] >= 1
         assert evidence_section["support_level_counts"]["fulltext"] >= 1
         assert "Summary-only memory view" in summary["boundary"]
