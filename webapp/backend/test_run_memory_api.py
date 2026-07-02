@@ -106,3 +106,36 @@ def test_run_memory_endpoint_returns_ui_summary_without_raw_details(monkeypatch)
         memory = payload["memory"]
         assert memory["user_feedback"][0]["target_ref"]["hypothesis_id"] == "hyp_parent"
         assert memory["evidence_summaries"][0]["source_reliability"] == "parsed_fulltext"
+
+
+def test_run_memory_summary_reports_current_run_limitations(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        record = studio.RunRecord(
+            run_id="current-run-memory-limitations",
+            status="queued",
+            created_at=1.0,
+            updated_at=1.0,
+            request=studio.RunRequest(
+                research_goal="Current run memory scope should expose limitations",
+                demo_mode=True,
+                literature_review=False,
+                memory_scope="current_run",
+            ),
+        )
+        studio.persist_run_record(record)
+
+        response = client.get("/api/runs/current-run-memory-limitations/memory")
+
+        assert response.status_code == 200, response.text
+        summary = response.json()["summary"]
+        assert summary["memory_scope"] == "current_run"
+        assert summary["known_gaps_count"] == 1
+        assert "memory_limitations" in summary["source_types"]
+        limitation_section = next(
+            section for section in summary["sections"] if section["type"] == "memory_limitations"
+        )
+        assert limitation_section["count"] == 1
+        assert "current_run scope" in limitation_section["items"][0]
