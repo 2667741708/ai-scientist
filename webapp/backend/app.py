@@ -957,6 +957,21 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
             "availability": {"available": True, "status": "ready", "summary": "依赖当前 run 的 hypotheses/reviews/evidence。"},
         },
         {
+            "id": "hypothesis.feedback",
+            "userTitle": "记录专家反馈",
+            "userSummary": "把研究者对候选假设的接受、偏好、批评或修订意见保存为下一轮 continuation/refinement 的反馈记忆。",
+            "intent": "apply_expert_feedback",
+            "taskArea": "hypothesis_audit",
+            "executionMode": "read_only",
+            "requiredInputs": [
+                {"key": "run_id", "label": "当前运行", "type": "run_ref", "required": True},
+                {"key": "feedback_text", "label": "反馈内容", "type": "text", "required": True},
+            ],
+            "expectedOutputs": ["feedback memory item", "target hypothesis ref", "next-run refinement context"],
+            "groundingBoundary": "run_audit",
+            "availability": {"available": True, "status": "ready", "summary": "反馈会进入下一轮 run 或 continuation，不会即时改写当前结果。"},
+        },
+        {
             "id": "ranking.explain_elo",
             "userTitle": "解释 Elo 锦标赛排名",
             "userSummary": "从真实 tournament_matchups 解释 winner/loser、confidence、before/after Elo 和排序依据。",
