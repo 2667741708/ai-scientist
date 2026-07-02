@@ -4797,6 +4797,18 @@ AGENT_TRACE_STABLE_PHASE_ORDER = [
     "proximity",
 ]
 
+AGENT_TRACE_PHASE_LABELS = {
+    "supervisor": "Research planning",
+    "literature_review": "Literature grounding",
+    "generate": "Hypothesis generation",
+    "reflection": "Reflection and gap analysis",
+    "review": "Scientific review",
+    "ranking": "Tournament ranking",
+    "meta_review": "Meta-review synthesis",
+    "evolve": "Hypothesis evolution",
+    "proximity": "Diversity and deduplication",
+}
+
 
 def registry_agent_for_phase(phase: str) -> Optional[Dict[str, Any]]:
     canonical_phase = AGENT_TRACE_PHASE_ALIASES.get(str(phase).lower(), str(phase).lower())
@@ -4828,6 +4840,11 @@ def canonical_trace_phase(phase: Any) -> str:
     return AGENT_TRACE_PHASE_ALIASES.get(normalized, normalized or "unknown")
 
 
+def trace_phase_label(phase: Any) -> str:
+    canonical_phase = canonical_trace_phase(phase)
+    return AGENT_TRACE_PHASE_LABELS.get(canonical_phase, canonical_phase.replace("_", " ").title())
+
+
 def agent_trace_user_summary(traces: List[AgentTrace]) -> Dict[str, Any]:
     seen_phases = {canonical_trace_phase(trace.phase) for trace in traces}
     ordered_phases = [phase for phase in AGENT_TRACE_STABLE_PHASE_ORDER if phase in seen_phases]
@@ -4835,6 +4852,7 @@ def agent_trace_user_summary(traces: List[AgentTrace]) -> Dict[str, Any]:
     degraded = [
         {
             "phase": canonical_trace_phase(trace.phase),
+            "label": trace_phase_label(trace.phase),
             "agent_id": trace.agent_id,
             "degradation_reason": trace.degradation_reason,
         }
@@ -4844,6 +4862,7 @@ def agent_trace_user_summary(traces: List[AgentTrace]) -> Dict[str, Any]:
     return {
         "trace_count": len(traces),
         "phase_order": ordered_phases,
+        "phase_labels": [{"phase": phase, "label": trace_phase_label(phase)} for phase in ordered_phases],
         "degraded_phases": degraded,
         "degradation_count": len(degraded),
         "boundary": (
