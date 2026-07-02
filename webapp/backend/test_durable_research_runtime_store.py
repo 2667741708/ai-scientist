@@ -155,6 +155,7 @@ def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
         assert "knowledge_base" in project_memory["memory_sources"]
         assert project_memory["evidence_boundary"]["status"] == "parsed_fulltext"
         assert project_memory["evidence_boundary"]["parsed_fulltext_count"] >= 1
+        assert "Retrieval evidence tracing" in project_memory["evidence_summaries"][0]["snippet"]
 
 
 def test_memory_scope_library_filters_evidence_without_narrowing_project_or_global() -> None:
