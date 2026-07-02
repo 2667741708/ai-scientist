@@ -450,6 +450,20 @@ async def generate_hypotheses(state: WorkflowState) -> Dict[str, Any]:
             "debate_transcripts": results.debate_transcripts,
             "hypothesis_count": len(all_hypotheses),
             "message": message_content,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": message_content,
+                    "metadata": {
+                        "phase": "generate",
+                        "tools_count": len(results.tools_hypotheses),
+                        "debate_with_literature_count": len(results.debate_with_lit_hypotheses),
+                        "debate_only_count": len(results.debate_only_hypotheses),
+                        "hypotheses_count": len(all_hypotheses),
+                        "degraded_mode": counts.is_degraded_mode,
+                    },
+                }
+            ],
         }
 
     except Exception as e:
