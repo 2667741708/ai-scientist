@@ -437,6 +437,107 @@ def experiment_design_surface_summary(
     return summary
 
 
+def report_surface_summary(
+    report: Any,
+    *,
+    hypotheses: Optional[Iterable[Any]] = None,
+    evidence_items: Optional[Iterable[Any]] = None,
+    experiment: Any = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = _as_mapping(report)
+    request = _as_mapping(source.get("request"))
+    metrics = _as_mapping(source.get("metrics"))
+    memory_summary = _as_mapping(source.get("memory_summary") or source.get("memory"))
+    hypothesis_records = _record_items(hypotheses if hypotheses is not None else source.get("hypotheses"))
+    evidence_records = _record_items(
+        evidence_items
+        if evidence_items is not None
+        else _first_value(source, ("evidence_items", "evidence", "sources", "references"))
+    )
+    experiment_source = experiment if experiment is not None else _first_value(
+        source,
+        ("experiment_design", "experiment_plan", "experiment"),
+    )
+    if isinstance(experiment_source, str):
+        experiment_source = {"experiment_plan": experiment_source, "title": source.get("title")}
+    if not _as_mapping(experiment_source) and hypothesis_records:
+        experiment_source = hypothesis_records[0]
+    mode_boundary = _run_mode_boundary(request=request, metrics=metrics, memory_summary=memory_summary)
+    hypothesis_collection = hypothesis_surface_collection(hypothesis_records)
+    evidence_collection = evidence_surface_collection(evidence_records)
+    experiment_summary = experiment_design_surface_summary(experiment_source, evidence_items=evidence_records)
+    findings = _report_findings(source, hypothesis_collection.get("items", []))
+    limitations = _report_limitations(
+        source=source,
+        mode_boundary=mode_boundary,
+        evidence_boundary=evidence_collection.get("boundary"),
+        experiment_summary=experiment_summary,
+    )
+    citation_qa = _citation_qa_surface_summary(source, evidence_collection)
+    status = _report_status(
+        findings=findings,
+        evidence_boundary=evidence_collection.get("boundary"),
+        experiment_status=str(experiment_summary.get("status") or "absent"),
+        citation_qa=citation_qa,
+    )
+    summary = {
+        "status": status,
+        "title": _compact_text(
+            _first_text(source, ("title", "report_title", "name"))
+            or _first_text(request, ("research_goal", "goal"))
+            or _first_text(source, ("research_goal", "goal"))
+            or "Research report draft",
+            max_length=180,
+        ),
+        "research_goal": _compact_text(
+            _first_text(source, ("research_goal", "goal")) or _first_text(request, ("research_goal", "goal")),
+            max_length=360,
+        ),
+        "mode_boundary": mode_boundary,
+        "findings": findings,
+        "hypotheses": {
+            "hypothesis_count": hypothesis_collection.get("hypothesis_count", 0),
+            "items": hypothesis_collection.get("items", [])[:5],
+            "origin_counts": hypothesis_collection.get("origin_counts", {}),
+            "support_level_counts": hypothesis_collection.get("support_level_counts", {}),
+        },
+        "evidence": {
+            "evidence_count": evidence_collection.get("evidence_count", 0),
+            "boundary": evidence_collection.get("boundary"),
+            "support_level_counts": evidence_collection.get("support_level_counts", {}),
+            "source_reliability_counts": evidence_collection.get("source_reliability_counts", {}),
+        },
+        "experiment": {
+            "status": experiment_summary.get("status"),
+            "plan_summary": experiment_summary.get("plan_summary"),
+            "failure_conditions": experiment_summary.get("failure_conditions", []),
+            "minimal_validation_path": experiment_summary.get("minimal_validation_path"),
+            "missing_sections": experiment_summary.get("missing_sections", []),
+        },
+        "limitations": limitations,
+        "citation_qa": citation_qa,
+        "next_actions": _report_next_actions(status=status, citation_qa=citation_qa, limitations=limitations),
+        "visibility_boundary": (
+            "Report surface summaries expose findings, selected hypotheses, evidence boundary, experiment plan, "
+            "limitations, citation QA, and export readiness by default; raw backend payloads, provider errors, "
+            "tool result JSON, local paths, and internal IDs require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "run_id": source.get("run_id"),
+            "report_id": _first_value(source, ("report_id", "id")),
+            "hypothesis_ids": [
+                _first_value(hypothesis, ("id", "hypothesis_id"))
+                for hypothesis in hypothesis_records
+                if _first_value(hypothesis, ("id", "hypothesis_id"))
+            ],
+            "raw_source": dict(source),
+        }
+    return summary
+
+
 def evidence_surface_summary(
     evidence: Any,
     *,
@@ -816,6 +917,110 @@ def _experiment_next_actions(*, status: str, missing_sections: list[str]) -> lis
     if status == "ready":
         actions.insert(1, "prepare_execution_workflow")
     return actions
+
+
+def _report_findings(source: Mapping[str, Any], hypothesis_items: list[Mapping[str, Any]]) -> list[str]:
+    findings = _surface_text_items(
+        _first_value(source, ("findings", "finding_summary", "key_findings", "claims")),
+        max_items=6,
+        max_length=260,
+    )
+    if findings:
+        return findings
+    return [
+        _compact_text(item.get("plain_summary") or item.get("title"), max_length=220)
+        for item in hypothesis_items[:3]
+        if item.get("plain_summary") or item.get("title")
+    ]
+
+
+def _report_limitations(
+    *,
+    source: Mapping[str, Any],
+    mode_boundary: Mapping[str, Any],
+    evidence_boundary: Any,
+    experiment_summary: Mapping[str, Any],
+) -> list[str]:
+    limitations = _surface_text_items(
+        _first_value(source, ("limitations", "known_limitations", "known_gaps", "evidence_gaps")),
+        max_items=8,
+        max_length=220,
+    )
+    mode = str(mode_boundary.get("mode") or "")
+    if mode == "demo_only":
+        limitations.append("Demo output is for workflow/schema validation only, not scientific evidence.")
+    elif mode_boundary.get("evidence_status") in {"absent", "unknown", "limited"}:
+        limitations.append("Evidence support is limited; treat findings as draft hypotheses until fulltext support is verified.")
+    boundary = _as_mapping(evidence_boundary)
+    if boundary.get("status") == "contradicted":
+        limitations.append("At least one evidence item contradicts or fails to support a reported claim.")
+    elif boundary.get("status") == "absent":
+        limitations.append("No evidence sources are attached to this report surface.")
+    missing_experiment = _as_list(experiment_summary.get("missing_sections"))
+    if missing_experiment:
+        limitations.append(f"Experiment design is incomplete: {', '.join(str(item) for item in missing_experiment[:4])}.")
+    return _dedupe_text_items(limitations)
+
+
+def _citation_qa_surface_summary(source: Mapping[str, Any], evidence_collection: Mapping[str, Any]) -> Dict[str, Any]:
+    qa = _as_mapping(_first_value(source, ("citation_qa", "citation_provenance_qa", "citationQa")))
+    status = str(_first_value(qa, ("status", "result", "decision")) or "").strip().lower()
+    evidence_count = _safe_int(evidence_collection.get("evidence_count")) or 0
+    if status in {"passed", "pass", "checked", "ok", "complete"}:
+        normalized = "passed"
+    elif status in {"failed", "error", "citation_mismatch", "mismatch"}:
+        normalized = "needs_review"
+    elif evidence_count > 0:
+        normalized = "available"
+    else:
+        normalized = "missing"
+    return {
+        "status": normalized,
+        "checked": normalized in {"passed", "needs_review"},
+        "evidence_count": evidence_count,
+        "summary": _compact_text(_first_value(qa, ("summary", "message", "note")), max_length=220),
+    }
+
+
+def _report_status(
+    *,
+    findings: list[str],
+    evidence_boundary: Any,
+    experiment_status: str,
+    citation_qa: Mapping[str, Any],
+) -> str:
+    if not findings:
+        return "empty"
+    boundary = _as_mapping(evidence_boundary)
+    if boundary.get("status") == "contradicted" or citation_qa.get("status") == "needs_review":
+        return "needs_review"
+    if boundary.get("status") in {"absent", "limited"} or experiment_status in {"absent", "limited"}:
+        return "draft"
+    return "ready"
+
+
+def _report_next_actions(*, status: str, citation_qa: Mapping[str, Any], limitations: list[str]) -> list[str]:
+    if status == "empty":
+        return ["select_hypotheses", "draft_findings"]
+    actions = ["review_limitations"] if limitations else []
+    if citation_qa.get("status") in {"missing", "available"}:
+        actions.append("run_citation_qa")
+    if status == "needs_review":
+        actions.append("resolve_evidence_conflicts")
+    actions.extend(["copy_report", "export_report"])
+    return actions
+
+
+def _dedupe_text_items(items: Iterable[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        compact = _compact_text(item, max_length=260)
+        key = compact.lower()
+        if compact and key not in seen:
+            deduped.append(compact)
+            seen.add(key)
+    return deduped
 
 
 def _worker_readiness_state(*, worker_enabled: bool, counts: Mapping[str, int]) -> str:
