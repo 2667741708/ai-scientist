@@ -2452,7 +2452,7 @@ def _run_next_actions(
 
 def _run_queue_summary(work_snapshot: Mapping[str, Any], work_item: Mapping[str, Any]) -> Dict[str, Any]:
     counts = _as_mapping(work_snapshot.get("counts"))
-    return {
+    summary = {
         "active_work_item_count": _safe_int(counts.get("active")) or 0,
         "queued_count": _safe_int(counts.get("queued")) or 0,
         "retrying_count": _safe_int(counts.get("retrying")) or 0,
@@ -2461,6 +2461,10 @@ def _run_queue_summary(work_snapshot: Mapping[str, Any], work_item: Mapping[str,
         "current_work_label": work_item.get("status_label"),
         "current_work_next_action": work_item.get("next_action"),
     }
+    recovery_action = work_item.get("recovery_action")
+    if recovery_action:
+        summary["current_work_recovery_action"] = _compact_text(recovery_action, max_length=40)
+    return summary
 
 
 def _run_memory_summary_for_surface(memory: Mapping[str, Any]) -> Dict[str, Any]:
