@@ -203,10 +203,22 @@ def get_agent_spec(agent_id: str) -> Optional[AgentSpec]:
 def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
     agents = list_agent_specs(public=public)
     phases = [str(agent["phase"]) for agent in agents]
+    phase_index = {
+        str(agent["phase"]): {
+            "agent_id": agent["agent_id"],
+            "role": agent["role"],
+            "prompt_template": agent["prompt_template"],
+            "configurable": agent["configurable"],
+            "degradation_when_disabled": agent["degradation_when_disabled"],
+        }
+        for agent in agents
+    }
     return {
         "agents": agents,
         "count": len(agents),
         "phases": phases,
+        "phase_index": phase_index,
+        "observability_contract": BASE_OBSERVABILITY_FIELDS,
         "registry_version": "paper_level_v1",
         "boundary": "Static registry metadata; LangGraph nodes remain the runtime implementation.",
     }
