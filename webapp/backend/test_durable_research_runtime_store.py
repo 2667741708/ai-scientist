@@ -120,6 +120,30 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         assert memory["memory_boundary"] == "Summaries only; raw records are not injected."
 
 
+def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        store.ingest(
+            title="Project evidence that should stay out of current-run memory",
+            content="Retrieval evidence tracing appears in the broader project knowledge base.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+
+        current_memory = store.build_memory_context(
+            research_goal="retrieval evidence tracing",
+            memory_scope="current_run",
+        )
+        project_memory = store.build_memory_context(
+            research_goal="retrieval evidence tracing",
+            memory_scope="project",
+        )
+
+        assert current_memory["evidence_summaries"] == []
+        assert "current_run scope" in current_memory["known_gaps"][0]
+        assert project_memory["evidence_summaries"]
+
+
 def test_research_runtime_schema_migrates_legacy_work_item_table() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "knowledge.sqlite3"
