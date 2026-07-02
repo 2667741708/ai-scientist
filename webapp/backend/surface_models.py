@@ -25,6 +25,57 @@ RUN_STATUS_LABELS = {
     "stale": "Needs recovery",
 }
 
+AGENT_PROCESS_PHASE_ORDER = [
+    "supervisor",
+    "literature_review",
+    "generate",
+    "reflection",
+    "review",
+    "ranking",
+    "meta_review",
+    "evolve",
+    "proximity",
+]
+
+AGENT_PROCESS_PHASE_LABELS = {
+    "supervisor": "Research planning",
+    "literature_review": "Literature grounding",
+    "generate": "Hypothesis generation",
+    "reflection": "Evidence reflection",
+    "review": "Scientific critique",
+    "ranking": "Tournament ranking",
+    "meta_review": "Meta-review synthesis",
+    "evolve": "Hypothesis evolution",
+    "proximity": "Diversity control",
+}
+
+AGENT_PROCESS_PHASE_ALIASES = {
+    "literature": "literature_review",
+    "lit_review": "literature_review",
+    "generation": "generate",
+    "hypothesis_generation": "generate",
+    "rank": "ranking",
+    "tournament": "ranking",
+    "metareview": "meta_review",
+    "meta": "meta_review",
+    "evolution": "evolve",
+    "dedupe": "proximity",
+    "dedup": "proximity",
+    "diversity": "proximity",
+}
+
+AGENT_PROCESS_PHASE_ROLES = {
+    "supervisor": "Plans the research task and applies goal, constraint, and memory guidance.",
+    "literature_review": "Grounds the task in literature, PDF/fulltext, and knowledge-source evidence.",
+    "generate": "Creates candidate hypotheses and integrates user-provided starting hypotheses.",
+    "reflection": "Compares candidates against evidence, gaps, and literature context.",
+    "review": "Critiques hypotheses for soundness, novelty, feasibility, relevance, and safety.",
+    "ranking": "Compares hypotheses through pairwise tournament ranking and Elo-style provenance.",
+    "meta_review": "Synthesizes cross-hypothesis themes, weaknesses, and strategic recommendations.",
+    "evolve": "Refines top hypotheses using critique, feedback, and diversity guidance.",
+    "proximity": "Clusters and deduplicates hypotheses to reduce repetition and mode collapse.",
+}
+
 
 def research_goal_readiness_surface_summary(
     request_preview: Any,
@@ -379,6 +430,7 @@ def workspace_surface_summary(
     worker_status = _as_mapping(source.get("worker_status"))
     execution_memory = _as_mapping(source.get("execution_memory"))
     service_statuses = _as_mapping(source.get("service_statuses"))
+    process_trace = _first_value(source, ("agent_trace", "agent_trace_summary", "process_trace"))
 
     goal = research_goal_readiness_surface_summary(request)
     confirmation = (
@@ -411,6 +463,7 @@ def workspace_surface_summary(
         if worker_status or execution_memory or service_statuses
         else None
     )
+    process = agent_process_surface_summary(process_trace) if process_trace is not None else None
     primary_surface = _workspace_primary_surface(
         goal_summary=goal,
         confirmation_summary=confirmation,
@@ -436,13 +489,14 @@ def workspace_surface_summary(
             "run": run_summary,
             "memory": memory,
             "evidence_library": evidence_library,
+            "process": process,
             "runtime": runtime,
         },
         "inspectors": _workspace_inspectors(
             memory_summary=memory,
             evidence_library_summary=evidence_library,
             runtime_summary=runtime,
-            agent_trace_available=bool(source.get("agent_trace") or source.get("agent_trace_summary")),
+            agent_trace_available=bool(process and process.get("status") != "absent"),
         ),
         "next_actions": primary_surface["next_actions"],
         "hidden_by_default": [
@@ -471,6 +525,69 @@ def workspace_surface_summary(
                 if _first_value(item, ("work_item_id", "id"))
             ],
             "raw_workspace_state": dict(source),
+        }
+    return summary
+
+
+def agent_process_surface_summary(
+    trace_events: Any,
+    *,
+    registry: Optional[Mapping[str, Any]] = None,
+    max_items: int = 12,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    records = _agent_process_records(trace_events)
+    phase_index = _agent_process_phase_index(registry)
+    items = [
+        _agent_process_item(record, phase_index=phase_index, index=index)
+        for index, record in enumerate(records)
+    ]
+    sorted_items = sorted(
+        items,
+        key=lambda item: _agent_process_sort_key(str(item.get("phase") or ""), fallback_index=int(item.get("index") or 0)),
+    )
+    displayed_items = sorted_items[: max(0, max_items)]
+    counts = _agent_process_counts(sorted_items)
+    status = _agent_process_status(counts)
+    summary = {
+        "status": status,
+        "trace_count": len(sorted_items),
+        "displayed_trace_count": len(displayed_items),
+        "truncated_trace_count": max(0, len(sorted_items) - len(displayed_items)),
+        "phase_order": [item["phase"] for item in sorted_items],
+        "current_phase": _agent_process_current_phase(sorted_items),
+        "counts": counts,
+        "items": [_agent_process_default_item(item) for item in displayed_items],
+        "next_actions": _agent_process_next_actions(status=status, counts=counts),
+        "visibility_boundary": (
+            "Agent process summaries expose research-step labels, roles, status, short output summaries, "
+            "degradation flags, and tool-call counts by default; agent IDs, event IDs, prompt/template names, "
+            "token usage, tool arguments/results, provider payloads, and raw trace JSON require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "agent_ids": [
+                item.get("agent_id")
+                for item in sorted_items
+                if item.get("agent_id")
+            ],
+            "event_ids": [
+                item.get("event_id")
+                for item in sorted_items
+                if item.get("event_id")
+            ],
+            "prompt_templates": [
+                item.get("prompt_template")
+                for item in sorted_items
+                if item.get("prompt_template")
+            ],
+            "token_usage_by_phase": {
+                str(item.get("phase")): item.get("token_usage")
+                for item in sorted_items
+                if item.get("token_usage")
+            },
+            "raw_trace_events": [dict(record) for record in records],
         }
     return summary
 
@@ -2182,6 +2299,236 @@ def _workspace_inspectors(
         },
     ]
     return inspectors
+
+
+def _agent_process_records(trace_events: Any) -> list[Mapping[str, Any]]:
+    source = _as_mapping(trace_events)
+    if source:
+        for key in ("items", "agent_trace", "trace", "events"):
+            records = _record_items(source.get(key))
+            if records:
+                return records
+        trace_count = _safe_int(source.get("trace_count"))
+        if trace_count and trace_count > 0:
+            return [
+                {
+                    "phase": "process_summary",
+                    "status": "complete",
+                    "summary": f"{trace_count} process trace event(s) are available in details.",
+                }
+            ]
+        if _first_value(source, ("phase", "label", "output_summary", "summary", "status")):
+            return [source]
+        return []
+    return _record_items(trace_events)
+
+
+def _agent_process_phase_index(registry: Optional[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
+    source = _as_mapping(registry)
+    phase_index = _as_mapping(source.get("phase_index"))
+    if phase_index:
+        return {
+            str(phase): _as_mapping(spec)
+            for phase, spec in phase_index.items()
+            if _as_mapping(spec)
+        }
+    agents = _record_items(source.get("agents"))
+    return {
+        str(agent.get("phase")): agent
+        for agent in agents
+        if agent.get("phase")
+    }
+
+
+def _agent_process_item(
+    event: Mapping[str, Any],
+    *,
+    phase_index: Mapping[str, Mapping[str, Any]],
+    index: int,
+) -> Dict[str, Any]:
+    raw_phase = str(_first_value(event, ("phase", "source_phase")) or "").strip()
+    phase = _agent_process_canonical_phase(raw_phase) or raw_phase or "unknown"
+    spec = _as_mapping(phase_index.get(phase))
+    label = (
+        _first_value(event, ("label", "phase_label"))
+        or _first_value(spec, ("label",))
+        or AGENT_PROCESS_PHASE_LABELS.get(phase)
+        or phase.replace("_", " ").title()
+    )
+    role = (
+        _first_value(event, ("role", "agent_role"))
+        or _first_value(spec, ("role",))
+        or AGENT_PROCESS_PHASE_ROLES.get(phase)
+        or "Records a research workflow step."
+    )
+    return {
+        "index": index,
+        "phase": phase,
+        "source_phase": raw_phase or None,
+        "label": _compact_text(label, max_length=120),
+        "role": _compact_text(role, max_length=220),
+        "status": _agent_process_item_status(event),
+        "output_summary": _agent_process_output_summary(event),
+        "tool_call_count": _agent_process_tool_call_count(event),
+        "synthetic": bool(event.get("synthetic")),
+        "degradation_reason": _compact_text(event.get("degradation_reason"), max_length=180),
+        "agent_id": _first_value(event, ("agent_id",)) or _first_value(spec, ("agent_id",)),
+        "event_id": _first_value(event, ("event_id", "trace_id", "id")),
+        "prompt_template": _first_value(event, ("prompt_template", "template_name"))
+        or _first_value(spec, ("prompt_template",)),
+        "token_usage": _first_value(event, ("token_usage", "usage")),
+    }
+
+
+def _agent_process_default_item(item: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "phase": item.get("phase"),
+        "source_phase": item.get("source_phase"),
+        "label": item.get("label"),
+        "role": item.get("role"),
+        "status": item.get("status"),
+        "output_summary": item.get("output_summary"),
+        "tool_call_count": item.get("tool_call_count"),
+        "synthetic": bool(item.get("synthetic")),
+        "degradation_reason": item.get("degradation_reason"),
+    }
+
+
+def _agent_process_canonical_phase(phase: str) -> Optional[str]:
+    normalized = str(phase or "").strip()
+    if not normalized:
+        return None
+    if normalized in AGENT_PROCESS_PHASE_ORDER:
+        return normalized
+    return AGENT_PROCESS_PHASE_ALIASES.get(normalized)
+
+
+def _agent_process_sort_key(phase: str, *, fallback_index: int) -> tuple[int, int, str]:
+    canonical = _agent_process_canonical_phase(phase)
+    if canonical:
+        return (AGENT_PROCESS_PHASE_ORDER.index(canonical), fallback_index, canonical)
+    return (len(AGENT_PROCESS_PHASE_ORDER), fallback_index, str(phase or ""))
+
+
+def _agent_process_item_status(event: Mapping[str, Any]) -> str:
+    raw_status = str(event.get("status") or "").strip().lower()
+    status_aliases = {
+        "completed": "complete",
+        "complete": "complete",
+        "success": "complete",
+        "ok": "complete",
+        "running": "running",
+        "in_progress": "running",
+        "queued": "running",
+        "pending": "running",
+        "failed": "failed",
+        "failure": "failed",
+        "error": "failed",
+        "degraded": "degraded",
+        "skipped": "degraded",
+        "synthetic": "synthetic",
+        "demo": "synthetic",
+    }
+    if raw_status in status_aliases:
+        return status_aliases[raw_status]
+    if _first_value(event, ("error", "error_message", "exception")):
+        return "failed"
+    if event.get("degradation_reason"):
+        return "degraded"
+    if event.get("synthetic"):
+        return "synthetic"
+    if _agent_process_output_summary(event) or _agent_process_tool_call_count(event) > 0:
+        return "complete"
+    return "unknown"
+
+
+def _agent_process_output_summary(event: Mapping[str, Any]) -> str:
+    for key in ("output_summary", "summary", "output", "content", "message"):
+        value = event.get(key)
+        if not value:
+            continue
+        if isinstance(value, Mapping):
+            nested = _first_value(value, ("summary", "text", "message", "title"))
+            if nested:
+                return _compact_text(nested, max_length=280)
+            continue
+        if isinstance(value, (list, tuple, set)):
+            return f"{len(value)} output item(s)."
+        return _compact_text(value, max_length=280)
+    return ""
+
+
+def _agent_process_tool_call_count(event: Mapping[str, Any]) -> int:
+    explicit = _safe_int(event.get("tool_call_count"))
+    if explicit is not None:
+        return max(0, explicit)
+    tool_calls = event.get("tool_calls")
+    if isinstance(tool_calls, (list, tuple, set)):
+        return len(tool_calls)
+    tool_results = event.get("tool_results")
+    if isinstance(tool_results, (list, tuple, set)):
+        return len(tool_results)
+    return 0
+
+
+def _agent_process_counts(items: list[Mapping[str, Any]]) -> Dict[str, int]:
+    unknown_phases = [
+        item
+        for item in items
+        if _agent_process_canonical_phase(str(item.get("phase") or "")) is None
+    ]
+    return {
+        "complete": sum(1 for item in items if item.get("status") == "complete"),
+        "running": sum(1 for item in items if item.get("status") == "running"),
+        "degraded": sum(1 for item in items if item.get("status") == "degraded"),
+        "failed": sum(1 for item in items if item.get("status") == "failed"),
+        "synthetic": sum(1 for item in items if item.get("synthetic") or item.get("status") == "synthetic"),
+        "unknown_status": sum(1 for item in items if item.get("status") == "unknown"),
+        "unknown_phase": len(unknown_phases),
+    }
+
+
+def _agent_process_status(counts: Mapping[str, int]) -> str:
+    total = sum(int(counts.get(key, 0)) for key in ("complete", "running", "degraded", "failed", "synthetic", "unknown_status"))
+    if total == 0:
+        return "absent"
+    if int(counts.get("failed", 0)) > 0:
+        return "needs_attention"
+    if int(counts.get("running", 0)) > 0:
+        return "in_progress"
+    if int(counts.get("degraded", 0)) > 0 or int(counts.get("unknown_phase", 0)) > 0 or int(counts.get("unknown_status", 0)) > 0:
+        return "partial"
+    return "ready"
+
+
+def _agent_process_current_phase(items: list[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    running = [item for item in items if item.get("status") == "running"]
+    candidate = running[0] if running else (items[-1] if items else None)
+    if not candidate:
+        return None
+    return {
+        "phase": candidate.get("phase"),
+        "label": candidate.get("label"),
+        "status": candidate.get("status"),
+    }
+
+
+def _agent_process_next_actions(*, status: str, counts: Mapping[str, int]) -> list[str]:
+    if status == "absent":
+        return ["run_research_task", "inspect_timeline"]
+    if status == "needs_attention":
+        return ["inspect_process_details", "retry_or_continue"]
+    if status == "in_progress":
+        return ["monitor_progress", "inspect_process_summary"]
+    if status == "partial":
+        actions = ["inspect_process_summary"]
+        if int(counts.get("degraded", 0)) > 0:
+            actions.append("review_capability_degradation")
+        if int(counts.get("unknown_phase", 0)) > 0:
+            actions.append("inspect_unknown_steps")
+        actions.append("inspect_evidence")
+        return actions
+    return ["inspect_results", "inspect_evidence", "design_experiment"]
 
 
 def _run_recovery_summary(recovery: Mapping[str, Any]) -> Dict[str, Any]:
