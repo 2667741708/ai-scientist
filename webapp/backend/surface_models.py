@@ -26,6 +26,64 @@ RUN_STATUS_LABELS = {
 }
 
 
+def run_confirmation_surface_summary(
+    request_preview: Any,
+    *,
+    parent_run_summary: Optional[Mapping[str, Any]] = None,
+    memory_summary: Optional[Mapping[str, Any]] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    request = _as_mapping(request_preview)
+    memory = _as_mapping(memory_summary)
+    parent = _as_mapping(parent_run_summary)
+    starting_hypotheses = _as_list(request.get("starting_hypotheses"))
+    user_feedback = [_as_mapping(item) for item in _as_list(request.get("user_feedback"))]
+    constraints = [str(item).strip() for item in _as_list(request.get("constraints")) if str(item).strip()]
+    attributes = [str(item).strip() for item in _as_list(request.get("attributes")) if str(item).strip()]
+    preferences = str(request.get("preferences") or "").strip()
+    research_goal = str(request.get("research_goal") or "").strip()
+    refinement_mode = str(request.get("refinement_mode") or "new_run")
+    has_parent = bool(request.get("parent_run_id") or parent)
+    mode_boundary = _run_mode_boundary(request=request, metrics={}, memory_summary=memory)
+    validity = _confirmation_validity(research_goal=research_goal, mode_boundary=mode_boundary)
+
+    summary = {
+        "research_goal": _compact_text(research_goal, max_length=360),
+        "status": validity["status"],
+        "blocking_issues": validity["blocking_issues"],
+        "mode_boundary": mode_boundary,
+        "refinement_mode": refinement_mode,
+        "is_continuation": has_parent or refinement_mode in {"continue_from_run", "revise_hypotheses"},
+        "counts": {
+            "starting_hypotheses": len(starting_hypotheses),
+            "constraints": len(constraints),
+            "attributes": len(attributes),
+            "user_feedback": len(user_feedback),
+        },
+        "starting_hypothesis_previews": _preview_list(starting_hypotheses, max_items=3, max_length=180),
+        "constraint_previews": _preview_list(constraints, max_items=3, max_length=140),
+        "preferences_summary": _compact_text(preferences, max_length=180),
+        "attribute_previews": _preview_list(attributes, max_items=6, max_length=80),
+        "feedback_summary": _feedback_surface_summary(user_feedback),
+        "parent_run": _confirmation_parent_summary(parent),
+        "memory": _run_memory_summary_for_surface(memory),
+        "next_actions": _confirmation_next_actions(validity["status"], has_parent=has_parent),
+        "visibility_boundary": (
+            "Confirmation summaries expose the research goal, counts, short previews, mode boundary, "
+            "and continuation context by default; raw request JSON, intent-router debug, parent IDs, "
+            "and full feedback text require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "parent_run_id": request.get("parent_run_id") or parent.get("run_id"),
+            "library_id": request.get("library_id"),
+            "memory_scope": request.get("memory_scope"),
+            "request_preview": dict(request),
+        }
+    return summary
+
+
 def run_surface_summary(
     run: Any,
     *,
@@ -266,6 +324,16 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    return [] if value is None else [value]
+
+
 def _first_value(source: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         value = source.get(key)
@@ -362,6 +430,63 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _confirmation_validity(*, research_goal: str, mode_boundary: Mapping[str, Any]) -> Dict[str, Any]:
+    issues: list[str] = []
+    if len(research_goal) < 8:
+        issues.append("research_goal_too_short")
+    if mode_boundary.get("mode") == "live_model" and mode_boundary.get("evidence_status") in {"absent", "unknown"}:
+        issues.append("literature_grounding_not_enabled")
+    return {
+        "status": "invalid" if any(item == "research_goal_too_short" for item in issues) else "pending",
+        "blocking_issues": issues,
+    }
+
+
+def _preview_list(values: Iterable[Any], *, max_items: int, max_length: int) -> list[str]:
+    previews: list[str] = []
+    for value in values:
+        compact = _compact_text(value, max_length=max_length)
+        if compact:
+            previews.append(compact)
+        if len(previews) >= max_items:
+            break
+    return previews
+
+
+def _feedback_surface_summary(feedback_items: list[Mapping[str, Any]]) -> Dict[str, Any]:
+    feedback_types: Dict[str, int] = {}
+    target_types: Dict[str, int] = {}
+    for item in feedback_items:
+        feedback_type = str(item.get("feedback_type") or "unknown")
+        target_type = str(item.get("target_type") or "unknown")
+        feedback_types[feedback_type] = feedback_types.get(feedback_type, 0) + 1
+        target_types[target_type] = target_types.get(target_type, 0) + 1
+    return {
+        "count": len(feedback_items),
+        "feedback_types": feedback_types,
+        "target_types": target_types,
+        "applies_to": "next_run_or_continuation" if feedback_items else None,
+    }
+
+
+def _confirmation_parent_summary(parent: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    if not parent:
+        return None
+    return {
+        "research_goal": _compact_text(parent.get("research_goal"), max_length=240),
+        "status": parent.get("status"),
+        "hypothesis_count": _safe_int(parent.get("hypothesis_count")) or 0,
+        "updated_at": parent.get("updated_at"),
+    }
+
+
+def _confirmation_next_actions(status: str, *, has_parent: bool) -> list[str]:
+    if status == "invalid":
+        return ["edit_research_goal", "cancel"]
+    actions = ["confirm_continuation" if has_parent else "confirm_start_run", "edit_request", "cancel"]
+    return actions
 
 
 def _evidence_status(*, support_level: str, reliability: str) -> str:
