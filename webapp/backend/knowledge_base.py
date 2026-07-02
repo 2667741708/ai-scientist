@@ -2784,6 +2784,100 @@ class KnowledgeBaseStore:
             "memory_boundary": "Summaries only; raw records are not injected.",
         }
 
+    def memory_context_surface_summary(
+        self,
+        memory_context: Dict[str, Any],
+        *,
+        include_internal_refs: bool = False,
+    ) -> Dict[str, Any]:
+        parent_run = memory_context.get("parent_run")
+        execution_memory = (
+            memory_context.get("execution_memory")
+            if isinstance(memory_context.get("execution_memory"), dict)
+            else {}
+        )
+        evidence_boundary = (
+            memory_context.get("evidence_boundary")
+            if isinstance(memory_context.get("evidence_boundary"), dict)
+            else {}
+        )
+        user_feedback = (
+            memory_context.get("user_feedback")
+            if isinstance(memory_context.get("user_feedback"), list)
+            else []
+        )
+        prior_hypotheses = (
+            memory_context.get("prior_hypotheses")
+            if isinstance(memory_context.get("prior_hypotheses"), list)
+            else []
+        )
+        related_runs = (
+            memory_context.get("related_runs")
+            if isinstance(memory_context.get("related_runs"), list)
+            else []
+        )
+        evidence_summaries = (
+            memory_context.get("evidence_summaries")
+            if isinstance(memory_context.get("evidence_summaries"), list)
+            else []
+        )
+        known_gaps = (
+            memory_context.get("known_gaps")
+            if isinstance(memory_context.get("known_gaps"), list)
+            else []
+        )
+        summary = {
+            "memory_scope": memory_context.get("memory_scope") or "project",
+            "memory_sources": list(memory_context.get("memory_sources") or []),
+            "parent_run": self._memory_surface_parent_run(parent_run, include_internal_refs=include_internal_refs),
+            "counts": {
+                "related_runs": len(related_runs),
+                "prior_hypotheses": len(prior_hypotheses),
+                "user_feedback": len(user_feedback),
+                "evidence_sources": len(evidence_summaries),
+                "known_gaps": len(known_gaps),
+            },
+            "feedback_types": self._feedback_type_counts(user_feedback),
+            "execution_memory": self._execution_memory_surface_summary(
+                execution_memory,
+                include_internal_refs=include_internal_refs,
+            ),
+            "evidence_boundary": {
+                "status": evidence_boundary.get("status") or "absent",
+                "evidence_count": int(evidence_boundary.get("evidence_count") or 0),
+                "parsed_fulltext_count": int(evidence_boundary.get("parsed_fulltext_count") or 0),
+                "experimental_data_count": int(evidence_boundary.get("experimental_data_count") or 0),
+            },
+            "known_gap_summaries": [self._safe_work_item_text(str(item), max_length=160) for item in known_gaps[:3]],
+            "visibility_boundary": (
+                "Memory surface summaries expose counts and boundaries by default; raw feedback text, "
+                "hypothesis text, checkpoint refs, and retrieval diagnostics require explicit expert disclosure."
+            ),
+        }
+        if include_internal_refs:
+            summary["internal_refs"] = {
+                "feedback_ids": [
+                    item.get("feedback_id")
+                    for item in user_feedback
+                    if isinstance(item, dict) and item.get("feedback_id")
+                ],
+                "hypothesis_ids": [
+                    item.get("hypothesis_id")
+                    for item in prior_hypotheses
+                    if isinstance(item, dict) and item.get("hypothesis_id")
+                ],
+                "evidence_refs": [
+                    {
+                        "paper_id": item.get("paper_id"),
+                        "chunk_id": item.get("chunk_id"),
+                        "library_id": item.get("library_id"),
+                    }
+                    for item in evidence_summaries
+                    if isinstance(item, dict)
+                ][:10],
+            }
+        return summary
+
     def _active_work_item_row(
         self,
         connection: sqlite3.Connection,
@@ -2910,6 +3004,58 @@ class KnowledgeBaseStore:
         if len(compact) <= max_length:
             return compact
         return f"{compact[: max_length - 3].rstrip()}..."
+
+    def _memory_surface_parent_run(
+        self,
+        parent_run: Any,
+        *,
+        include_internal_refs: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(parent_run, dict):
+            return None
+        summary = {
+            "research_goal": parent_run.get("research_goal") or "",
+            "status": parent_run.get("status"),
+            "hypothesis_count": int(parent_run.get("hypothesis_count") or 0),
+            "updated_at": parent_run.get("updated_at"),
+        }
+        if include_internal_refs:
+            summary["run_id"] = parent_run.get("run_id")
+        return summary
+
+    def _execution_memory_surface_summary(
+        self,
+        execution_memory: Dict[str, Any],
+        *,
+        include_internal_refs: bool = False,
+    ) -> Dict[str, Any]:
+        latest_checkpoint = (
+            execution_memory.get("latest_checkpoint")
+            if isinstance(execution_memory.get("latest_checkpoint"), dict)
+            else {}
+        )
+        summary = {
+            "status": execution_memory.get("status") or "not_available",
+            "checkpoint_available": bool(execution_memory.get("checkpoint_available")),
+            "resume_supported": bool(execution_memory.get("resume_supported")),
+            "resume_mode": execution_memory.get("resume_mode"),
+            "phase": latest_checkpoint.get("phase"),
+        }
+        if include_internal_refs:
+            summary["checkpoint_id"] = latest_checkpoint.get("checkpoint_id")
+            summary["checkpoint_backend"] = latest_checkpoint.get("checkpoint_backend")
+            summary["checkpoint_ref"] = latest_checkpoint.get("checkpoint_ref")
+        return summary
+
+    @staticmethod
+    def _feedback_type_counts(feedback_items: list[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for item in feedback_items:
+            if not isinstance(item, dict):
+                continue
+            feedback_type = str(item.get("feedback_type") or "unknown")
+            counts[feedback_type] = counts.get(feedback_type, 0) + 1
+        return counts
 
     def _feedback_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
