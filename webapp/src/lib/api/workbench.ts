@@ -1,4 +1,5 @@
 import type {
+  AgentTrace,
   AgentRegistryResponse,
   BackgroundJob,
   BackgroundJobsResponse,
@@ -80,6 +81,12 @@ export type RunCheckpointsSummaryResponse = RunCheckpointsResponse & {
   summary: Record<string, unknown>;
 };
 
+export type RunTraceSummaryResponse = {
+  run_id?: string;
+  agent_trace: AgentTrace[];
+  summary: Record<string, unknown>;
+};
+
 export async function fetchHealth() {
   const response = await fetch(`${getApiBase()}/api/health`);
   if (!response.ok) throw new Error(`health_failed_${response.status}`);
@@ -128,6 +135,12 @@ export async function fetchRun(runId: string) {
   const response = await fetch(`${getApiBase()}/api/runs/${runId}`);
   if (!response.ok) throw new Error(`run_fetch_failed_${response.status}`);
   return (await response.json()) as RunRecord;
+}
+
+export async function fetchRunTrace(runId: string) {
+  const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/trace`);
+  if (!response.ok) throw new Error(`run_trace_failed_${response.status}`);
+  return (await response.json()) as RunTraceSummaryResponse;
 }
 
 export async function postRunFeedback(runId: string, feedback: FeedbackItem) {
