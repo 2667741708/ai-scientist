@@ -538,6 +538,81 @@ def report_surface_summary(
     return summary
 
 
+def evidence_library_surface_summary(
+    library: Any = None,
+    *,
+    papers: Optional[Iterable[Any]] = None,
+    parse_runs: Optional[Iterable[Any]] = None,
+    evidence_items: Optional[Iterable[Any]] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = _as_mapping(library)
+    paper_records = _record_items(papers if papers is not None else _first_value(source, ("papers", "documents", "items")))
+    parse_run_records = _record_items(parse_runs if parse_runs is not None else _first_value(source, ("parse_runs", "parseJobs", "jobs")))
+    evidence_records = _record_items(evidence_items if evidence_items is not None else _first_value(source, ("evidence_items", "evidence", "chunks")))
+    paper_items = [_library_paper_surface_summary(paper, index=index) for index, paper in enumerate(paper_records[:8])]
+    all_parse_job_items = [_library_parse_job_surface_summary(item, index=index) for index, item in enumerate(parse_run_records)]
+    parse_job_items = all_parse_job_items[:8]
+    reliability_counts = _library_source_reliability_counts(paper_records, evidence_records)
+    parse_counts = _parse_job_counts(all_parse_job_items)
+    counts = {
+        "papers": len(paper_records),
+        "evidence_items": len(evidence_records),
+        "parse_runs": len(parse_run_records),
+        "parsed_fulltext_sources": reliability_counts.get("parsed_fulltext", 0),
+        "experimental_chunks": _sum_int(paper_records, ("experimental_chunks_count", "experimental_support_count"))
+        + _count_records_with_value(evidence_records, ("experiment_data_summary",), value_match=None),
+        "chunks": _sum_int(paper_records, ("chunks_count", "chunk_count")),
+    }
+    status = _evidence_library_status(counts=counts, parse_counts=parse_counts, reliability_counts=reliability_counts)
+    summary = {
+        "status": status,
+        "library": {
+            "name": _compact_text(_first_text(source, ("name", "title", "label")) or "Current library", max_length=140),
+            "scope": _compact_text(_first_text(source, ("scope", "memory_scope")) or "library", max_length=80),
+        },
+        "counts": counts,
+        "source_reliability_counts": reliability_counts,
+        "parse_jobs": {
+            "counts": parse_counts,
+            "items": parse_job_items,
+        },
+        "papers": {
+            "items": paper_items,
+            "displayed_count": len(paper_items),
+            "truncated_count": max(0, len(paper_records) - len(paper_items)),
+        },
+        "readiness": _evidence_library_readiness(status=status, counts=counts, parse_counts=parse_counts),
+        "next_actions": _evidence_library_next_actions(status=status, counts=counts, parse_counts=parse_counts),
+        "visibility_boundary": (
+            "Evidence library summaries expose library name, evidence readiness, source reliability counts, "
+            "parse-job state, paper titles, chunk counts, and next actions by default; raw MCP payloads, "
+            "SQLite/database paths, local file paths, paper IDs, parse run IDs, chunk IDs, and parser errors "
+            "require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "library_id": _first_value(source, ("library_id", "id")),
+            "paper_ids": [
+                _first_value(paper, ("paper_id", "id"))
+                for paper in paper_records
+                if _first_value(paper, ("paper_id", "id"))
+            ],
+            "parse_run_ids": [
+                _first_value(item, ("parse_run_id", "id"))
+                for item in parse_run_records
+                if _first_value(item, ("parse_run_id", "id"))
+            ],
+            "local_paths": [
+                _first_value(item, ("local_path", "path", "artifact_path", "database_path"))
+                for item in [*paper_records, *parse_run_records]
+                if _first_value(item, ("local_path", "path", "artifact_path", "database_path"))
+            ],
+        }
+    return summary
+
+
 def evidence_surface_summary(
     evidence: Any,
     *,
@@ -764,6 +839,176 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _sum_int(records: Iterable[Mapping[str, Any]], keys: tuple[str, ...]) -> int:
+    total = 0
+    for record in records:
+        total += _safe_int(_first_value(record, keys)) or 0
+    return total
+
+
+def _count_records_with_value(
+    records: Iterable[Mapping[str, Any]],
+    keys: tuple[str, ...],
+    *,
+    value_match: Optional[str],
+) -> int:
+    total = 0
+    for record in records:
+        value = _first_value(record, keys)
+        if value_match is None:
+            total += 1 if value else 0
+        elif str(value or "").lower() == value_match:
+            total += 1
+    return total
+
+
+def _library_source_reliability_counts(
+    paper_records: list[Mapping[str, Any]],
+    evidence_records: list[Mapping[str, Any]],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for record in [*paper_records, *evidence_records]:
+        reliability = str(_first_value(record, ("source_reliability", "reliability")) or "unknown")
+        counts[reliability] = counts.get(reliability, 0) + 1
+    return counts
+
+
+def _library_paper_surface_summary(paper: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
+    reliability = str(_first_value(paper, ("source_reliability", "reliability")) or "unknown")
+    chunks_count = _safe_int(_first_value(paper, ("chunks_count", "chunk_count"))) or 0
+    experimental_count = _safe_int(_first_value(paper, ("experimental_chunks_count", "experimental_support_count"))) or 0
+    return {
+        "index": index,
+        "title": _compact_text(_first_text(paper, ("title", "paper_title", "document_title", "name")) or "Untitled paper", max_length=160),
+        "source_type": str(_first_value(paper, ("source", "source_type", "kind")) or "unknown"),
+        "source_reliability": reliability,
+        "status": _library_paper_status(reliability=reliability, chunks_count=chunks_count),
+        "chunks_count": chunks_count,
+        "experimental_chunks_count": experimental_count,
+        "next_actions": _library_paper_next_actions(reliability=reliability, chunks_count=chunks_count),
+    }
+
+
+def _library_paper_status(*, reliability: str, chunks_count: int) -> str:
+    if reliability == "parsed_fulltext" and chunks_count > 0:
+        return "ready"
+    if reliability in {"metadata", "abstract", "snippet_only", "best_effort_public_search_snippet"} or chunks_count == 0:
+        return "limited"
+    return "available"
+
+
+def _library_paper_next_actions(*, reliability: str, chunks_count: int) -> list[str]:
+    actions = ["inspect_evidence"]
+    if reliability != "parsed_fulltext" or chunks_count == 0:
+        actions.insert(0, "parse_fulltext")
+    actions.append("use_for_hypothesis_grounding")
+    return actions
+
+
+def _library_parse_job_surface_summary(parse_run: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
+    summary = _as_mapping(parse_run.get("parse_status_summary"))
+    failed_items = _as_list(summary.get("failed_items"))
+    raw_status = str(_first_value(parse_run, ("status", "state")) or "").lower()
+    status = _parse_job_status(parse_run=parse_run, summary=summary, raw_status=raw_status, failed_items=failed_items)
+    return {
+        "index": index,
+        "status": status,
+        "source_title": _compact_text(_first_text(parse_run, ("title", "source_title", "filename", "input_name")) or "Parse job", max_length=140),
+        "chunks_count": _safe_int(_first_value(parse_run, ("chunks_count", "chunk_count"))) or 0,
+        "experimental_chunks_count": _safe_int(_first_value(parse_run, ("experimental_chunks_count", "experimental_support_count"))) or 0,
+        "rag_search_ready": bool(parse_run.get("rag_search_ready")),
+        "completion_rate": _safe_number(summary.get("completion_rate")),
+        "failed_item_count": len(failed_items),
+    }
+
+
+def _parse_job_status(
+    *,
+    parse_run: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    raw_status: str,
+    failed_items: list[Any],
+) -> str:
+    if raw_status in {"queued", "running", "processing"}:
+        return "processing"
+    if raw_status in {"error", "failed"} or failed_items:
+        return "error"
+    if raw_status in {"warning", "partial"} or (summary.get("warning_items") or 0):
+        return "warning"
+    if raw_status in {"complete", "completed", "success"} or parse_run.get("rag_search_ready"):
+        return "complete"
+    return "unknown"
+
+
+def _parse_job_counts(items: list[Mapping[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {"processing": 0, "complete": 0, "warning": 0, "error": 0, "unknown": 0}
+    for item in items:
+        status = str(item.get("status") or "unknown")
+        counts[status if status in counts else "unknown"] += 1
+    return counts
+
+
+def _evidence_library_status(
+    *,
+    counts: Mapping[str, int],
+    parse_counts: Mapping[str, int],
+    reliability_counts: Mapping[str, int],
+) -> str:
+    if parse_counts.get("processing", 0):
+        return "processing"
+    if counts.get("papers", 0) == 0 and counts.get("evidence_items", 0) == 0:
+        return "empty"
+    if parse_counts.get("error", 0) and reliability_counts.get("parsed_fulltext", 0) == 0:
+        return "needs_attention"
+    if reliability_counts.get("parsed_fulltext", 0):
+        return "ready"
+    return "limited"
+
+
+def _evidence_library_readiness(
+    *,
+    status: str,
+    counts: Mapping[str, int],
+    parse_counts: Mapping[str, int],
+) -> Dict[str, Any]:
+    return {
+        "status": status,
+        "parsed_fulltext_available": counts.get("parsed_fulltext_sources", 0) > 0,
+        "experimental_evidence_available": counts.get("experimental_chunks", 0) > 0,
+        "active_parse_jobs": parse_counts.get("processing", 0),
+        "summary": {
+            "empty": "No evidence has been added yet.",
+            "processing": "Evidence parsing is in progress; results will become searchable after indexing.",
+            "needs_attention": "Evidence parsing needs review before the library can ground research runs.",
+            "limited": "Evidence exists, but parsed fulltext support is not available yet.",
+            "ready": "Parsed fulltext evidence is available for grounding and verification.",
+        }.get(status, "Inspect evidence readiness before using this library."),
+    }
+
+
+def _evidence_library_next_actions(
+    *,
+    status: str,
+    counts: Mapping[str, int],
+    parse_counts: Mapping[str, int],
+) -> list[str]:
+    if status == "empty":
+        return ["upload_pdf", "add_web_evidence", "search_literature"]
+    if status == "processing":
+        return ["monitor_parse_jobs", "inspect_parse_results"]
+    if status == "needs_attention":
+        return ["inspect_parse_errors", "retry_parse", "add_web_evidence"]
+    actions: list[str] = []
+    if status == "limited":
+        actions.extend(["parse_fulltext", "add_more_evidence"])
+    if counts.get("experimental_chunks", 0) == 0:
+        actions.append("add_experimental_evidence")
+    actions.extend(["use_for_hypothesis_grounding", "verify_hypothesis_evidence"])
+    if parse_counts.get("warning", 0):
+        actions.append("inspect_parse_warnings")
+    return actions
 
 
 def _ranking_matchup_surface_summary(matchup: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
