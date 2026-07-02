@@ -782,6 +782,14 @@ def test_persist_checkpoint_metadata_record_stores_safe_state_summary() -> None:
                 "hypotheses": [{"text": "SECRET HYPOTHESIS"}],
                 "messages": [{"content": "SECRET MESSAGE"}],
                 "memory_context": {"raw": "SECRET MEMORY"},
+                "memory_prompt_packet": {
+                    "sections": [
+                        {
+                            "section": "execution_memory_summary",
+                            "items": [{"checkpoint_ref": "SECRET CHECKPOINT REF"}],
+                        }
+                    ],
+                },
                 "starting_hypotheses": ["SECRET STARTING HYPOTHESIS"],
                 "current_iteration": 1,
                 "progress_callback": lambda *_args: None,
@@ -808,6 +816,7 @@ def test_persist_checkpoint_metadata_record_stores_safe_state_summary() -> None:
             "current_iteration",
             "hypotheses",
             "memory_context",
+            "memory_prompt_packet",
             "messages",
             "progress_callback",
             "research_goal",
@@ -817,6 +826,8 @@ def test_persist_checkpoint_metadata_record_stores_safe_state_summary() -> None:
         assert persisted["state_summary"]["hypothesis_count"] == 1
         assert persisted["state_summary"]["message_count"] == 1
         assert persisted["state_summary"]["has_memory_context"] is True
+        assert persisted["state_summary"]["has_memory_prompt_packet"] is True
+        assert persisted["state_summary"]["memory_prompt_packet_section_count"] == 1
         assert persisted["state_summary"]["has_starting_hypotheses"] is True
         assert persisted["state_summary"]["omitted_runtime_only_keys"] == [
             "progress_callback",
