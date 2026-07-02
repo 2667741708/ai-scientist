@@ -5164,6 +5164,13 @@ async def health_debug() -> Dict[str, Any]:
     return await build_health_payload(debug=True)
 
 
+@app.get("/api/agents/registry")
+async def get_agent_registry() -> Dict[str, Any]:
+    from open_coscientist.agents.registry import get_agent_registry_payload
+
+    return get_agent_registry_payload(public=True)
+
+
 @app.get("/api/tools/registry")
 async def get_tool_registry(
     phase: Optional[str] = None,
