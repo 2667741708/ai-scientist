@@ -18,6 +18,83 @@ def default_worker_owner() -> str:
     return f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
 
 
+def work_item_recovery_action(
+    work_item: WorkItem | None,
+    *,
+    resume_readiness: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    item = dict(work_item or {})
+    readiness = dict(resume_readiness or {})
+    status = str(item.get("status") or "unknown").strip().lower()
+    attempts = int(item.get("attempt_count") or 0)
+    max_attempts = int(item.get("max_attempts") or 0)
+    attempts_remaining = max(0, max_attempts - attempts) if max_attempts > 0 else None
+    readiness_status = str(readiness.get("status") or "").strip()
+    can_resume = bool(readiness.get("can_resume"))
+    should_retry = bool(readiness.get("should_retry"))
+
+    if can_resume:
+        action = "resume"
+        next_actions = ["resume_langgraph_thread", "monitor_progress"]
+    elif status in {"queued", "leased", "running"}:
+        action = "wait"
+        next_actions = ["monitor_queue", "check_worker_status"]
+    elif status == "retrying" or should_retry:
+        action = "retry"
+        next_actions = ["retry_or_wait_for_worker", "monitor_queue"]
+    elif status == "blocked":
+        action = "unblock"
+        next_actions = ["inspect_blocking_condition", "edit_or_cancel_work_item"]
+    elif status in {"error", "failed"}:
+        action = "retry" if _work_item_attempts_available(attempts_remaining) else "escalate"
+        next_actions = (
+            ["retry_work_item", "inspect_failure_summary"]
+            if action == "retry"
+            else ["inspect_failure_summary", "start_new_run_or_cancel"]
+        )
+    elif status in {"complete", "completed"}:
+        action = "none"
+        next_actions = ["inspect_results"]
+    elif status == "cancelled":
+        action = "none"
+        next_actions = ["start_new_run"]
+    else:
+        action = "inspect"
+        next_actions = ["inspect_queue_state"]
+
+    return {
+        "status": status,
+        "action": action,
+        "resume_readiness_status": readiness_status or None,
+        "can_resume": can_resume,
+        "should_retry": should_retry or action == "retry",
+        "attempts": {
+            "current": attempts,
+            "max": max_attempts,
+            "remaining": attempts_remaining,
+        },
+        "next_actions": next_actions,
+        "safe_default_fields": [
+            "status",
+            "action",
+            "resume_readiness_status",
+            "can_resume",
+            "should_retry",
+            "attempts",
+            "next_actions",
+        ],
+        "visibility_boundary": (
+            "Work item recovery action summarizes queue status, checkpoint readiness, retry budget, "
+            "and user-safe next actions; raw arguments, result refs, lease owners, internal IDs, "
+            "and provider payloads require expert disclosure."
+        ),
+    }
+
+
+def _work_item_attempts_available(attempts_remaining: Optional[int]) -> bool:
+    return attempts_remaining is None or attempts_remaining > 0
+
+
 @dataclass
 class ResearchWorkerRuntime:
     store: Any
