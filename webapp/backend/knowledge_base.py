@@ -2700,6 +2700,10 @@ class KnowledgeBaseStore:
                 "run_id": normalized_run_id or None,
                 "checkpoint_available": False,
                 "resume_supported": False,
+                "can_resume": False,
+                "should_retry": False,
+                "recovery_action": "none",
+                "next_actions": ["continue_without_checkpoint"],
                 "resume_mode": "none",
                 "latest_checkpoint": None,
                 "resume_config_fields": [],
@@ -2708,12 +2712,21 @@ class KnowledgeBaseStore:
 
         backend = str(latest.get("checkpoint_backend") or "")
         resume_supported = backend == "langgraph_sqlite"
+        recovery_action = "resume" if resume_supported else "retry"
         return {
             "status": "ready" if resume_supported else "limited",
             "run_id": normalized_run_id,
             "thread_id": latest.get("thread_id"),
             "checkpoint_available": True,
             "resume_supported": resume_supported,
+            "can_resume": resume_supported,
+            "should_retry": not resume_supported,
+            "recovery_action": recovery_action,
+            "next_actions": (
+                ["resume_langgraph_thread", "monitor_progress"]
+                if resume_supported
+                else ["retry_from_durable_queue", "inspect_checkpoint_metadata"]
+            ),
             "resume_mode": "langgraph_thread_resume" if resume_supported else "metadata_only_retry",
             "latest_checkpoint": {
                 "checkpoint_id": latest.get("checkpoint_id"),
