@@ -29,6 +29,24 @@ def langgraph_thread_config(
     return config
 
 
+def langgraph_resume_config(
+    run_id: str,
+    *,
+    checkpoint_id: str | None = None,
+    recursion_limit: int | None = 100,
+    checkpoint_ns: str | None = None,
+) -> Dict[str, Any]:
+    config = langgraph_thread_config(
+        run_id,
+        recursion_limit=recursion_limit,
+        checkpoint_ns=checkpoint_ns,
+    )
+    normalized_checkpoint_id = str(checkpoint_id).strip() if checkpoint_id is not None else ""
+    if normalized_checkpoint_id:
+        config["configurable"]["checkpoint_id"] = normalized_checkpoint_id
+    return config
+
+
 def module_available(module_name: str) -> bool:
     try:
         return importlib.util.find_spec(module_name) is not None
@@ -45,6 +63,7 @@ def execution_memory_status() -> Dict[str, Any]:
         "checkpoint_backend": "langgraph_sqlite" if sqlite_available else "sqlite_metadata",
         "checkpointer_package": "langgraph-checkpoint-sqlite",
         "langgraph_checkpoint_sqlite_available": sqlite_available,
+        "resume_config_fields": ["thread_id", "checkpoint_id", "checkpoint_ns"],
         "resume_supported": sqlite_available,
         "resume_mode": "langgraph_thread_resume" if sqlite_available else "metadata_only_retry",
         "runtime_only_state_keys": sorted(RUNTIME_ONLY_STATE_KEYS),
