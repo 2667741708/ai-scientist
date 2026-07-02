@@ -89,6 +89,10 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         assert status["leased_count"] == 0
         assert status["queued_count"] == 1
         assert status["active_work_item_count"] == 1
+        assert status["user_facing_status"]["state"] == "worker_disabled"
+        assert status["user_facing_status"]["next_actions"] == ["enable_worker_or_manual_tick", "monitor_queue"]
+        assert "owner" not in status["user_facing_status"]["safe_default_fields"]
+        assert "worker-test" not in str(status["user_facing_status"])
         assert status["queue_status_counts"]["queued"] == 1
         assert status["queue_status_counts"]["active"] == 1
         assert status["active_work_item_snapshot"]["counts"]["queued"] == 1
@@ -98,6 +102,7 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         runtime_status = runtime.status()
         assert runtime_status["queued_count"] == 1
         assert runtime_status["active_work_item_count"] == 1
+        assert runtime_status["user_facing_status"]["state"] == "worker_disabled"
         assert runtime_status["queue_status_counts"]["queued"] == 1
         assert runtime_status["active_work_item_snapshot"]["counts"]["active"] == 1
         assert store.get_work_item(item["work_item_id"])["status"] == "queued"
@@ -139,6 +144,10 @@ async def test_worker_tick_recovers_expired_leases_before_leasing() -> None:
         assert status["leased_count"] == 1
         assert status["leased_count_total"] == 1
         assert status["active_work_item_count"] == 1
+        assert status["user_facing_status"]["state"] == "running"
+        assert status["user_facing_status"]["next_actions"] == ["monitor_progress", "view_process_summary"]
+        assert "stale-worker" not in str(status["user_facing_status"])
+        assert "fresh-worker" not in str(status["user_facing_status"])
         assert status["queue_status_counts"]["leased"] == 1
         assert status["queue_status_counts"]["active"] == 1
         await asyncio.gather(*runtime._running_tasks)
@@ -320,3 +329,39 @@ async def test_worker_skips_handler_when_running_mark_loses_lease() -> None:
         stale = store.get_work_item(item["work_item_id"])
         assert stale["status"] == "leased"
         assert stale["result_ref"] == {}
+
+
+@pytest.mark.anyio
+async def test_worker_user_facing_status_hides_worker_internals() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={"secret": "SECRET ARGUMENT"},
+        )
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": lambda _item: {"handled": True}},
+            owner="owner-secret",
+            concurrency=1,
+            enabled=False,
+        )
+
+        status = runtime.status()
+        user_status = status["user_facing_status"]
+
+        assert user_status["state"] == "worker_disabled"
+        assert user_status["counts"]["queued_count"] == 1
+        assert user_status["counts"]["active_work_item_count"] == 1
+        assert user_status["expert_fields"] == [
+            "owner",
+            "lease_seconds",
+            "poll_seconds",
+            "lease_owner",
+            "lease_expires_at",
+            "last_error",
+            "raw work item arguments",
+        ]
+        assert "owner-secret" not in str(user_status)
+        assert "SECRET ARGUMENT" not in str(user_status)
+        assert "raw errors" in user_status["visibility_boundary"]
