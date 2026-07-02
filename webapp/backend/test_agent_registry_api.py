@@ -159,6 +159,9 @@ def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
         assert payload["degraded_phases"] == []
         assert payload["phase_statuses"][0]["phase"] == "supervisor"
         assert payload["phase_statuses"][0]["enabled"] is True
+        assert payload["trace_contract"]["phase_aliases"]["rank"] == "ranking"
+        assert payload["trace_contract"]["phase_index"]["ranking"]["agent_id"] == "ranking_agent"
+        assert "output_summary" in payload["trace_contract"]["required_fields"]
 
         agents = {agent["agent_id"]: agent for agent in payload["agents"]}
         review = agents["hypothesis_review_agent"]
