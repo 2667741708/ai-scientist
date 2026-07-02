@@ -308,6 +308,13 @@ def canonical_trace_phase(phase: str) -> Optional[str]:
     return TRACE_PHASE_ALIASES.get(normalized)
 
 
+def _normalize_phase_request(phase: Any) -> Optional[str]:
+    normalized = str(phase or "").strip()
+    if not normalized:
+        return None
+    return canonical_trace_phase(normalized) or normalized
+
+
 def trace_phase_sort_key(phase: str, *, fallback_index: int = 0) -> tuple[int, int, str]:
     canonical = canonical_trace_phase(phase)
     if canonical is None:
@@ -606,10 +613,23 @@ def agent_registry_contract_audit(
 
 
 def get_phase_status_payload(*, disabled_phases: Optional[List[str]] = None) -> Dict[str, Any]:
-    disabled = {str(phase) for phase in (disabled_phases or [])}
+    disabled = {
+        normalized
+        for normalized in (_normalize_phase_request(phase) for phase in (disabled_phases or []))
+        if normalized
+    }
     specs_by_phase = {spec["phase"]: spec for spec in AGENT_REGISTRY}
     invalid_disabled_phases: list[Dict[str, str]] = []
     phase_statuses: list[PhaseStatus] = []
+    unknown_disabled_phases = sorted(phase for phase in disabled if phase not in PHASE_ORDER)
+    for phase in unknown_disabled_phases:
+        invalid_disabled_phases.append(
+            {
+                "phase": phase,
+                "label": phase.replace("_", " ").title(),
+                "reason": "unknown_phase",
+            }
+        )
 
     for phase in PHASE_ORDER:
         spec = specs_by_phase[phase]
@@ -644,6 +664,7 @@ def get_phase_status_payload(*, disabled_phases: Optional[List[str]] = None) -> 
         "phase_statuses": phase_statuses,
         "degraded_phases": degraded_phases,
         "degradation_count": len(degraded_phases),
+        "unknown_disabled_phases": unknown_disabled_phases,
         "invalid_disabled_phases": invalid_disabled_phases,
         "boundary": (
             "Disabled configurable phases must be shown as capability degradation; "
@@ -660,9 +681,9 @@ def get_agent_registry_payload(
     agents = list_agent_specs(public=public)
     phases = [str(agent["phase"]) for agent in agents]
     requested_disabled_phases = [
-        str(phase)
-        for phase in (disabled_phases or [])
-        if str(phase or "").strip()
+        normalized
+        for normalized in (_normalize_phase_request(phase) for phase in (disabled_phases or []))
+        if normalized
     ]
     phase_status_payload = get_phase_status_payload(disabled_phases=requested_disabled_phases)
     phase_index = {
@@ -695,6 +716,7 @@ def get_agent_registry_payload(
         "phase_statuses": phase_status_payload["phase_statuses"],
         "degraded_phases": phase_status_payload["degraded_phases"],
         "degradation_count": phase_status_payload["degradation_count"],
+        "unknown_disabled_phases": phase_status_payload["unknown_disabled_phases"],
         "invalid_disabled_phases": phase_status_payload["invalid_disabled_phases"],
         "phase_status_boundary": phase_status_payload["boundary"],
         "registry_contract_audit": agent_registry_contract_audit(agents),
