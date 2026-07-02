@@ -16,7 +16,7 @@ import {
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { MarkdownText } from "../../components/content/MarkdownText";
-import { fetchBackgroundJob, fetchRun, fetchToolResult } from "../../lib/api/workbench";
+import { fetchBackgroundJob, fetchRun, fetchRunMemory, fetchToolResult } from "../../lib/api/workbench";
 import {
   cancelResearchChatAction,
   confirmResearchChatAction,
@@ -55,6 +55,19 @@ type ResearchCommandCenterProps = {
   onSelectHypothesis: (index: number) => void;
   onSetDetailTab: (tab: "overview" | "agents" | "hypotheses" | "evidence" | "tournament" | "metrics") => void;
   expertComposer: ReactNode;
+};
+
+type RunMemorySummary = {
+  memory_scope?: string;
+  source_types?: string[];
+  has_parent_run?: boolean;
+  parent_run_id?: string | null;
+  prior_hypotheses_count?: number;
+  user_feedback_count?: number;
+  evidence_summary_count?: number;
+  related_run_count?: number;
+  sections?: string[];
+  boundary?: string;
 };
 
 const starterPrompts = [
@@ -180,6 +193,28 @@ function getCurrentRunProgress(record: RunRecord) {
   const eventLabel = activeEvent ? formatBackendText(activeEvent.event) : "等待第一个过程事件";
   const detail = activeEvent ? getTimelineDetail(activeEvent) : "后端创建运行后会写入 timeline。";
   return { activeIndex, percent, phaseLabel, eventLabel, detail, latestTime: activeEvent?.time ?? "" };
+}
+
+function memoryCount(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function hasMemoryContext(summary: RunMemorySummary | null) {
+  if (!summary) return false;
+  return (
+    Boolean(summary.has_parent_run) ||
+    memoryCount(summary.prior_hypotheses_count) > 0 ||
+    memoryCount(summary.user_feedback_count) > 0 ||
+    memoryCount(summary.evidence_summary_count) > 0 ||
+    memoryCount(summary.related_run_count) > 0 ||
+    Boolean(summary.source_types?.length)
+  );
+}
+
+function formatMemorySources(summary: RunMemorySummary) {
+  const sources = summary.source_types ?? [];
+  if (!sources.length) return "当前运行";
+  return sources.map((item) => formatBackendText(item)).join("、");
 }
 
 function inferResultActionTab(action: string): DetailTab | null {
@@ -384,6 +419,7 @@ export function ResearchCommandCenter({
             onOpenRanking={() => onSetDetailTab("tournament")}
           />
         ) : null}
+        {record ? <RunMemoryContextDisclosure runId={record.run_id} /> : null}
       </div>
 
       <div className="command-chat-messages" ref={messagesRef} aria-live="polite">
@@ -593,6 +629,88 @@ function ActiveRunProgress({
         </button>
       </div>
     </section>
+  );
+}
+
+function RunMemoryContextDisclosure({ runId }: { runId: string }) {
+  const [summary, setSummary] = useState<RunMemorySummary | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    void fetchRunMemory(runId)
+      .then((response) => {
+        if (cancelled) return;
+        const nextSummary = (response as { summary?: RunMemorySummary }).summary ?? null;
+        setSummary(nextSummary);
+        setStatus(hasMemoryContext(nextSummary) ? "ready" : "empty");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  if (status === "empty") return null;
+
+  if (status === "loading") {
+    return (
+      <details className="expert-summary memory-context-disclosure">
+        <summary>正在读取历史上下文摘要</summary>
+        <p>本次运行的历史结论、反馈和证据来源会在这里按摘要展示。</p>
+      </details>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <details className="expert-summary memory-context-disclosure">
+        <summary>历史上下文暂不可读</summary>
+        <p>运行结果不受影响；稍后可在过程与证据详情中重新检查上下文来源。</p>
+      </details>
+    );
+  }
+
+  const sections = summary?.sections ?? [];
+  return (
+    <details className="expert-summary memory-context-disclosure">
+      <summary>
+        本次使用的历史上下文 · {formatMemorySources(summary as RunMemorySummary)}
+      </summary>
+      <dl>
+        <div>
+          <dt>范围</dt>
+          <dd>{formatBackendText(summary?.memory_scope || "project")}</dd>
+        </div>
+        <div>
+          <dt>历史假设</dt>
+          <dd>{memoryCount(summary?.prior_hypotheses_count)} 条</dd>
+        </div>
+        <div>
+          <dt>用户反馈</dt>
+          <dd>{memoryCount(summary?.user_feedback_count)} 条</dd>
+        </div>
+        <div>
+          <dt>证据摘要</dt>
+          <dd>{memoryCount(summary?.evidence_summary_count)} 条</dd>
+        </div>
+        <div>
+          <dt>相关运行</dt>
+          <dd>{memoryCount(summary?.related_run_count)} 个</dd>
+        </div>
+      </dl>
+      {sections.length ? (
+        <div className="chat-inline-options" aria-label="上下文来源">
+          {sections.slice(0, 5).map((section) => (
+            <span key={section}>{formatBackendText(section)}</span>
+          ))}
+        </div>
+      ) : null}
+      <p>{summary?.boundary || "只展示摘要；原始消息、记录和内部路径默认隐藏。"}</p>
+    </details>
   );
 }
 
