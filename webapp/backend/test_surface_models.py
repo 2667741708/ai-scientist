@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from surface_models import (
+    evidence_library_surface_summary,
     evidence_surface_collection,
     evidence_surface_summary,
     experiment_design_surface_summary,
@@ -368,6 +369,107 @@ def test_evidence_surface_collection_reports_boundaries_and_next_actions() -> No
     assert "parse_fulltext" in collection["items"][0]["next_actions"]
     assert collection["items"][1]["status"] == "supported"
     assert collection["items"][2]["status"] == "contradicted"
+
+
+def test_evidence_library_surface_summary_reports_readiness_without_internal_refs() -> None:
+    library = {"library_id": "library-secret", "name": "Mechanistic papers"}
+    papers = [
+        {
+            "paper_id": "paper-secret-1",
+            "title": "Parsed fulltext benchmark",
+            "source": "local_pdf",
+            "source_reliability": "parsed_fulltext",
+            "chunks_count": 12,
+            "experimental_chunks_count": 2,
+            "local_path": "D:/secret/paper.pdf",
+        },
+        {
+            "paper_id": "paper-secret-2",
+            "title": "Metadata only source",
+            "source": "web",
+            "source_reliability": "metadata",
+            "chunks_count": 0,
+        },
+    ]
+    parse_runs = [
+        {
+            "parse_run_id": "parse-secret-1",
+            "title": "Parsed fulltext benchmark",
+            "status": "complete",
+            "chunks_count": 12,
+            "experimental_chunks_count": 2,
+            "rag_search_ready": True,
+            "database_path": "D:/secret/kb.sqlite",
+            "parse_status_summary": {"completion_rate": 1.0, "failed_items": []},
+        }
+    ]
+
+    summary = evidence_library_surface_summary(library, papers=papers, parse_runs=parse_runs)
+
+    assert summary["status"] == "ready"
+    assert summary["library"] == {"name": "Mechanistic papers", "scope": "library"}
+    assert summary["counts"]["papers"] == 2
+    assert summary["counts"]["parsed_fulltext_sources"] == 1
+    assert summary["counts"]["experimental_chunks"] == 2
+    assert summary["counts"]["chunks"] == 12
+    assert summary["source_reliability_counts"] == {"parsed_fulltext": 1, "metadata": 1}
+    assert summary["readiness"]["parsed_fulltext_available"] is True
+    assert summary["readiness"]["experimental_evidence_available"] is True
+    assert summary["parse_jobs"]["counts"]["complete"] == 1
+    assert summary["papers"]["items"][0]["status"] == "ready"
+    assert summary["papers"]["items"][1]["next_actions"][0] == "parse_fulltext"
+    assert summary["next_actions"] == ["use_for_hypothesis_grounding", "verify_hypothesis_evidence"]
+    assert "internal_refs" not in summary
+    assert "library-secret" not in str(summary)
+    assert "paper-secret" not in str(summary)
+    assert "parse-secret" not in str(summary)
+    assert "D:/secret" not in str(summary)
+
+    expert_summary = evidence_library_surface_summary(
+        library,
+        papers=papers,
+        parse_runs=parse_runs,
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["library_id"] == "library-secret"
+    assert expert_summary["internal_refs"]["paper_ids"] == ["paper-secret-1", "paper-secret-2"]
+    assert expert_summary["internal_refs"]["parse_run_ids"] == ["parse-secret-1"]
+    assert "D:/secret/paper.pdf" in expert_summary["internal_refs"]["local_paths"]
+
+
+def test_evidence_library_surface_summary_reports_empty_processing_and_error_states() -> None:
+    empty = evidence_library_surface_summary()
+    assert empty["status"] == "empty"
+    assert empty["next_actions"] == ["upload_pdf", "add_web_evidence", "search_literature"]
+
+    processing = evidence_library_surface_summary(
+        {"name": "Processing library"},
+        papers=[{"title": "Metadata candidate", "source_reliability": "metadata", "chunks_count": 0}],
+        parse_runs=[{"parse_run_id": "parse-running-secret", "title": "Pending parse", "status": "running"}],
+    )
+    assert processing["status"] == "processing"
+    assert processing["readiness"]["active_parse_jobs"] == 1
+    assert processing["next_actions"] == ["monitor_parse_jobs", "inspect_parse_results"]
+    assert "parse-running-secret" not in str(processing)
+
+    needs_attention = evidence_library_surface_summary(
+        {"name": "Broken library"},
+        papers=[{"title": "Broken PDF", "source_reliability": "metadata", "chunks_count": 0}],
+        parse_runs=[
+            {
+                "parse_run_id": "parse-error-secret",
+                "title": "Broken PDF",
+                "status": "error",
+                "parse_status_summary": {
+                    "failed_items": [{"error_message": "SECRET parse stack"}],
+                },
+            }
+        ],
+    )
+    assert needs_attention["status"] == "needs_attention"
+    assert needs_attention["parse_jobs"]["counts"]["error"] == 1
+    assert needs_attention["next_actions"] == ["inspect_parse_errors", "retry_parse", "add_web_evidence"]
+    assert "SECRET parse stack" not in str(needs_attention)
 
 
 def test_hypothesis_surface_summary_marks_origin_and_hides_raw_details() -> None:
