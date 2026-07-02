@@ -179,6 +179,7 @@ def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
         "研究目标：找出检索证据漂移的可证伪机制；"
         "我的假设是 section 丢失导致 citation provenance 断裂；"
         "偏好：优先最小验证实验；"
+        "评价维度：可证伪性；"
         "约束：先用本地 benchmark；"
         "请一起评审排序"
     )
@@ -194,6 +195,7 @@ def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
         assert proposal["executionTarget"] == "workflow.start_run"
         assert preview["research_goal"] == "找出检索证据漂移的可证伪机制"
         assert preview["starting_hypotheses_count"] == 1
+        assert preview["attributes"] == ["可证伪性"]
 
         confirm = client.post(
             f"/api/research-chat/actions/{proposal['actionId']}/confirm",
@@ -204,6 +206,7 @@ def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
 
         run = client.get(f"/api/runs/{run_id}").json()
         assert run["request"]["starting_hypotheses"] == ["section 丢失导致 citation provenance 断裂"]
+        assert run["request"]["attributes"] == ["可证伪性"]
         assert run["request"]["constraints"] == ["先用本地 benchmark"]
         assert run["request"]["preferences"] == "优先最小验证实验"
 
