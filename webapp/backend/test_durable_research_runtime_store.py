@@ -66,6 +66,55 @@ def test_research_work_item_failure_uses_retry_budget() -> None:
         assert failed["error_message"] == "parse failed"
 
 
+def test_work_item_status_counts_can_scope_worker_progress() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        queued = store.enqueue_work_item(
+            workflow_name="workflow.open_coscientist_run",
+            run_id="run-counts",
+            arguments={},
+            priority=5,
+        )
+        leased = store.enqueue_work_item(
+            workflow_name="workflow.other",
+            run_id="run-counts",
+            arguments={},
+            priority=1,
+        )
+        completed = store.enqueue_work_item(
+            workflow_name="workflow.other",
+            run_id="run-done",
+            arguments={},
+        )
+        cancelled = store.enqueue_work_item(
+            workflow_name="workflow.cancelled",
+            run_id="run-cancelled",
+            arguments={},
+        )
+        store.lease_work_items(owner="worker-counts", limit=1)
+        store.complete_work_item(completed["work_item_id"], {"ok": True})
+        store.cancel_work_item(cancelled["work_item_id"])
+
+        counts = store.work_item_status_counts()
+        scoped_counts = store.work_item_status_counts(run_id="run-counts")
+        workflow_counts = store.work_item_status_counts(workflow_name="workflow.open_coscientist_run")
+
+        assert counts["queued"] == 1
+        assert counts["leased"] == 1
+        assert counts["complete"] == 1
+        assert counts["cancelled"] == 1
+        assert counts["active"] == 2
+        assert scoped_counts["queued"] == 1
+        assert scoped_counts["leased"] == 1
+        assert scoped_counts["complete"] == 0
+        assert scoped_counts["active"] == 2
+        assert workflow_counts["queued"] == 1
+        assert workflow_counts["leased"] == 0
+        assert workflow_counts["active"] == 1
+        assert store.get_work_item(queued["work_item_id"])["status"] == "queued"
+        assert store.get_work_item(leased["work_item_id"])["status"] == "leased"
+
+
 def test_research_feedback_checkpoints_and_memory_context() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
