@@ -58,10 +58,64 @@ def _append_review_feedback_criteria(criteria: List[str], feedback_items: Any, l
     return appended
 
 
+_REVIEW_PACKET_FIELDS = (
+    "status",
+    "support_level",
+    "summary",
+    "feedback_type",
+    "target_type",
+    "source",
+    "source_reliability",
+    "checkpoint_available",
+    "resume_supported",
+    "should_retry",
+    "recovery_action",
+    "resume_mode",
+    "phase",
+)
+
+
+def _append_review_memory_prompt_packet_criteria(
+    criteria: List[str],
+    memory_prompt_packet: Any,
+) -> int:
+    if not isinstance(memory_prompt_packet, dict):
+        return 0
+    sections = memory_prompt_packet.get("sections")
+    if not isinstance(sections, list):
+        return 0
+
+    appended = 0
+    for section in sections[:6]:
+        if not isinstance(section, dict):
+            continue
+        section_name = _short_review_guidance(section.get("section") or "memory_section", 80)
+        items = section.get("items") if isinstance(section.get("items"), list) else []
+        for item in items[:2]:
+            if not isinstance(item, dict):
+                continue
+            fields: List[str] = []
+            for key in _REVIEW_PACKET_FIELDS:
+                value = item.get(key)
+                if value in (None, "", []):
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(_short_review_guidance(entry, 80) for entry in value[:4])
+                fields.append(f"{key}={_short_review_guidance(value, 180)}")
+            if fields:
+                criteria.append(
+                    f"[memory_prompt_packet] section={section_name}; "
+                    f"{'; '.join(fields[:8])}."
+                )
+                appended += 1
+    return appended
+
+
 def augment_review_supervisor_guidance(
     supervisor_guidance: Dict[str, Any] | None,
     memory_context: Any,
     user_feedback: Any,
+    memory_prompt_packet: Any = None,
 ) -> Dict[str, Any] | None:
     feedback_criteria: List[str] = []
 
@@ -108,6 +162,10 @@ def augment_review_supervisor_guidance(
             )
 
     _append_review_feedback_criteria(feedback_criteria, user_feedback, "user_feedback")
+    prompt_packet_count = _append_review_memory_prompt_packet_criteria(
+        feedback_criteria,
+        memory_prompt_packet,
+    )
     if not feedback_criteria:
         return supervisor_guidance
 
@@ -123,6 +181,11 @@ def augment_review_supervisor_guidance(
         "Use human feedback and memory evidence boundaries as review guidance; "
         "do not present feedback as an instant rewrite of completed results."
     )
+    if prompt_packet_count:
+        feedback_policy = (
+            f"{feedback_policy} Use summary-only memory prompt packet fields for review; "
+            "do not expose checkpoint refs, raw tool payloads, provider payloads, or internal ids."
+        )
     review_phase["review_depth"] = f"{existing_depth} {feedback_policy}".strip()
     workflow_plan["review_phase"] = review_phase
     augmented["workflow_plan"] = workflow_plan
@@ -427,6 +490,7 @@ async def review_node(state: WorkflowState) -> Dict[str, Any]:
         state.get("supervisor_guidance"),
         state.get("memory_context"),
         state.get("user_feedback"),
+        state.get("memory_prompt_packet"),
     )
     meta_review = state.get("meta_review")
 
