@@ -4297,6 +4297,35 @@ def persist_run_record(record: RunRecord) -> None:
         print(f"Research run persistence failed for {record.run_id}: {exc}", file=sys.stderr)
 
 
+def persist_run_checkpoint_metadata(
+    record: RunRecord,
+    *,
+    status: str,
+    phase: str,
+    checkpoint_ref: Optional[str] = None,
+) -> None:
+    try:
+        knowledge_base.persist_checkpoint_metadata(
+            checkpoint_id=f"{record.run_id}:{status}:{phase}",
+            run_id=record.run_id,
+            thread_id=record.run_id,
+            status=status,
+            phase=phase,
+            checkpoint_backend="sqlite_metadata",
+            checkpoint_ref=checkpoint_ref,
+            state_summary={
+                "run_status": status,
+                "record_status": record.status,
+                "timeline_count": len(record.timeline),
+                "hypothesis_count": len(record.hypotheses),
+                "error": record.error,
+                "boundary": "Execution metadata index only; LangGraph state saver is not enabled.",
+            },
+        )
+    except Exception as exc:
+        print(f"Research checkpoint metadata failed for {record.run_id}: {exc}", file=sys.stderr)
+
+
 def is_stale_run_state(status: str, updated_at: Any) -> bool:
     if status not in {"queued", "running"}:
         return False
@@ -4947,8 +4976,14 @@ async def run_real(record: RunRecord) -> None:
 
 
 async def run_with_guard(record: RunRecord, task) -> None:
+    persist_run_checkpoint_metadata(record, status="running", phase="workflow")
     try:
         await asyncio.wait_for(task, timeout=RUN_TIMEOUT_SECONDS)
+        persist_run_checkpoint_metadata(
+            record,
+            status=record.status,
+            phase="complete" if record.status == "complete" else "terminal",
+        )
     except asyncio.TimeoutError:
         record.status = "error"
         record.error = f"Run exceeded {RUN_TIMEOUT_SECONDS} seconds"
@@ -4962,12 +4997,14 @@ async def run_with_guard(record: RunRecord, task) -> None:
         record.metrics["timeout_seconds"] = RUN_TIMEOUT_SECONDS
         record.updated_at = time.time()
         persist_run_record(record)
+        persist_run_checkpoint_metadata(record, status="error", phase="timeout")
     except Exception as exc:
         record.status = "error"
         record.error = str(exc)
         add_event(record, "Error", "Run failed", str(exc), "error")
         record.updated_at = time.time()
         persist_run_record(record)
+        persist_run_checkpoint_metadata(record, status="error", phase="exception")
 
 
 async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -9293,6 +9330,12 @@ async def create_run(request: RunRequest) -> Dict[str, str]:
             "demo_mode": request.demo_mode,
             "literature_review": request.literature_review,
         },
+    )
+    persist_run_checkpoint_metadata(
+        record,
+        status="queued",
+        phase="queue",
+        checkpoint_ref=work_item.get("work_item_id"),
     )
     return {"run_id": run_id, "work_item_id": work_item.get("work_item_id", "")}
 
