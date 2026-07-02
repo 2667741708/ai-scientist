@@ -149,6 +149,7 @@ def runtime_readiness_surface_summary(
         "queued": _safe_int(active_counts.get("queued") or queue_counts.get("queued")) or 0,
         "running": _safe_int(active_counts.get("running") or queue_counts.get("running")) or 0,
         "retrying": _safe_int(active_counts.get("retrying") or queue_counts.get("retrying")) or 0,
+        "blocked": _safe_int(active_counts.get("blocked") or queue_counts.get("blocked")) or 0,
         "error": _safe_int(active_counts.get("error") or queue_counts.get("error")) or 0,
     }
     worker_enabled = bool(worker.get("enabled"))
@@ -2055,12 +2056,14 @@ def _dedupe_text_items(items: Iterable[Any]) -> list[str]:
 def _worker_readiness_state(*, worker_enabled: bool, counts: Mapping[str, int]) -> str:
     if not worker_enabled:
         return "disabled"
-    if int(counts.get("error", 0)) > 0:
+    if int(counts.get("error", 0)) > 0 or int(counts.get("blocked", 0)) > 0:
         return "needs_attention"
     if int(counts.get("retrying", 0)) > 0:
         return "retrying"
     if int(counts.get("running", 0)) > 0:
         return "running"
+    if int(counts.get("queued", 0)) > 0 or int(counts.get("active_work_items", 0)) > 0:
+        return "queued"
     return "ready"
 
 
@@ -2070,6 +2073,7 @@ def _worker_guidance(worker_state: str) -> str:
         "needs_attention": "Some work items failed; inspect failures before retrying.",
         "retrying": "Retryable work is waiting for the next worker tick.",
         "running": "Worker is actively processing queued research work.",
+        "queued": "Research work is queued and waiting for the worker.",
         "ready": "Worker is available for durable background execution.",
     }.get(worker_state, "Inspect worker readiness before starting long-running work.")
 
@@ -2138,6 +2142,8 @@ def _runtime_next_actions(
         actions.append("start_worker_or_manual_tick")
     if worker_state in {"needs_attention", "retrying"}:
         actions.append("inspect_queue")
+    if worker_state == "queued":
+        actions.append("monitor_queue")
     if service_counts.get("required_unavailable", 0) or service_counts.get("offline", 0):
         actions.append("restore_required_services")
     if service_counts.get("permission_denied", 0):
