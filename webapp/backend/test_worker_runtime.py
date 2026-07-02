@@ -114,6 +114,33 @@ async def test_worker_tick_respects_disabled_mode() -> None:
 
 
 @pytest.mark.anyio
+async def test_worker_tick_force_runs_once_when_worker_disabled() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={},
+        )
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": lambda _item: {"handled": True}},
+            owner="worker-test",
+            concurrency=1,
+            enabled=False,
+        )
+
+        status = await runtime.tick(force=True)
+        assert status["enabled"] is False
+        assert status["forced_tick"] is True
+        assert status["leased_count"] == 1
+
+        await asyncio.gather(*runtime._running_tasks)
+        completed = store.get_work_item(item["work_item_id"])
+        assert completed["status"] == "complete"
+        assert completed["result_ref"]["handled"] is True
+
+
+@pytest.mark.anyio
 async def test_worker_tick_recovers_expired_leases_before_leasing() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
