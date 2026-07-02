@@ -1289,6 +1289,8 @@ invalid_refinement_parent_run
 
 ## 8. 前端实现计划
 
+本节遵循 `webapp/docs/frontend-system-design.md` 和 `frontend-design` skill 的前端产品化口径：先定义用户、任务、信息层级、主操作路径、桌面/移动布局、状态设计和组件清单，再决定把 queue、memory、feedback、agent trace 等论文级能力放到哪里。目标不是增加一个“系统能力展示页”，而是让研究者顺手完成证据准备、假设生成、评审比较、实验设计和报告整理。
+
 ### 8.1 类型
 
 更新：
@@ -1771,7 +1773,90 @@ internal paths
 后台任务未启动：当前运行已排队，需管理员启动后台 worker。
 ```
 
-### 8.7 功能出现位置规则
+### 8.7 页面决策模型
+
+每个页面必须围绕“用户此刻要做的判断”设计，而不是围绕后端模块设计。页面首屏只回答当前判断所需的信息，二级详情再展示证据和过程，专家层才展示内部实现状态。
+
+| 页面 | 用户当前决策 | 首屏优先显示 | 主操作 | 二级操作 | 默认隐藏 |
+| --- | --- | --- | --- | --- | --- |
+| 研究主页 | 继续哪个项目，或新建哪个研究目标 | 最近项目、当前证据准备度、一个研究目标入口 | 创建/继续研究 | 查看最近产出 | run_id、queue details、provider diagnostics |
+| Workspace / 研究流程 | 目标是否足够可验证，是否确认启动或继续 run | 自然语言输入、确认卡、当前 run 状态 | 确认启动/继续 | 添加假设、添加反馈、查看过程 | raw request、checkpoint_id、完整 trace |
+| Papers / 资料库 | 当前证据是否足够支撑生成或核验 | library selector、文献数量、解析状态、上传/解析入口 | 上传/解析 PDF | 搜索文献、查看证据片段 | raw MCP payload、chunk ids、local paths |
+| Hypotheses / 假设 | 哪个候选假设值得推进 | 假设列表、rank、origin、support level、下一步 | 选择假设并设计实验 | 参考文献、反馈、继续迭代 | full review rubric、raw tournament JSON |
+| Experiments / 实验 | 这条假设如何被证伪或最小验证 | 选中假设、变量、对照、指标、失败条件 | 生成/修订实验设计 | 补证据、写入报告 | model prompt、内部评分明细 |
+| Reports / 报告 | 哪些发现可以形成可审计输出 | finding、证据、实验计划、限制条件 | 导出/复制报告 | citation QA、补充限制 | raw tool result、provider errors |
+| Runtime / 运行准备 | 系统是否能可靠执行长任务 | worker、文献服务、模型、PDF parser 的任务化状态 | 启动/检查运行准备 | 手动 tick、查看诊断 | 普通研究者不可见的 endpoint/env/internal IDs |
+
+页面设计必须满足以下判定：
+
+```text
+用户不需要理解 durable queue，也能知道任务已排队还是正在运行。
+用户不需要理解 checkpoint，也能知道 run 是否可恢复、需重试或已失败。
+用户不需要理解 agent registry，也能知道当前经历了哪些研究步骤和评审角色。
+用户不需要理解 memory context，也能知道本次使用了哪些历史结论、反馈和证据摘要。
+用户不需要理解 MCP，也能知道文献服务是否可用、证据是否来自 fulltext。
+```
+
+### 8.8 端到端研究流转
+
+论文级四项能力在前端中的合理出现顺序应跟随研究任务流，而不是跟随实现层依赖顺序。
+
+```mermaid
+flowchart LR
+  A["资料库: 证据入库"] --> B["Workspace: 自然语言研究目标"]
+  B --> C["确认卡: 目标/假设/约束/模式边界"]
+  C --> D["后台任务: queued/running/retrying"]
+  D --> E["假设页: 候选假设比较"]
+  E --> F["证据抽屉: support level / sources"]
+  E --> G["实验页: 可证伪验证设计"]
+  G --> H["报告页: findings / limitations / export"]
+  E --> I["继续迭代: feedback / parent_run_id / memory summary"]
+  I --> B
+```
+
+关键流转规则：
+
+```text
+证据不足时，Workspace 可以启动非文献支撑 run，但必须显示 limited/ungrounded 边界。
+用户粘贴自己的假设时，先进入确认卡；用户明确选择“纳入候选池”后才进入主 run。
+后台任务状态必须在 Workspace 和 run 结果页可见，但只用 queued/running/retrying/complete/error 这类用户可理解状态。
+run 完成后，默认落点应是 Hypotheses，而不是 agent trace 或 raw timeline。
+用户在 Hypotheses 中的反馈默认影响下一轮 run / continuation，不伪装成即时可逆控制。
+实验页只承诺“实验设计建议”，不把模型输出包装成已验证实验结果。
+报告页必须保留 demo/live/literature-grounded 边界和 evidence gap。
+```
+
+### 8.9 组件与功能出现契约
+
+新增设计功能应落到稳定组件上，避免同一能力在多个页面以不同规则重复出现。
+
+| 组件 | 出现页面 | 默认内容 | 展开/专家内容 | 必备状态 |
+| --- | --- | --- | --- | --- |
+| `ResearchGoalComposer` | 研究主页、Workspace | 研究目标输入、可验证性提示、主按钮 | preferences、constraints、attributes | empty、focus、disabled、loading、error |
+| `RunConfirmationCard` | Workspace chat | 研究目标、用户假设数量、模式边界、资源提示 | extracted request preview、parent run summary | pending、approved、cancelled、invalid |
+| `ModeBoundaryBar` | Workspace、Hypotheses、Reports | demo/live/literature-grounded 标签和一句限制 | provider/evidence readiness details | ready、limited、ungrounded、demo-only |
+| `RunProgressStrip` | Workspace、Hypotheses detail | queued/running/retrying/complete/error、当前阶段摘要 | work item、lease、checkpoint、trace refs | queued、leased、running、retrying、complete、error |
+| `HypothesisCard` | Hypotheses | title、plain summary、rank/Elo、origin、support level、下一步 | full technical text、review summary | selected、hover、loading evidence、limited evidence |
+| `SelectedHypothesisPanel` | Hypotheses、Experiments | 技术假设、解释、实验入口、反馈入口 | evolution history、memory refs、review rubric | selected、empty、partial evidence、error |
+| `EvidenceDrawer` | Papers、Hypotheses、Reports | source title、support level、reliability、matched snippets summary | citation map、chunk refs、media、parse artifacts | loading、empty、limited、supported、contradicted |
+| `MemoryContextDisclosure` | Workspace、Hypotheses | 历史上下文数量、来源类型、parent run 摘要 | exact refs、feedback excerpts、checkpoint summary | absent、available、stale、partial |
+| `AgentProcessDisclosure` | Workspace、Hypotheses、Reports | phase list、完成状态、简短摘要 | agent trace、tool calls、token usage、prompt/template name | collapsed、expanded、partial、failed |
+| `FeedbackComposer` | Hypothesis detail、chat | “用于下一轮”的用户反馈文本和目标 | target_ref、feedback type、audit refs | draft、saving、saved、error |
+| `ExperimentDesignCanvas` | Experiments | 变量、对照、指标、失败条件、最小验证路径 | alternative explanations、data requirements、risk notes | empty、generated、editing、exported |
+| `ReportAssembler` | Reports | findings、evidence、experiment plan、limitations | citation QA、source map、export metadata | draft、needs evidence、ready、exporting |
+| `RuntimeReadinessPanel` | Runtime/Admin、专家设置 | worker/model/literature/PDF parser 的可用性摘要 | endpoints、env、lease owners、debug payload | ready、limited、offline、permission denied |
+
+组件文案约束：
+
+```text
+按钮必须使用动作动词，例如“生成候选假设”“纳入候选池”“设计实验”“写入报告”。
+信息状态必须说明任务影响，例如“文献服务暂不可用，可先上传 PDF 或以 limited 模式继续”。
+错误消息必须给恢复路径，不能展示 raw HTTP、provider response、stack trace、request_id。
+icon-only action 必须有 aria-label 和 tooltip；未知图标不能作为唯一解释。
+loading、disabled、success、warning 状态不得改变控件外部尺寸。
+```
+
+### 8.10 功能出现位置规则
 
 新增能力必须出现在符合用户意图的位置：
 
@@ -1786,7 +1871,7 @@ internal paths
 | evidence links | Reference drawer | source reliability + support level | 把未解析证据标成 fulltext support |
 | worker status | Runtime readiness / expert panel | enabled/counts/retrying | 首页默认展示内部队列表 |
 
-### 8.8 响应式与交互状态
+### 8.11 响应式与交互状态
 
 桌面端：
 
@@ -1826,7 +1911,7 @@ disabled: 说明为什么不可用。
 focus-visible: 所有按钮、输入、tabs、drawer close 都必须可键盘访问。
 ```
 
-### 8.9 前端验收标准
+### 8.12 前端验收标准
 
 前端实现完成后，除类型和单元测试外，必须做浏览器验证：
 
@@ -1853,6 +1938,10 @@ test_memory_summary_hidden_by_default_and_expandable
 test_worker_status_hidden_from_normal_user_surface
 test_papers_page_keeps_pdf_reading_and_parsing_actions_separate
 test_reports_page_shows_mode_boundary_and_hides_raw_payload
+test_run_progress_strip_uses_user_facing_queue_status
+test_evidence_drawer_hides_raw_chunks_until_expanded
+test_feedback_composer_states_feedback_applies_to_next_run
+test_mode_boundary_bar_distinguishes_demo_live_literature_grounded
 ```
 
 ## 9. 测试矩阵
@@ -1890,6 +1979,10 @@ run progress handles queued/running/complete/error
 memory summary default hidden details
 agent trace shows phase-level summaries
 worker expert status does not affect normal UI
+mode boundary bar distinguishes demo/live/literature-grounded states
+run progress strip shows queued/running/retrying without raw work_item_id
+evidence drawer hides raw chunk refs until explicit details
+feedback composer says feedback applies to next run or continuation
 ```
 
 ### 9.4 Regression tests
