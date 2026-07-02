@@ -45,6 +45,16 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
         worker_status = client.get("/api/worker/status").json()
         assert worker_status["auto_start_enabled"] is False
         assert worker_status["queued_count"] >= 1
+        assert worker_status["queue_health"] == "backlog"
+        assert worker_status["active_work_item_count"] >= 1
+        active = worker_status["active_work_items"][0]
+        assert active["work_item_id"] == payload["work_item_id"]
+        assert active["run_id"] == payload["run_id"]
+        assert active["workflow_name"] == "workflow.open_coscientist_run"
+        assert active["status"] == "queued"
+        assert "arguments" not in active
+        assert "result_ref" not in active
+        assert "arguments and result payloads are intentionally omitted" in worker_status["boundary"]
         assert worker_status["execution_memory"]["thread_id_source"] == "run_id"
         assert worker_status["execution_memory"]["status"] in {"limited", "ready"}
 
