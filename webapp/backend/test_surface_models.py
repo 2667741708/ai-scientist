@@ -153,6 +153,16 @@ def test_runtime_readiness_surface_summary_hides_internal_refs_by_default() -> N
     )
 
     assert summary["status"] == "permission_denied"
+    assert summary["audience"] == {
+        "primary": "admin_or_expert",
+        "default_researcher_surface": False,
+        "placement": "runtime_admin_or_expert_inspector",
+        "researcher_label": "A required research service needs authorization.",
+    }
+    assert summary["disclosure"]["default_state"] == "collapsed"
+    assert summary["disclosure"]["show_on_primary_researcher_surface"] is False
+    assert "service endpoints" in summary["disclosure"]["expert_fields"]
+    assert "raw errors" in summary["disclosure"]["expert_fields"]
     assert summary["worker"]["state"] == "disabled"
     assert summary["worker"]["queue_counts"]["queued"] == 2
     assert summary["execution_memory"]["resume_supported"] is False
@@ -198,6 +208,10 @@ def test_runtime_readiness_surface_summary_reports_ready_state() -> None:
     )
 
     assert summary["status"] == "ready"
+    assert summary["audience"]["primary"] == "admin_or_expert"
+    assert summary["audience"]["default_researcher_surface"] is False
+    assert summary["audience"]["researcher_label"] == "Research task infrastructure is ready."
+    assert summary["disclosure"]["show_on_primary_researcher_surface"] is False
     assert summary["worker"]["state"] == "ready"
     assert summary["worker"]["concurrency"] == 1
     assert summary["execution_memory"]["resume_supported"] is True
