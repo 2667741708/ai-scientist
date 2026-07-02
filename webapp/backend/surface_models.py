@@ -2503,7 +2503,11 @@ def _memory_injection_policy_surface_summary(policy: Mapping[str, Any]) -> Dict[
         "raw_injection_allowed": raw_allowed,
         "excluded_raw_field_count": len(excluded_raw_fields),
         "excluded_raw_fields": excluded_raw_fields[:8],
-        "boundary_summary": _compact_text(policy.get("boundary"), max_length=260),
+        "boundary_summary": (
+            "Raw memory injection is enabled; inspect expert policy before running."
+            if raw_allowed
+            else "Memory injection uses summary-only guidance; raw memory payloads require expert disclosure."
+        ),
     }
 
 
