@@ -162,6 +162,12 @@ def runtime_readiness_surface_summary(
     )
     summary = {
         "status": overall_status,
+        "audience": {
+            "primary": "admin_or_expert",
+            "default_researcher_surface": False,
+            "placement": "runtime_admin_or_expert_inspector",
+            "researcher_label": _runtime_researcher_label(overall_status),
+        },
         "worker": {
             "enabled": worker_enabled,
             "state": worker_state,
@@ -184,6 +190,27 @@ def runtime_readiness_surface_summary(
             service_counts=service_counts,
             execution_status=execution_status,
         ),
+        "disclosure": {
+            "default_state": "collapsed",
+            "show_on_primary_researcher_surface": False,
+            "safe_default_fields": [
+                "status",
+                "audience",
+                "worker.state",
+                "worker.queue_counts",
+                "execution_memory.status",
+                "service_counts",
+                "next_actions",
+            ],
+            "expert_fields": [
+                "owner IDs",
+                "lease timing",
+                "service endpoints",
+                "environment variables",
+                "raw errors",
+                "debug payloads",
+            ],
+        },
         "visibility_boundary": (
             "Runtime readiness summaries expose worker state, queue counts, execution-memory state, "
             "service availability, and recovery actions by default; owner IDs, endpoints, environment "
@@ -1864,6 +1891,15 @@ def _runtime_next_actions(
     if not actions:
         actions.append("start_or_continue_research_run" if overall_status == "ready" else "inspect_readiness_details")
     return actions
+
+
+def _runtime_researcher_label(status: str) -> str:
+    return {
+        "ready": "Research task infrastructure is ready.",
+        "limited": "Research task infrastructure is available with limitations.",
+        "offline": "Some required research services are offline.",
+        "permission_denied": "A required research service needs authorization.",
+    }.get(status, "Inspect runtime readiness before starting long-running work.")
 
 
 def _confirmation_validity(*, research_goal: str, mode_boundary: Mapping[str, Any]) -> Dict[str, Any]:
