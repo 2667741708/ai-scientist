@@ -2398,10 +2398,11 @@ class KnowledgeBaseStore:
             )
         return result.rowcount > 0
 
-    def cancel_work_item(self, work_item_id: str, reason: str = "cancelled") -> None:
+    def cancel_work_item(self, work_item_id: str, reason: str = "cancelled") -> bool:
+        placeholders = ", ".join("?" for _ in ACTIVE_WORK_ITEM_STATUSES)
         with self._connection() as connection:
-            connection.execute(
-                """
+            result = connection.execute(
+                f"""
                 UPDATE research_work_items
                 SET status = 'cancelled',
                     lease_owner = NULL,
@@ -2409,9 +2410,11 @@ class KnowledgeBaseStore:
                     error_message = ?,
                     updated_at = ?
                 WHERE work_item_id = ?
+                  AND status IN ({placeholders})
                 """,
-                (reason, time.time(), work_item_id),
+                (reason, time.time(), work_item_id, *ACTIVE_WORK_ITEM_STATUSES),
             )
+        return result.rowcount > 0
 
     def recover_expired_leases(self, now: Optional[float] = None) -> int:
         current_time = time.time() if now is None else float(now)
