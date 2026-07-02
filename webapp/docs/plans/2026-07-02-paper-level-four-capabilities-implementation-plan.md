@@ -2488,6 +2488,134 @@ Reports:
 
 响应式验收必须和页面规格卡绑定：桌面截图至少覆盖 Home、Workspace、Papers、Hypotheses；移动截图至少覆盖 Workspace tabs、Hypotheses detail、EvidenceDrawer bottom sheet。验收不以“页面能渲染”为终点，而要确认主操作路径可见、文本不溢出、详情可关闭、焦点能返回、普通页面不暴露 raw JSON 或内部路径。
 
+### 8.20 页面设计落地流程与功能出现审查
+
+为了让本计划真正落到“顺手好用”的研究工作台，而不是变成论文能力的堆叠展示，前端实现必须把每个页面改动拆成四层设计产物：
+
+```text
+User story
+-> Page layout contract
+-> ViewModel / visibility rules
+-> Interaction and state verification
+```
+
+这四层分别回答不同问题：
+
+| 层级 | 需要回答的问题 | 产物 | 失败信号 |
+| --- | --- | --- | --- |
+| User story | 用户为什么进入这个页面？要完成什么判断或动作？ | 页面规格卡、主路径描述、下一步动作 | 页面只是在展示后端对象，没有明确任务 |
+| Page layout contract | 哪些信息在首屏，哪些在详情，哪些在专家模式？ | 桌面/移动布局草图、区域职责、组件清单 | 三栏/抽屉/弹窗互相抢主操作 |
+| ViewModel / visibility rules | 后端字段如何翻译成用户任务语言？什么时候显示？ | `RunSurfaceModel`、`HypothesisSurfaceModel` 等展示模型 | 页面组件直接渲染 API response 或 raw JSON |
+| Interaction and state verification | 空、加载、排队、运行、失败、移动端如何表现？ | Playwright 截图、状态 fixture、可访问性检查 | 只验证 happy path，错误和移动端不可用 |
+
+页面设计落地顺序：
+
+```text
+1. 先确定用户阶段：
+   尚未开始 / 确认中 / 排队中 / 运行中 / 完成 / 继续迭代 / 失败恢复。
+
+2. 再确定首屏必须回答的问题：
+   当前项目是什么、当前任务是什么、状态是否可信、下一步是什么。
+
+3. 再确定功能出现位置：
+   primary surface、detail surface、expert surface、debug surface。
+
+4. 再设计数据转换：
+   API record -> ViewModel -> component props -> user-facing copy。
+
+5. 最后补状态和响应式：
+   empty、loading、queued、running、retrying、complete、limited、ungrounded、error、offline、permission denied。
+```
+
+功能出现审查表：
+
+| 后端能力 | 用户真正关心的问题 | 默认页面应该怎么出现 | 主动展开后才出现 | 不应出现的形式 |
+| --- | --- | --- | --- | --- |
+| Extended `RunRequest` | 系统是否理解我的研究目标、假设和约束？ | 确认卡摘要、可编辑字段、模式边界 | 抽取细节、source sentence、raw request | 把 JSON schema 直接放到聊天区 |
+| Durable queue | 任务有没有开始？是否卡住？能否恢复？ | `RunProgressStrip` 的 queued/running/retrying/error | attempt count、lease expiry、work item id | 首页指标墙或普通卡片内展示 lease_owner |
+| Worker tick | 管理员能否推进或恢复后台任务？ | Admin 的恢复动作或测试按钮 | worker owner、poll interval、last tick payload | 普通研究者默认看到手动 tick |
+| Agent registry | 哪些研究步骤参与了结果？ | “过程与证据”里的阶段摘要和角色名 | agent_id、prompt template、tool policy | 顶级导航叫 Agent 或让用户先选 agent |
+| Agent trace | 系统怎样得到这个结果？ | phase summary、output summary、tool count | token usage、tool args/result、prompt refs | 结果卡默认铺满 trace log |
+| Execution memory | 运行是否可恢复？ | 可恢复/需重试/已保存阶段的任务化状态 | checkpoint metadata、resume policy | 把 checkpoint 当成科学上下文显示 |
+| Research memory | 本次是否用了历史 run 和反馈？ | parent run 摘要、反馈数量、history scope | memory snippets、retrieval diagnostics | 默认展示历史聊天全文 |
+| Evidence memory | 证据是否充分、来源是否可靠？ | support level、source reliability、matched evidence summary | chunk/media/citation map/artifact refs | 把 metadata/abstract 伪装成 fulltext 证据 |
+| Feedback loop | 我的反馈会影响哪里？ | “用于下一轮/继续迭代”的明确文案 | target refs、feedback type、stored status | 伪装成正在运行中的即时可逆控制 |
+| Runtime diagnostics | 当前系统是否具备运行条件？ | Admin readiness summary、limited/offline guidance | endpoint、env、stack、provider payload | 普通页面默认暴露 provider key 或内部路径 |
+
+每个页面的设计审查要使用同一组“首屏问题”，确保功能出现顺序一致：
+
+| 页面 | 首屏要回答的问题 | 首屏主要操作 | 详情入口 | 专家/调试入口 |
+| --- | --- | --- | --- | --- |
+| Home / Projects | 我能从哪个研究目标开始或继续？证据和运行是否基本可用？ | 输入研究目标或继续项目 | 最近产出、证据准备提醒 | 不在默认首屏出现 |
+| Workspace | 系统理解了我的目标吗？任务现在处于什么状态？ | 确认 run、提交反馈、继续迭代 | 证据、memory、过程摘要 | 仅在专家设置或过程详情 |
+| Papers / Data | 哪些证据已入库？哪些证据仍 limited？ | 上传/解析 PDF、保存网页证据、选择 library | paper detail、EvidenceDrawer | raw parse artifact、MCP payload |
+| Hypotheses | 哪些假设更值得投入验证？为什么？ | 选择候选、查看证据、进入实验设计 | review、ranking、matchups、evidence | raw tournament JSON、trace payload |
+| Experiments | 这个假设如何被证伪？最小验证路径是什么？ | 生成/编辑实验设计、写入报告 | 替代解释、数据需求、风险 | prompt、内部评分细节 |
+| Reports | 这个输出能否作为可审计研究材料？边界是什么？ | 生成草稿、检查引用、导出 | citation QA、limitations、source map | raw tool result、backend payload |
+| Runtime / Admin | worker、模型、文献服务、PDF parser 是否准备好？ | tick、retry、查看 readiness | queue table、checkpoint summary | endpoint、env、stack、raw provider error |
+
+设计功能出现的实现规则：
+
+```text
+Researcher 默认只看到任务语言：
+  后台任务、历史上下文、文献证据、过程摘要、可恢复状态。
+
+Expert 才看到系统语言：
+  work_item、checkpoint、agent_id、prompt template、token usage、provider diagnostics。
+
+Debug 才看到 raw payload：
+  raw JSON、HTTP detail、stack trace、local path、endpoint、env var。
+```
+
+前端组件必须支持稳定状态，不允许状态变化造成布局抖动：
+
+```text
+RunConfirmationCard:
+  stable field rows for goal, starting hypotheses, constraints, preferences, mode.
+  loading/extracting state keeps the same card width and primary action slot.
+
+RunProgressStrip:
+  stable height for queued/running/retrying/complete/error.
+  phase label may change, but button and status icon slots stay fixed.
+
+HypothesisCard:
+  stable slots for origin badge, support level, Elo/rank, next action.
+  long hypothesis title wraps within card without pushing badges out of view.
+
+EvidenceDrawer:
+  summary first, raw/source detail behind tabs.
+  parsed_fulltext、limited、ungrounded 必须有不同可见状态。
+
+FeedbackComposer:
+  target summary visible before submit.
+  submit 后显示 stored/queued-for-next-run，而不是暗示当前输出已被改写。
+```
+
+页面开发的最小验收证据：
+
+```text
+Desktop screenshots:
+  Home, Workspace, Papers, Hypotheses.
+
+Mobile screenshots:
+  Workspace tabs, Hypotheses detail, EvidenceDrawer bottom sheet.
+
+Interaction checks:
+  confirmation card can edit fields;
+  queued/running/error states keep layout stable;
+  detail drawer opens/closes and returns focus;
+  primary action remains visible on mobile;
+  ordinary researcher role does not reveal raw JSON/internal path/provider key.
+
+Content checks:
+  demo/live/literature-grounded boundary remains visible;
+  user seeded/model generated/evolved origins remain distinguishable;
+  parsed_fulltext vs limited metadata evidence is visually distinct;
+  feedback copy says it affects next run or continuation unless online resume exists.
+```
+
+这套流程是第 8 章的实际开发入口。后续任何前端 PR 若新增页面、抽屉、状态条、卡片、按钮或专家面板，都应附带这四层说明；否则即使后端能力已经存在，也不应直接暴露到普通用户默认路径。
+
 ## 9. 测试矩阵
 
 ### 9.1 Backend unit tests
