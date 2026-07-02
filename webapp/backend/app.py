@@ -1186,7 +1186,7 @@ def _extract_research_goal(text: str) -> Optional[str]:
         if match:
             goal = match.group("goal").strip(" ：:\n\t")
             goal = re.split(
-                r"[；;\n]+(?:我的假设|初始假设|偏好|约束|限制|请|一起|starting hypothes|preferences?|constraints?)",
+                r"[；;。\n]+(?:我的假设|初始假设|偏好|约束|限制|请|一起|starting hypothes|preferences?|constraints?)",
                 goal,
                 maxsplit=1,
                 flags=re.I,
@@ -1199,7 +1199,7 @@ def _extract_research_goal(text: str) -> Optional[str]:
 
 
 def _split_user_clauses(text: str) -> list[str]:
-    return [part.strip(" \n\t；;。.") for part in re.split(r"[；;\n]+", text) if part.strip(" \n\t；;。.")]
+    return [part.strip(" \n\t；;。.") for part in re.split(r"[；;。\n]+", text) if part.strip(" \n\t；;。.")]
 
 
 def _extract_starting_hypotheses(text: str) -> list[str]:
