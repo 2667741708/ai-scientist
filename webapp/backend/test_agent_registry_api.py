@@ -206,6 +206,100 @@ def test_agent_trace_surface_summary_hides_expert_details_by_default(monkeypatch
         assert expert_summary["items"][1]["confidence"] == 0.8
 
 
+def test_agent_trace_contract_audit_reports_metadata_coverage_without_raw_payload(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents.registry import agent_trace_contract_audit, get_trace_contract_payload
+
+        ready_trace = [
+            {
+                "phase": "supervisor",
+                "output_summary": "Research plan and constraints were prepared.",
+                "tool_calls": [],
+            },
+            {
+                "phase": "rank",
+                "agent_id": "ranking_agent",
+                "role": "Tournament ranking role.",
+                "prompt_template": "prompts/ranking.md",
+                "output_summary": "Pairwise Elo tournament completed.",
+                "tool_calls": [{"name": "ranker", "args": {"secret": "SECRET TOOL ARG"}}],
+                "raw_provider_response": {"debug": "SECRET PROVIDER PAYLOAD"},
+            },
+        ]
+
+        ready = agent_trace_contract_audit(ready_trace)
+
+        assert ready["status"] == "partial"
+        assert ready["trace_count"] == 2
+        assert ready["phase_order"] == ["supervisor", "ranking"]
+        assert ready["counts"] == {
+            "missing_required": 0,
+            "unknown_phase": 0,
+            "raw_payload_risk": 1,
+            "degraded": 0,
+            "synthetic": 0,
+            "with_tool_calls": 1,
+        }
+        assert ready["items"][0]["agent_id"] == "supervisor_agent"
+        assert ready["items"][0]["has_role"] is True
+        assert ready["items"][0]["has_prompt_template"] is True
+        assert ready["items"][1]["phase"] == "ranking"
+        assert ready["items"][1]["raw_payload_keys"] == ["raw_provider_response"]
+        assert "SECRET" not in str(ready)
+        assert "raw-payload risk keys only" in ready["boundary"]
+
+        contract = get_trace_contract_payload()
+        assert "raw_provider_response" in contract["raw_payload_risk_keys"]
+        assert "debug_payload" in contract["raw_payload_risk_keys"]
+
+
+def test_agent_trace_contract_audit_flags_missing_and_unknown_trace_metadata(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents.registry import agent_trace_contract_audit
+
+        audit = agent_trace_contract_audit(
+            [
+                {
+                    "phase": "vendor_extra",
+                    "output_summary": "Vendor extra event is visible as an unknown phase.",
+                    "debug_payload": {"secret": "SECRET DEBUG PAYLOAD"},
+                },
+                {
+                    "phase": "",
+                    "raw_json": {"secret": "SECRET RAW JSON"},
+                },
+            ]
+        )
+
+        assert audit["status"] == "needs_attention"
+        assert audit["trace_count"] == 2
+        assert audit["phase_order"] == ["vendor_extra", "unknown"]
+        assert audit["counts"]["missing_required"] == 2
+        assert audit["counts"]["unknown_phase"] == 2
+        assert audit["counts"]["raw_payload_risk"] == 2
+        assert audit["items"][0]["missing_required_fields"] == [
+            "agent_id",
+            "role",
+            "prompt_template",
+        ]
+        assert audit["items"][0]["raw_payload_keys"] == ["debug_payload"]
+        assert audit["items"][1]["missing_required_fields"] == [
+            "phase",
+            "agent_id",
+            "role",
+            "prompt_template",
+            "output_summary",
+        ]
+        assert audit["items"][1]["raw_payload_keys"] == ["raw_json"]
+        assert "SECRET" not in str(audit)
+
+
 def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
