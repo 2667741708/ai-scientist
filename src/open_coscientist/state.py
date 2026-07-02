@@ -194,6 +194,9 @@ class WorkflowState(TypedDict):
     memory_context: Optional[Dict[str, Any]]
     """Optional: Summary-only execution/research/evidence memory injected for this run."""
 
+    memory_prompt_packet: Optional[Dict[str, Any]]
+    """Optional: Summary-only prompt packet derived from memory_context for model guidance."""
+
     user_feedback: Optional[List[Dict[str, Any]]]
     """Optional: Human feedback items that guide the current run or continuation."""
 
@@ -226,6 +229,9 @@ class WorkflowState(TypedDict):
 
     tool_registry: Optional[Any]
     """Optional ToolRegistry for config-driven tool selection."""
+
+    workflow_tool_policy: Optional[Dict[str, Any]]
+    """Active workflow-level tool policy audit for MCP/YAML tool selection."""
 
     context_enrichment_sources: Optional[List[Dict[str, Any]]]
     """Structured sources returned by context enrichment tools during literature review
