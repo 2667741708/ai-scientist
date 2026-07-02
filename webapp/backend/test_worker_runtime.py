@@ -243,6 +243,39 @@ async def test_worker_retries_and_completes_after_stale_lease_tick() -> None:
 
 
 @pytest.mark.anyio
+async def test_worker_renews_lease_during_long_handler() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={"value": "long-running"},
+        )
+
+        async def handler(work_item):
+            await asyncio.sleep(1.25)
+            return {"value": work_item["arguments"]["value"]}
+
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": handler},
+            owner="heartbeat-worker",
+            concurrency=1,
+            lease_seconds=1,
+            enabled=True,
+        )
+
+        status = await runtime.tick()
+        assert status["leased_count"] == 1
+        results = await asyncio.gather(*runtime._running_tasks)
+        assert results[0]["status"] == "complete"
+
+        completed = store.get_work_item(item["work_item_id"])
+        assert completed["status"] == "complete"
+        assert completed["attempt_count"] == 1
+        assert completed["result_ref"]["value"] == "long-running"
+
+
+@pytest.mark.anyio
 async def test_worker_skips_handler_when_running_mark_loses_lease() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
