@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, Mapping, Tuple
 
 
@@ -62,3 +64,19 @@ def checkpoint_state_serializability(state: Mapping[str, Any]) -> Dict[str, Any]
             "error": str(exc),
         }
     return {"serializable": True, "error_type": None, "error": None}
+
+
+@asynccontextmanager
+async def open_sqlite_checkpointer(db_path: str | Path):
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "langgraph-checkpoint-sqlite is required for durable LangGraph checkpoints"
+        ) from exc
+
+    resolved = Path(db_path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(resolved)) as saver:
+        await saver.setup()
+        yield saver
