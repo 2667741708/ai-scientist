@@ -129,3 +129,46 @@ async def test_worker_tick_recovers_expired_leases_before_leasing() -> None:
         completed = store.get_work_item(item["work_item_id"])
         assert completed["status"] == "complete"
         assert completed["result_ref"]["value"] == "recover"
+
+
+@pytest.mark.anyio
+async def test_worker_does_not_complete_after_lease_expires_during_handler() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={"value": "late"},
+        )
+
+        async def handler(work_item):
+            with store._connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE research_work_items
+                    SET lease_expires_at = ?
+                    WHERE work_item_id = ?
+                    """,
+                    (0, work_item["work_item_id"]),
+                )
+            return {"value": work_item["arguments"]["value"]}
+
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": handler},
+            owner="late-worker",
+            concurrency=1,
+            enabled=True,
+        )
+
+        status = await runtime.tick()
+        assert status["leased_count"] == 1
+        results = await asyncio.gather(*runtime._running_tasks)
+        assert results[0]["status"] == "stale_lease"
+
+        stale = store.get_work_item(item["work_item_id"])
+        assert stale["status"] == "running"
+        assert stale["result_ref"] == {}
+
+        recovered_count = store.recover_expired_leases()
+        assert recovered_count == 1
+        assert store.get_work_item(item["work_item_id"])["status"] == "retrying"
