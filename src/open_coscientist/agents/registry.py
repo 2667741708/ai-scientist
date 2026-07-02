@@ -104,6 +104,18 @@ TRACE_OPTIONAL_FIELDS = [
 ]
 
 
+RAW_TRACE_PAYLOAD_KEYS = [
+    "raw_provider_response",
+    "provider_response",
+    "raw_tool_payload",
+    "raw_tool_result",
+    "tool_results",
+    "tool_result",
+    "raw_json",
+    "debug_payload",
+]
+
+
 AGENT_REGISTRY: list[AgentSpec] = [
     {
         "agent_id": "supervisor_agent",
@@ -358,6 +370,86 @@ def agent_trace_surface_summary(
     }
 
 
+def agent_trace_contract_audit(trace_events: list[Any]) -> Dict[str, Any]:
+    specs_by_phase = {spec["phase"]: spec for spec in AGENT_REGISTRY}
+    items: list[Dict[str, Any]] = []
+    for index, event in enumerate(trace_events or []):
+        raw_phase = str(_trace_value(event, "phase") or "").strip()
+        canonical_phase = canonical_trace_phase(raw_phase)
+        phase_key = canonical_phase or raw_phase or "unknown"
+        spec = specs_by_phase.get(canonical_phase or "")
+        agent_id = _trace_value(event, "agent_id") or (spec["agent_id"] if spec else None)
+        role = _trace_value(event, "role") or (spec["role"] if spec else None)
+        prompt_template = _trace_value(event, "prompt_template") or (spec["prompt_template"] if spec else None)
+        output_summary = _trace_output_summary(event)
+        raw_payload_keys = _trace_raw_payload_keys(event)
+        missing_required_fields = []
+        if not raw_phase:
+            missing_required_fields.append("phase")
+        if not agent_id:
+            missing_required_fields.append("agent_id")
+        if not role:
+            missing_required_fields.append("role")
+        if not prompt_template:
+            missing_required_fields.append("prompt_template")
+        if not output_summary:
+            missing_required_fields.append("output_summary")
+        items.append(
+            {
+                "index": index,
+                "phase": phase_key,
+                "source_phase": raw_phase or None,
+                "canonical_phase": canonical_phase,
+                "label": PHASE_LABELS.get(phase_key, phase_key.replace("_", " ").title()),
+                "agent_id": agent_id,
+                "has_role": bool(role),
+                "has_prompt_template": bool(prompt_template),
+                "has_output_summary": bool(output_summary),
+                "tool_call_count": _trace_tool_call_count(event),
+                "missing_required_fields": missing_required_fields,
+                "raw_payload_keys": raw_payload_keys,
+                "synthetic": bool(_trace_value(event, "synthetic")),
+                "degradation_reason": _trace_value(event, "degradation_reason"),
+            }
+        )
+
+    sorted_items = [
+        item
+        for _, item in sorted(
+            enumerate(items),
+            key=lambda pair: trace_phase_sort_key(pair[1]["phase"], fallback_index=pair[0]),
+        )
+    ]
+    missing_required_count = sum(1 for item in sorted_items if item["missing_required_fields"])
+    unknown_phase_count = sum(1 for item in sorted_items if item["canonical_phase"] is None)
+    raw_payload_risk_count = sum(1 for item in sorted_items if item["raw_payload_keys"])
+    status = _trace_contract_audit_status(
+        trace_count=len(sorted_items),
+        missing_required_count=missing_required_count,
+        unknown_phase_count=unknown_phase_count,
+        raw_payload_risk_count=raw_payload_risk_count,
+    )
+    return {
+        "status": status,
+        "trace_count": len(sorted_items),
+        "phase_order": [item["phase"] for item in sorted_items],
+        "counts": {
+            "missing_required": missing_required_count,
+            "unknown_phase": unknown_phase_count,
+            "raw_payload_risk": raw_payload_risk_count,
+            "degraded": sum(1 for item in sorted_items if item.get("degradation_reason")),
+            "synthetic": sum(1 for item in sorted_items if item.get("synthetic")),
+            "with_tool_calls": sum(1 for item in sorted_items if item.get("tool_call_count", 0) > 0),
+        },
+        "items": sorted_items,
+        "boundary": (
+            "Trace contract audit reports metadata coverage, missing fields, unknown phases, and raw-payload "
+            "risk keys only; raw prompts, tool arguments/results, provider responses, token payloads, and "
+            "message bodies are not included."
+        ),
+    }
+
+
 def get_trace_contract_payload() -> Dict[str, Any]:
     agents = list_agent_specs(public=True)
     phase_index = {
@@ -378,6 +470,7 @@ def get_trace_contract_payload() -> Dict[str, Any]:
         "phase_index": phase_index,
         "required_fields": TRACE_REQUIRED_FIELDS,
         "optional_fields": TRACE_OPTIONAL_FIELDS,
+        "raw_payload_risk_keys": RAW_TRACE_PAYLOAD_KEYS,
         "surface_summary_fields": [
             "phase",
             "label",
@@ -513,6 +606,32 @@ def _trace_tool_call_count(event: Any) -> int:
     if isinstance(tool_count, int):
         return max(0, tool_count)
     return 0
+
+
+def _trace_raw_payload_keys(event: Any) -> list[str]:
+    if not isinstance(event, Mapping):
+        return []
+    return [
+        key
+        for key in RAW_TRACE_PAYLOAD_KEYS
+        if key in event and event.get(key) not in (None, "", [], {})
+    ]
+
+
+def _trace_contract_audit_status(
+    *,
+    trace_count: int,
+    missing_required_count: int,
+    unknown_phase_count: int,
+    raw_payload_risk_count: int,
+) -> str:
+    if trace_count == 0:
+        return "absent"
+    if missing_required_count > 0:
+        return "needs_attention"
+    if unknown_phase_count > 0 or raw_payload_risk_count > 0:
+        return "partial"
+    return "ready"
 
 
 def _compact_trace_text(value: Any, *, max_length: int = 280) -> str:
