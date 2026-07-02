@@ -4742,6 +4742,71 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
     ]
 
 
+def _normalize_hypothesis_text(value: Any) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _hypothesis_origin_for(record: RunRecord, hypothesis: Dict[str, Any]) -> Dict[str, Any]:
+    explicit_origin = hypothesis.get("origin") or hypothesis.get("source_origin") or hypothesis.get("hypothesis_origin")
+    if explicit_origin in {"user_seeded", "model_generated", "evolved", "tool_generated"}:
+        return {"origin": explicit_origin, "origin_label": explicit_origin.replace("_", " ")}
+
+    text = _normalize_hypothesis_text(_hypothesis_text(hypothesis))
+    seed_texts = {
+        _normalize_hypothesis_text(seed)
+        for seed in record.request.starting_hypotheses
+        if str(seed).strip()
+    }
+    if text and any(text == seed or seed in text or text in seed for seed in seed_texts):
+        return {
+            "origin": "user_seeded",
+            "origin_label": "user seeded",
+            "origin_evidence": "matched starting_hypotheses",
+        }
+
+    generation_method = str(hypothesis.get("generation_method") or hypothesis.get("method") or "").lower()
+    evolution_markers = ("evolved", "evolution", "mutation", "refinement", "revised")
+    if any(marker in generation_method for marker in evolution_markers) or hypothesis.get("evolution_history"):
+        return {
+            "origin": "evolved",
+            "origin_label": "evolved",
+            "origin_evidence": "generation_method/evolution_history",
+        }
+
+    tool_markers = ("tool", "mcp", "literature", "retrieval")
+    if any(marker in generation_method for marker in tool_markers) or hypothesis.get("tool_calls"):
+        return {
+            "origin": "tool_generated",
+            "origin_label": "tool grounded",
+            "origin_evidence": "generation_method/tool_calls",
+        }
+
+    return {
+        "origin": "model_generated",
+        "origin_label": "model generated",
+        "origin_evidence": "default_model_generation",
+    }
+
+
+def annotate_hypothesis_origins(record: RunRecord) -> None:
+    annotated: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {}
+    for hypothesis in record.hypotheses:
+        if not isinstance(hypothesis, dict):
+            annotated.append(hypothesis)
+            continue
+        origin = _hypothesis_origin_for(record, hypothesis)
+        merged = {**hypothesis, **origin}
+        counts[str(merged["origin"])] = counts.get(str(merged["origin"]), 0) + 1
+        annotated.append(merged)
+    record.hypotheses = annotated
+    record.metrics["hypothesis_origin_counts"] = counts
+    record.metrics["hypothesis_origin_boundary"] = (
+        "Origins are inferred from user starting hypotheses, generation metadata, and evolution hints. "
+        "They are UI/audit labels, not scientific evidence."
+    )
+
+
 def demo_hypotheses(goal: str) -> List[Dict[str, Any]]:
     subject = goal.strip().rstrip(".")
     return [
@@ -5072,6 +5137,7 @@ async def run_demo(record: RunRecord) -> None:
         "mode": "local-agent-simulation",
         "fake_api_key": "enabled",
     }
+    annotate_hypothesis_origins(record)
     apply_citation_provenance_qa(record)
     initialize_expert_feedback_state(record)
     record.status = "complete"
@@ -5202,6 +5268,7 @@ async def run_real(record: RunRecord) -> None:
             "starting_hypotheses_count": len(record.request.starting_hypotheses),
             "evidence_summary_count": len(memory_context.get("evidence_summaries", [])),
         }
+        annotate_hypothesis_origins(record)
         apply_citation_provenance_qa(record)
         initialize_expert_feedback_state(record)
         add_event(record, "Complete", "Run finalized", f"{len(record.hypotheses)} hypotheses returned", "complete")
