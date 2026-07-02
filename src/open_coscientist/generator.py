@@ -103,6 +103,7 @@ class HypothesisGenerator:
 
         # Build the graph (lazy - only once)
         self._graph = None
+        self._graph_checkpointer_enabled: Optional[bool] = None
 
         # Cache availability checks per instance (lazy init on first generate call)
         self._mcp_available: Optional[bool] = None
@@ -115,7 +116,11 @@ class HypothesisGenerator:
             "configurable": {"thread_id": run_id},
         }
 
-    def _build_graph(self, enable_literature_review_node: bool = True) -> StateGraph:
+    def _build_graph(
+        self,
+        enable_literature_review_node: bool = True,
+        checkpointer: Optional[Any] = None,
+    ) -> StateGraph:
         """
         Build the LangGraph workflow.
 
@@ -229,7 +234,7 @@ class HypothesisGenerator:
             }
         )
 
-        return workflow.compile()
+        return workflow.compile(checkpointer=checkpointer)
 
     async def _prepare_generation(
         self,
@@ -329,11 +334,16 @@ class HypothesisGenerator:
                 "Dev isolation mode enabled: forcing lit review cache + all hypotheses to lit tools"
             )
 
-        # Build graph if not already built, or rebuild if literature review setting changed
-        if self._graph is None:
+        checkpointer = opts.get("checkpointer")
+        checkpointer_enabled = checkpointer is not None
+
+        # Build graph if not already built, or rebuild if checkpoint mode changed.
+        if self._graph is None or self._graph_checkpointer_enabled != checkpointer_enabled:
             self._graph = self._build_graph(
-                enable_literature_review_node=enable_literature_review_node
+                enable_literature_review_node=enable_literature_review_node,
+                checkpointer=checkpointer,
             )
+            self._graph_checkpointer_enabled = checkpointer_enabled
 
         # Initialize state
         initial_state: WorkflowState = {
