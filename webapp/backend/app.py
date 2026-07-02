@@ -9469,11 +9469,18 @@ async def list_run_checkpoints(run_id: str, limit: int = 20) -> Dict[str, Any]:
     if not load_run_record(run_id):
         raise HTTPException(status_code=404, detail="Run not found")
     checkpoints = knowledge_base.list_checkpoint_metadata(run_id=run_id, limit=max(1, min(limit, 200)))
+    has_langgraph_summary = any(
+        item.get("checkpoint_backend") == "langgraph_sqlite" for item in checkpoints
+    )
     return {
         "run_id": run_id,
         "checkpoints": checkpoints,
         "count": len(checkpoints),
-        "boundary": "Execution metadata index only; LangGraph state saver is not enabled.",
+        "boundary": (
+            "Checkpoint metadata includes LangGraph checkpoint summaries when available; raw channel values are not exposed."
+            if has_langgraph_summary
+            else "Execution metadata index only; LangGraph state saver summary is not available for this run."
+        ),
     }
 
 
