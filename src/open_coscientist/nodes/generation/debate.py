@@ -96,6 +96,19 @@ def augment_generation_supervisor_guidance(
             "memory_user_feedback",
         )
 
+        evidence_boundary = memory_context.get("evidence_boundary")
+        if isinstance(evidence_boundary, dict):
+            status = _short_generation_guidance(evidence_boundary.get("status") or "unknown", 80)
+            evidence_count = int(evidence_boundary.get("evidence_count") or 0)
+            parsed_fulltext_count = int(evidence_boundary.get("parsed_fulltext_count") or 0)
+            experimental_data_count = int(evidence_boundary.get("experimental_data_count") or 0)
+            generated_focus.append(
+                "[memory_evidence_boundary] "
+                f"status={status}; evidence_count={evidence_count}; "
+                f"parsed_fulltext_count={parsed_fulltext_count}; "
+                f"experimental_data_count={experimental_data_count}."
+            )
+
     _append_generation_feedback_focus(generated_focus, user_feedback, "user_feedback")
     if not generated_focus:
         return supervisor_guidance
