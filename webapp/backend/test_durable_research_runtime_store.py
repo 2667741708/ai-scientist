@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from knowledge_base import KnowledgeBaseStore
+from knowledge_base import DEFAULT_LIBRARY_ID, KnowledgeBaseStore
 
 
 def test_research_work_items_enqueue_lease_complete_and_recover() -> None:
@@ -254,6 +254,34 @@ def test_memory_scope_library_filters_evidence_without_narrowing_project_or_glob
         assert library_ids == {primary_library}
         assert {primary_library, secondary_library}.issubset(project_library_ids)
         assert {primary_library, secondary_library}.issubset(global_library_ids)
+
+
+def test_library_memory_scope_without_library_id_uses_default_library() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        other_library = store.create_library(name="Other library")["library_id"]
+        query = "default library scoped retrieval marker"
+        store.ingest(
+            title="Default library evidence",
+            content=f"{query} should be visible for default library memory.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+        store.ingest(
+            title="Other library evidence",
+            content=f"{query} should stay out when no explicit library is selected.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+            library_id=other_library,
+        )
+
+        memory = store.build_memory_context(
+            research_goal=query,
+            memory_scope="library",
+            max_evidence=10,
+        )
+
+        assert {item["library_id"] for item in memory["evidence_summaries"]} == {DEFAULT_LIBRARY_ID}
 
 
 def test_research_runtime_schema_migrates_legacy_work_item_table() -> None:
