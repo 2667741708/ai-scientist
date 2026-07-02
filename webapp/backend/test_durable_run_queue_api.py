@@ -58,6 +58,12 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
         assert worker_status["execution_memory"]["thread_id_source"] == "run_id"
         assert worker_status["execution_memory"]["status"] in {"limited", "ready"}
 
+        tick_status = client.post("/api/worker/tick").json()
+        assert tick_status["auto_start_enabled"] is False
+        assert tick_status["execution_memory"]["thread_id_source"] == "run_id"
+        assert tick_status["execution_memory"]["status"] in {"limited", "ready"}
+        assert tick_status["queue_health"] in {"backlog", "running"}
+
 
 def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
