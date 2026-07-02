@@ -7,6 +7,7 @@ from typing import Any, Dict, Mapping, Tuple
 
 
 RUNTIME_ONLY_STATE_KEYS = frozenset({"progress_callback", "tool_registry"})
+RECOVERABLE_WORK_ITEM_STATUSES = frozenset({"queued", "leased", "running", "retrying", "blocked"})
 
 
 def langgraph_thread_config(
@@ -76,6 +77,57 @@ def execution_memory_status() -> Dict[str, Any]:
             "LangGraph SQLite checkpoint saver is available."
             if sqlite_available
             else "Execution memory is metadata-only until langgraph-checkpoint-sqlite is installed."
+        ),
+    }
+
+
+def execution_recovery_policy(
+    execution_memory: Mapping[str, Any] | None,
+    *,
+    work_item_status: str | None = None,
+) -> Dict[str, Any]:
+    memory = dict(execution_memory or {})
+    status = str(memory.get("status") or "not_available")
+    checkpoint_available = bool(memory.get("checkpoint_available"))
+    resume_supported = bool(memory.get("resume_supported"))
+    normalized_work_status = str(work_item_status or "").strip() or None
+    work_item_recoverable = normalized_work_status in RECOVERABLE_WORK_ITEM_STATUSES
+
+    if resume_supported:
+        recovery_mode = "resume_from_checkpoint"
+        next_action = "Resume the LangGraph thread using thread_id and checkpoint identity."
+        can_resume = True
+        should_retry = False
+    elif checkpoint_available:
+        recovery_mode = "metadata_guided_retry"
+        next_action = "Retry the durable work item with checkpoint metadata as audit guidance."
+        can_resume = False
+        should_retry = work_item_recoverable
+    elif work_item_recoverable:
+        recovery_mode = "queue_retry_without_checkpoint"
+        next_action = "Continue through the durable queue; no checkpoint state is available."
+        can_resume = False
+        should_retry = True
+    else:
+        recovery_mode = "not_recoverable"
+        next_action = "Start a new run or inspect the failed execution before retrying."
+        can_resume = False
+        should_retry = False
+
+    return {
+        "status": status,
+        "recovery_mode": recovery_mode,
+        "checkpoint_available": checkpoint_available,
+        "resume_supported": resume_supported,
+        "can_resume": can_resume,
+        "should_retry": should_retry,
+        "work_item_status": normalized_work_status,
+        "work_item_recoverable": work_item_recoverable,
+        "resume_config_fields": list(memory.get("resume_config_fields") or ["thread_id"]),
+        "next_action": next_action,
+        "boundary": (
+            "Recovery policy summarizes execution memory and queue state only; raw checkpoint "
+            "channel values and worker internals remain hidden."
         ),
     }
 
