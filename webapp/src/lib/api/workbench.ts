@@ -7,6 +7,7 @@ import type {
   CodeAnalysisResponse,
   CommandPermissionMode,
   CommandPermissionResponse,
+  ContinueRunRequest,
   ExperimentBackgroundJobRequest,
   FeedbackItem,
   FileSnapshotRequest,
@@ -88,6 +89,13 @@ export async function createRun(request: RunRequest) {
     throw new Error(parseApiError(body));
   }
   return (await response.json()) as { run_id: string; work_item_id?: string };
+}
+
+export async function continueRun(runId: string, request: ContinueRunRequest) {
+  return postJson<{ run_id: string; work_item_id?: string; parent_run_id: string }>(
+    `/api/runs/${encodeURIComponent(runId)}/continue`,
+    request,
+  );
 }
 
 export async function fetchRun(runId: string) {
