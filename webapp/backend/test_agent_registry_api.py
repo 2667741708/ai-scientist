@@ -71,3 +71,45 @@ def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
         assert "safety" in review["role"].lower()
         assert review["failure_policy"]["fallback"] == "fail_run"
         assert review["prompt_template"] == "prompts/review.md"
+
+
+def test_agent_trace_entries_include_registry_metadata(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        demo_trace = studio.demo_agent_trace("Audit trace metadata")
+        by_phase = {trace.phase: trace for trace in demo_trace}
+        assert by_phase["supervisor"].agent_id == "supervisor_agent"
+        assert by_phase["supervisor"].prompt_template == "prompts/supervisor.md"
+        assert by_phase["literature"].agent_id == "literature_grounding_agent"
+        assert by_phase["rank"].agent_id == "ranking_agent"
+
+        record = studio.RunRecord(
+            run_id="run_trace_registry",
+            status="complete",
+            created_at=1.0,
+            updated_at=1.0,
+            request=studio.RunRequest(
+                research_goal="Verify live trace registry metadata",
+                demo_mode=False,
+                literature_review=False,
+            ),
+        )
+        live_trace = studio.build_live_agent_trace(
+            record,
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "Reviewed candidate soundness and safety.",
+                        "metadata": {"phase": "review"},
+                    }
+                ]
+            },
+        )
+
+        assert len(live_trace) == 1
+        assert live_trace[0].agent_id == "hypothesis_review_agent"
+        assert live_trace[0].prompt_template == "prompts/review.md"
+        assert live_trace[0].synthetic is False
