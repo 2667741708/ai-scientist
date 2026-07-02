@@ -54,6 +54,27 @@ def test_debate_generation_guidance_includes_memory_without_raw_refs() -> None:
                 "text": "Generate candidates that can fail under a minimal experiment.",
             }
         ],
+        {
+            "mode": "summary_only",
+            "sections": [
+                {
+                    "section": "execution_memory_summary",
+                    "items": [
+                        {
+                            "status": "ready",
+                            "checkpoint_available": True,
+                            "resume_supported": True,
+                            "should_retry": False,
+                            "recovery_action": "resume",
+                            "resume_mode": "langgraph_thread_resume",
+                            "phase": "generate",
+                            "checkpoint_id": "raw-generation-checkpoint-id",
+                            "checkpoint_ref": "D:/private/generation-checkpoint.sqlite",
+                        }
+                    ],
+                }
+            ],
+        },
     )
 
     focus_areas = guidance["workflow_plan"]["generation_phase"]["focus_areas"]
@@ -64,16 +85,23 @@ def test_debate_generation_guidance_includes_memory_without_raw_refs() -> None:
     assert "[memory_user_feedback]" in joined
     assert "[memory_evidence_boundary]" in joined
     assert "[user_feedback]" in joined
+    assert "[memory_prompt_packet]" in joined
     assert "[memory_generation_policy]" in joined
+    assert "[memory_prompt_packet_policy]" in joined
     assert "User seed hypothesis should guide debate generation" in joined
     assert "Prior hypothesis links parsed evidence" in joined
     assert "Prefer hypotheses with explicit counter-evidence checks" in joined
     assert "Generate candidates that can fail" in joined
     assert "status=limited" in joined
     assert "evidence_count=2" in joined
+    assert "section=execution_memory_summary" in joined
+    assert "recovery_action=resume" in joined
+    assert "resume_mode=langgraph_thread_resume" in joined
     assert "raw-prior-hyp-id" not in joined
     assert "raw-memory-feedback-id" not in joined
     assert "raw-current-feedback-id" not in joined
     assert "raw-current-hyp-id" not in joined
+    assert "raw-generation-checkpoint-id" not in joined
     assert "raw-debate-boundary-ref" not in joined
+    assert "D:/private/generation-checkpoint.sqlite" not in joined
     assert "target_ref" not in joined
