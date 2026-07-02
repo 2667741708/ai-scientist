@@ -107,6 +107,8 @@ def test_agent_trace_contract_canonicalizes_runtime_phase_aliases(monkeypatch) -
     load_studio_app(monkeypatch, tempdir.name)
 
     with tempdir:
+        from open_coscientist.agents import canonical_trace_phase as exported_canonical_phase
+        from open_coscientist.agents import get_trace_contract_payload as exported_trace_contract
         from open_coscientist.agents.registry import (
             canonical_trace_phase,
             get_trace_contract_payload,
@@ -118,6 +120,8 @@ def test_agent_trace_contract_canonicalizes_runtime_phase_aliases(monkeypatch) -
         assert canonical_trace_phase("literature") == "literature_review"
         assert canonical_trace_phase("generation") == "generate"
         assert canonical_trace_phase("unknown") is None
+        assert exported_canonical_phase("rank") == "ranking"
+        assert exported_trace_contract()["phase_index"]["ranking"]["agent_id"] == "ranking_agent"
         assert contract["phase_aliases"]["dedupe"] == "proximity"
         assert contract["phase_index"]["review"]["agent_id"] == "hypothesis_review_agent"
         assert contract["phase_index"]["review"]["prompt_template"] == "prompts/review.md"
