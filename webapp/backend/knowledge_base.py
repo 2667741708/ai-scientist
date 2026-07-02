@@ -2296,6 +2296,7 @@ class KnowledgeBaseStore:
             self._work_item_snapshot_from_row(row, include_internal_refs=include_internal_refs)
             for row in rows
         ]
+        recovery_action_counts = self._work_item_recovery_action_counts(items)
         return {
             "generated_at": time.time(),
             "filters": {
@@ -2304,7 +2305,8 @@ class KnowledgeBaseStore:
                 "limit": max(1, min(limit, 100)),
             },
             "counts": self.work_item_status_counts(run_id=run_id, workflow_name=workflow_name),
-            "recovery_action_counts": self._work_item_recovery_action_counts(items),
+            "recovery_action": self._primary_work_item_recovery_action(recovery_action_counts),
+            "recovery_action_counts": recovery_action_counts,
             "active_statuses": list(ACTIVE_WORK_ITEM_STATUSES),
             "items": items,
             "visibility_boundary": (
@@ -3213,6 +3215,13 @@ class KnowledgeBaseStore:
             action = str(item.get("recovery_action") or "inspect")
             counts[action] = counts.get(action, 0) + 1
         return counts
+
+    @staticmethod
+    def _primary_work_item_recovery_action(recovery_counts: Dict[str, int]) -> str:
+        for action in ("escalate", "unblock", "retry", "inspect", "wait"):
+            if int(recovery_counts.get(action, 0)) > 0:
+                return action
+        return "none"
 
     @staticmethod
     def _work_item_workflow_label(workflow_name: str) -> str:
