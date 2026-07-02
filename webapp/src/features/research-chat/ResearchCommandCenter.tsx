@@ -24,7 +24,7 @@ import {
   sendResearchChatTurn,
 } from "../../lib/api/researchChat";
 import { classNames, formatBackendText, formatRunState, formatStageLabel, getTimelineDetail } from "../../lib/formatters/workbench";
-import type { BackgroundJob, DetailTab, RunRecord, TimelineEvent, ToolResultResponse } from "../../types/workbench";
+import type { BackgroundJob, DetailTab, RunRecord, RunStatus, TimelineEvent, ToolResultResponse } from "../../types/workbench";
 import type {
   ResearchChatActionProposal,
   ResearchChatAssistantMessage,
@@ -456,7 +456,7 @@ export function ResearchCommandCenter({
           />
         ) : null}
         {record ? <RunMemoryContextDisclosure runId={record.run_id} /> : null}
-        {record && record.status !== "complete" ? <WorkerQueueDisclosure /> : null}
+        {record && record.status !== "complete" ? <WorkerQueueDisclosure runStatus={record.status} /> : null}
       </div>
 
       <div className="command-chat-messages" ref={messagesRef} aria-live="polite">
@@ -751,26 +751,38 @@ function RunMemoryContextDisclosure({ runId }: { runId: string }) {
   );
 }
 
-function WorkerQueueDisclosure() {
+function WorkerQueueDisclosure({ runStatus }: { runStatus: RunStatus }) {
   const [summary, setSummary] = useState<WorkerQueueSummary | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
 
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading");
-    void fetchWorkerStatus()
-      .then((response) => {
+    let timer: number | undefined;
+    let firstLoad = true;
+
+    const refresh = async () => {
+      if (firstLoad) setStatus("loading");
+      try {
+        const response = await fetchWorkerStatus();
         if (cancelled) return;
         setSummary(response as WorkerQueueSummary);
         setStatus("ready");
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setStatus("error");
-      });
+      } finally {
+        firstLoad = false;
+      }
+    };
+
+    void refresh();
+    if (runStatus === "queued" || runStatus === "running") {
+      timer = window.setInterval(refresh, 2500);
+    }
     return () => {
       cancelled = true;
+      if (timer) window.clearInterval(timer);
     };
-  }, []);
+  }, [runStatus]);
 
   if (status === "loading") {
     return (
