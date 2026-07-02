@@ -10,6 +10,7 @@ from surface_models import (
     hypothesis_surface_collection,
     hypothesis_surface_summary,
     memory_surface_summary,
+    memory_prompt_packet_surface_summary,
     ranking_surface_summary,
     research_goal_readiness_surface_summary,
     report_surface_summary,
@@ -724,6 +725,157 @@ def test_memory_surface_summary_reports_empty_limited_and_conflicted_states() ->
     ]
     assert "paper-conflict-secret" not in str(conflicted)
     assert "chunk-conflict-secret" not in str(conflicted)
+
+
+def test_memory_prompt_packet_surface_summary_hides_section_payloads_by_default() -> None:
+    packet = {
+        "mode": "summary_only",
+        "memory_scope": "project",
+        "target_prompts": ["supervisor", "generate", "review", "ranking"],
+        "section_count": 4,
+        "sections": [
+            {
+                "section": "parent_run_summary",
+                "items": [
+                    {
+                        "run_id": "parent-secret",
+                        "research_goal": "SECRET parent goal should not be displayed by default.",
+                    }
+                ],
+            },
+            {
+                "section": "feedback_type_and_target_summary",
+                "items": [
+                    {
+                        "feedback_id": "feedback-secret",
+                        "feedback_type": "critique",
+                        "target_type": "hypothesis",
+                        "text": "SECRET feedback text should stay hidden.",
+                    }
+                ],
+            },
+            {
+                "section": "evidence_boundary_and_snippet_summaries",
+                "items": [
+                    {
+                        "paper_id": "paper-secret",
+                        "chunk_id": "chunk-secret",
+                        "summary": "SECRET fulltext snippet should stay hidden.",
+                    },
+                    {
+                        "checkpoint_id": "checkpoint-secret",
+                        "summary": "SECRET checkpoint detail should stay hidden.",
+                    },
+                ],
+            },
+            {
+                "section": "memory_limitations",
+                "items": [{"summary": "SECRET limitation text should stay hidden."}],
+            },
+        ],
+        "raw_injection_allowed": False,
+        "excluded_raw_fields": [
+            "feedback_text",
+            "hypothesis_full_text",
+            "checkpoint_state",
+            "tool_result_json",
+        ],
+        "boundary": "SECRET raw packet boundary should not be displayed by default.",
+    }
+
+    summary = memory_prompt_packet_surface_summary(packet)
+
+    assert summary["status"] == "summary_only"
+    assert summary["mode"] == "summary_only"
+    assert summary["memory_scope"] == "project"
+    assert summary["target_prompts"] == ["supervisor", "generate", "review", "ranking"]
+    assert summary["section_count"] == 4
+    assert summary["counts"] == {
+        "sections": 4,
+        "items": 5,
+        "target_prompts": 4,
+        "excluded_raw_fields": 4,
+    }
+    assert summary["sections"] == [
+        {
+            "index": 1,
+            "section": "parent_run_summary",
+            "label": "Parent run summary",
+            "item_count": 1,
+            "default_state": "collapsed",
+        },
+        {
+            "index": 2,
+            "section": "feedback_type_and_target_summary",
+            "label": "Feedback type and target summary",
+            "item_count": 1,
+            "default_state": "collapsed",
+        },
+        {
+            "index": 3,
+            "section": "evidence_boundary_and_snippet_summaries",
+            "label": "Evidence boundary summaries",
+            "item_count": 2,
+            "default_state": "collapsed",
+        },
+        {
+            "index": 4,
+            "section": "memory_limitations",
+            "label": "Memory limitations",
+            "item_count": 1,
+            "default_state": "collapsed",
+        },
+    ]
+    assert summary["raw_injection_allowed"] is False
+    assert summary["excluded_raw_field_count"] == 4
+    assert "summary-only sections" in summary["application_boundary"]
+    assert summary["next_actions"] == ["review_memory_summary", "start_or_continue_run"]
+    assert "internal_refs" not in summary
+    assert "SECRET" not in str(summary)
+    assert "parent-secret" not in str(summary)
+    assert "feedback-secret" not in str(summary)
+    assert "paper-secret" not in str(summary)
+    assert "checkpoint-secret" not in str(summary)
+    assert "raw_prompt_packet" not in str(summary)
+
+    expert_summary = memory_prompt_packet_surface_summary(packet, include_internal_refs=True)
+
+    assert expert_summary["internal_refs"]["section_item_counts"] == {
+        "parent_run_summary": 1,
+        "feedback_type_and_target_summary": 1,
+        "evidence_boundary_and_snippet_summaries": 2,
+        "memory_limitations": 1,
+    }
+    assert expert_summary["internal_refs"]["raw_sections"][0]["items"][0]["run_id"] == "parent-secret"
+    assert expert_summary["internal_refs"]["raw_prompt_packet"]["boundary"].startswith("SECRET raw packet")
+
+
+def test_memory_prompt_packet_surface_summary_reports_absent_and_raw_allowed_states() -> None:
+    absent = memory_prompt_packet_surface_summary({})
+
+    assert absent["status"] == "absent"
+    assert absent["section_count"] == 0
+    assert absent["sections"] == []
+    assert absent["next_actions"] == ["build_memory_context", "review_generation_request"]
+
+    raw_allowed = memory_prompt_packet_surface_summary(
+        {
+            "mode": "raw",
+            "raw_injection_allowed": True,
+            "sections": [],
+            "excluded_raw_fields": [],
+        }
+    )
+
+    assert raw_allowed["status"] == "raw_allowed"
+    assert raw_allowed["raw_injection_allowed"] is True
+    assert raw_allowed["application_boundary"] == (
+        "Prompt memory packet is configured for raw injection; inspect expert details before running."
+    )
+    assert raw_allowed["next_actions"] == [
+        "inspect_expert_prompt_packet",
+        "disable_raw_memory_injection",
+    ]
 
 
 def test_feedback_surface_summary_hides_raw_feedback_by_default() -> None:
