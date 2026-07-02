@@ -60,6 +60,7 @@ class HypothesisGenerator:
         cache_dir: Optional[str] = None,
         tools_config: Optional[str] = None,
         disable_tools: Optional[List[str]] = None,
+        workflow_tool_policy: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """
         Initialize the hypothesis generator.
@@ -73,6 +74,7 @@ class HypothesisGenerator:
             cache_dir: Directory for cache files (None = use default)
             tools_config: Path to custom tools YAML config file (None = use defaults)
             disable_tools: List of tool IDs to disable (None = use all enabled tools)
+            workflow_tool_policy: Optional per-workflow tool allow/deny policy.
         """
         self.model_name = model_name
         self.max_iterations = max_iterations
@@ -89,18 +91,18 @@ class HypothesisGenerator:
 
             os.environ["COSCIENTIST_CACHE_DIR"] = cache_dir
 
-        # Initialize tool registry if tools_config or disable_tools specified
-        self._tool_registry = None
-        if tools_config is not None or disable_tools is not None:
-            from .config import ToolRegistry
+        # Always initialize the tool registry. A None tools_config means
+        # "use the built-in default tools.yaml", not "disable configured tools".
+        from .config import ToolRegistry
 
-            self._tool_registry = ToolRegistry(
-                config_path=tools_config,
-                disabled_tools=disable_tools,
-            )
-            logger.info(
-                f"Initialized tool registry: {len(self._tool_registry.get_enabled_tools())} enabled tools"
-            )
+        self._tool_registry = ToolRegistry(
+            config_path=tools_config,
+            disabled_tools=disable_tools,
+            workflow_tool_policy=workflow_tool_policy,
+        )
+        logger.info(
+            f"Initialized tool registry: {len(self._tool_registry.get_enabled_tools())} enabled tools"
+        )
 
         # Build the graph (lazy - only once)
         self._graph = None
@@ -371,6 +373,7 @@ class HypothesisGenerator:
             "dev_test_lit_tools_isolation": dev_test_lit_tools_isolation,
             # tool registry for config-driven tool selection
             "tool_registry": runtime_tool_registry,
+            "workflow_tool_policy": self._tool_registry.audit_workflow_tool_policy(),
             # Optional user preferences and inputs
             "preferences": opts.get("preferences"),
             "attributes": opts.get("attributes"),
@@ -378,6 +381,7 @@ class HypothesisGenerator:
             "starting_hypotheses": user_inputs.get("starting_hypotheses"),
             "literature": user_inputs.get("literature"),
             "memory_context": opts.get("memory_context"),
+            "memory_prompt_packet": opts.get("memory_prompt_packet"),
             "user_feedback": opts.get("user_feedback"),
         }
 
@@ -504,6 +508,8 @@ class HypothesisGenerator:
                 "tournament_matchups": final_state.get("tournament_matchups", []),
                 "evolution_details": final_state.get("evolution_details", []),
                 "debate_transcripts": final_state.get("debate_transcripts"),
+                "messages": final_state.get("messages", []),
+                "workflow_tool_policy": final_state.get("workflow_tool_policy", {}),
                 "execution_time": execution_time,
                 "metrics": {
                     "total_time": execution_time,
