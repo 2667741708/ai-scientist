@@ -16,7 +16,7 @@ import {
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { MarkdownText } from "../../components/content/MarkdownText";
-import { fetchBackgroundJob, fetchRun, fetchRunMemory, fetchToolResult } from "../../lib/api/workbench";
+import { fetchBackgroundJob, fetchRun, fetchRunMemory, fetchToolResult, fetchWorkerStatus } from "../../lib/api/workbench";
 import {
   cancelResearchChatAction,
   confirmResearchChatAction,
@@ -67,6 +67,20 @@ type RunMemorySummary = {
   evidence_summary_count?: number;
   related_run_count?: number;
   sections?: string[];
+  boundary?: string;
+};
+
+type WorkerQueueSummary = {
+  enabled?: boolean;
+  auto_start_enabled?: boolean;
+  queue_health?: string;
+  concurrency?: number;
+  queued_count?: number;
+  leased_count?: number;
+  running_count?: number;
+  retrying_count?: number;
+  blocked_count?: number;
+  active_work_item_count?: number;
   boundary?: string;
 };
 
@@ -215,6 +229,28 @@ function formatMemorySources(summary: RunMemorySummary) {
   const sources = summary.source_types ?? [];
   if (!sources.length) return "当前运行";
   return sources.map((item) => formatBackendText(item)).join("、");
+}
+
+function queueCount(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function formatQueueHealth(value: unknown) {
+  const health = typeof value === "string" ? value : "unknown";
+  switch (health) {
+    case "idle":
+      return "后台空闲";
+    case "backlog":
+      return "后台排队中";
+    case "running":
+      return "后台正在执行";
+    case "retrying":
+      return "后台正在重试";
+    case "blocked":
+      return "后台需要处理";
+    default:
+      return "后台状态未知";
+  }
 }
 
 function inferResultActionTab(action: string): DetailTab | null {
@@ -420,6 +456,7 @@ export function ResearchCommandCenter({
           />
         ) : null}
         {record ? <RunMemoryContextDisclosure runId={record.run_id} /> : null}
+        {record && record.status !== "complete" ? <WorkerQueueDisclosure /> : null}
       </div>
 
       <div className="command-chat-messages" ref={messagesRef} aria-live="polite">
@@ -710,6 +747,84 @@ function RunMemoryContextDisclosure({ runId }: { runId: string }) {
         </div>
       ) : null}
       <p>{summary?.boundary || "只展示摘要；原始消息、记录和内部路径默认隐藏。"}</p>
+    </details>
+  );
+}
+
+function WorkerQueueDisclosure() {
+  const [summary, setSummary] = useState<WorkerQueueSummary | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    void fetchWorkerStatus()
+      .then((response) => {
+        if (cancelled) return;
+        setSummary(response as WorkerQueueSummary);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (status === "loading") {
+    return (
+      <details className="expert-summary worker-queue-disclosure">
+        <summary>正在读取后台任务状态</summary>
+        <p>运行创建后会通过后台队列进入执行、重试或完成状态。</p>
+      </details>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <details className="expert-summary worker-queue-disclosure">
+        <summary>后台任务状态暂不可读</summary>
+        <p>当前运行仍会通过运行记录继续轮询；管理员可在运行准备页面检查 worker。</p>
+      </details>
+    );
+  }
+
+  const healthLabel = formatQueueHealth(summary?.queue_health);
+  const activeCount = queueCount(summary?.active_work_item_count);
+  const disabled = summary?.enabled === false;
+  return (
+    <details className="expert-summary worker-queue-disclosure">
+      <summary>
+        后台任务 · {disabled ? "未启用" : healthLabel}
+      </summary>
+      <dl>
+        <div>
+          <dt>执行状态</dt>
+          <dd>{disabled ? "worker 未启用，任务会保持排队直到手动 tick 或启动 worker。" : healthLabel}</dd>
+        </div>
+        <div>
+          <dt>排队</dt>
+          <dd>{queueCount(summary?.queued_count)} 个</dd>
+        </div>
+        <div>
+          <dt>执行中</dt>
+          <dd>{queueCount(summary?.leased_count) + queueCount(summary?.running_count)} 个</dd>
+        </div>
+        <div>
+          <dt>重试</dt>
+          <dd>{queueCount(summary?.retrying_count)} 个</dd>
+        </div>
+        <div>
+          <dt>阻塞</dt>
+          <dd>{queueCount(summary?.blocked_count)} 个</dd>
+        </div>
+        <div>
+          <dt>当前活跃任务</dt>
+          <dd>{activeCount} 个</dd>
+        </div>
+      </dl>
+      <p>{summary?.boundary || "普通视图只展示队列摘要；工作项参数、结果载荷和租约细节默认隐藏。"}</p>
     </details>
   );
 }
