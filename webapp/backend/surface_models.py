@@ -2620,13 +2620,42 @@ def _memory_evidence_scope(
 
 
 def _memory_execution_surface_summary(execution_memory: Mapping[str, Any]) -> Dict[str, Any]:
+    status = execution_memory.get("status") or "not_available"
+    resume_supported = bool(execution_memory.get("resume_supported"))
+    can_resume = bool(execution_memory.get("can_resume")) if "can_resume" in execution_memory else resume_supported
+    should_retry = (
+        bool(execution_memory.get("should_retry"))
+        if "should_retry" in execution_memory
+        else str(status) == "limited" and not can_resume
+    )
+    recovery_action = execution_memory.get("recovery_action") or _memory_execution_recovery_action(str(status))
     return {
-        "status": execution_memory.get("status") or "not_available",
+        "status": status,
         "phase": execution_memory.get("phase"),
-        "resume_supported": bool(execution_memory.get("resume_supported")),
+        "resume_supported": resume_supported,
+        "can_resume": can_resume,
+        "should_retry": should_retry,
+        "recovery_action": recovery_action,
+        "next_actions": list(execution_memory.get("next_actions") or _memory_execution_next_actions(recovery_action)),
         "checkpoint_backend": execution_memory.get("checkpoint_backend"),
         "resume_mode": execution_memory.get("resume_mode"),
     }
+
+
+def _memory_execution_recovery_action(status: str) -> str:
+    if status == "ready":
+        return "resume"
+    if status == "limited":
+        return "retry"
+    return "none"
+
+
+def _memory_execution_next_actions(recovery_action: Any) -> list[str]:
+    if recovery_action == "resume":
+        return ["resume_langgraph_thread", "monitor_progress"]
+    if recovery_action == "retry":
+        return ["retry_from_durable_queue", "inspect_checkpoint_metadata"]
+    return ["continue_without_checkpoint"]
 
 
 def _memory_injection_policy_surface_summary(policy: Mapping[str, Any]) -> Dict[str, Any]:
