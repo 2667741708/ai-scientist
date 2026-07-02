@@ -66,6 +66,30 @@ def test_research_work_item_failure_uses_retry_budget() -> None:
         assert failed["error_message"] == "parse failed"
 
 
+def test_research_work_item_can_be_blocked_for_manual_recovery() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.needs_approval",
+            arguments={"approval": "required"},
+            max_attempts=3,
+        )
+        leased = store.lease_work_items(owner="worker-block", limit=1)
+        assert leased[0]["status"] == "leased"
+
+        store.block_work_item(item["work_item_id"], "Waiting for expert approval.")
+
+        blocked = store.get_work_item(item["work_item_id"])
+        counts = store.work_item_status_counts()
+        assert blocked["status"] == "blocked"
+        assert blocked["lease_owner"] is None
+        assert blocked["lease_expires_at"] is None
+        assert blocked["error_message"] == "Waiting for expert approval."
+        assert counts["blocked"] == 1
+        assert counts["active"] == 1
+        assert store.lease_work_items(owner="worker-block", limit=1) == []
+
+
 def test_work_item_status_counts_can_scope_worker_progress() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
