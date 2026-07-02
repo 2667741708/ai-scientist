@@ -88,3 +88,44 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         status = await runtime.tick()
         assert status["leased_count"] == 0
         assert store.get_work_item(item["work_item_id"])["status"] == "queued"
+
+
+@pytest.mark.anyio
+async def test_worker_tick_recovers_expired_leases_before_leasing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={"value": "recover"},
+        )
+        leased = store.lease_work_items(owner="stale-worker", lease_seconds=1)
+        assert leased[0]["work_item_id"] == item["work_item_id"]
+        with store._connection() as connection:
+            connection.execute(
+                """
+                UPDATE research_work_items
+                SET lease_expires_at = ?
+                WHERE work_item_id = ?
+                """,
+                (leased[0]["lease_expires_at"] - 10, item["work_item_id"]),
+            )
+
+        async def handler(work_item):
+            return {"value": work_item["arguments"]["value"]}
+
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": handler},
+            owner="fresh-worker",
+            concurrency=1,
+            enabled=True,
+        )
+
+        status = await runtime.tick()
+        assert status["recovered_count"] == 1
+        assert status["leased_count"] == 1
+        await asyncio.gather(*runtime._running_tasks)
+
+        completed = store.get_work_item(item["work_item_id"])
+        assert completed["status"] == "complete"
+        assert completed["result_ref"]["value"] == "recover"
