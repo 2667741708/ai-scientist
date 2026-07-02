@@ -132,6 +132,92 @@ def execution_recovery_policy(
     }
 
 
+def build_checkpoint_metadata_record(
+    *,
+    run_id: str,
+    phase: str | None = None,
+    status: str = "saved",
+    checkpoint_id: str | None = None,
+    checkpoint_ns: str | None = None,
+    checkpoint_backend: str | None = None,
+    checkpoint_ref: str | None = None,
+    thread_id: str | None = None,
+    state_summary: Mapping[str, Any] | None = None,
+    checkpoint_tuple_summary: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required to build checkpoint metadata")
+    normalized_thread_id = str(thread_id).strip() if thread_id is not None else normalized_run_id
+    if not normalized_thread_id:
+        normalized_thread_id = normalized_run_id
+    if normalized_thread_id != normalized_run_id:
+        raise ValueError("checkpoint metadata requires thread_id to match run_id")
+
+    tuple_summary = dict(checkpoint_tuple_summary or {})
+    normalized_checkpoint_id = _first_nonempty_text(
+        checkpoint_id,
+        tuple_summary.get("checkpoint_id"),
+    )
+    normalized_checkpoint_ns = _first_nonempty_text(
+        checkpoint_ns,
+        tuple_summary.get("checkpoint_ns"),
+    )
+    normalized_backend = _first_nonempty_text(
+        checkpoint_backend,
+        "langgraph_sqlite" if tuple_summary else "sqlite_metadata",
+    )
+    resume_config = langgraph_resume_config(
+        normalized_run_id,
+        checkpoint_id=normalized_checkpoint_id,
+        checkpoint_ns=normalized_checkpoint_ns or None,
+    )
+    return {
+        "run_id": normalized_run_id,
+        "thread_id": normalized_thread_id,
+        "thread_id_matches_run_id": True,
+        "phase": _first_nonempty_text(phase),
+        "status": _first_nonempty_text(status) or "saved",
+        "checkpoint_id": normalized_checkpoint_id,
+        "checkpoint_ns": normalized_checkpoint_ns or "",
+        "checkpoint_backend": normalized_backend,
+        "checkpoint_ref": checkpoint_ref,
+        "resume_config": resume_config,
+        "checkpoint_tuple": {
+            "parent_checkpoint_id": tuple_summary.get("parent_checkpoint_id"),
+            "checkpoint_ts": tuple_summary.get("checkpoint_ts"),
+            "channel_keys": list(tuple_summary.get("channel_keys") or []),
+            "pending_writes_count": int(tuple_summary.get("pending_writes_count") or 0),
+        },
+        "state_summary": summarize_workflow_state_for_checkpoint_metadata(state_summary or {}),
+        "visibility_boundary": (
+            "Checkpoint metadata records run/thread/checkpoint identity, phase, status, resume config, "
+            "and state keys/counts only; raw workflow channel values, prompts, feedback text, "
+            "hypothesis text, and provider payloads must stay out of persisted metadata summaries."
+        ),
+    }
+
+
+def summarize_workflow_state_for_checkpoint_metadata(state: Mapping[str, Any]) -> Dict[str, Any]:
+    state_keys = sorted(str(key) for key in state.keys())
+    omitted_runtime_keys = sorted(str(key) for key in state.keys() if key in RUNTIME_ONLY_STATE_KEYS)
+    return {
+        "state_key_count": len(state_keys),
+        "state_keys": state_keys,
+        "omitted_runtime_only_keys": omitted_runtime_keys,
+        "hypothesis_count": _collection_length(state.get("hypotheses")),
+        "message_count": _collection_length(state.get("messages")),
+        "tournament_matchup_count": _collection_length(state.get("tournament_matchups")),
+        "evolution_detail_count": _collection_length(state.get("evolution_details")),
+        "current_iteration": state.get("current_iteration"),
+        "has_memory_context": bool(state.get("memory_context")),
+        "has_starting_hypotheses": bool(state.get("starting_hypotheses")),
+        "boundary": (
+            "Workflow state metadata stores keys and counts only. Raw values are intentionally omitted."
+        ),
+    }
+
+
 def sanitize_workflow_state_for_checkpoint(state: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     sanitized: Dict[str, Any] = {}
     omitted: Dict[str, str] = {}
@@ -214,3 +300,20 @@ async def open_sqlite_checkpointer(db_path: str | Path):
     async with AsyncSqliteSaver.from_conn_string(str(resolved)) as saver:
         await saver.setup()
         yield saver
+
+
+def _first_nonempty_text(*values: Any) -> str:
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if text:
+            return text
+    return ""
+
+
+def _collection_length(value: Any) -> int:
+    if value is None or isinstance(value, (str, bytes)):
+        return 0
+    try:
+        return len(value)
+    except TypeError:
+        return 1
