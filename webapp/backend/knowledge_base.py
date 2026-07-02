@@ -2292,6 +2292,10 @@ class KnowledgeBaseStore:
                 """,
                 tuple(params),
             ).fetchall()
+        items = [
+            self._work_item_snapshot_from_row(row, include_internal_refs=include_internal_refs)
+            for row in rows
+        ]
         return {
             "generated_at": time.time(),
             "filters": {
@@ -2300,11 +2304,9 @@ class KnowledgeBaseStore:
                 "limit": max(1, min(limit, 100)),
             },
             "counts": self.work_item_status_counts(run_id=run_id, workflow_name=workflow_name),
+            "recovery_action_counts": self._work_item_recovery_action_counts(items),
             "active_statuses": list(ACTIVE_WORK_ITEM_STATUSES),
-            "items": [
-                self._work_item_snapshot_from_row(row, include_internal_refs=include_internal_refs)
-                for row in rows
-            ],
+            "items": items,
             "visibility_boundary": (
                 "Default snapshot omits work item arguments, result payloads, worker internals, "
                 "and raw IDs unless include_internal_refs is explicitly enabled."
@@ -3203,6 +3205,14 @@ class KnowledgeBaseStore:
         if status in {"complete", "cancelled"}:
             return "none"
         return "inspect"
+
+    @staticmethod
+    def _work_item_recovery_action_counts(items: list[Dict[str, Any]]) -> Dict[str, int]:
+        counts = {action: 0 for action in ("wait", "retry", "unblock", "escalate", "inspect", "none")}
+        for item in items:
+            action = str(item.get("recovery_action") or "inspect")
+            counts[action] = counts.get(action, 0) + 1
+        return counts
 
     @staticmethod
     def _work_item_workflow_label(workflow_name: str) -> str:
