@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Literal, Optional, 
 
 from langgraph.graph import END, StateGraph
 
+from .checkpointing import langgraph_thread_config
 from .constants import (
     DEFAULT_MAX_ITERATIONS,
     DEFAULT_INITIAL_HYPOTHESES_COUNT,
@@ -111,10 +112,7 @@ class HypothesisGenerator:
 
     @staticmethod
     def _workflow_run_config(run_id: str) -> Dict[str, Any]:
-        return {
-            "recursion_limit": 100,
-            "configurable": {"thread_id": run_id},
-        }
+        return langgraph_thread_config(run_id)
 
     def _build_graph(
         self,
