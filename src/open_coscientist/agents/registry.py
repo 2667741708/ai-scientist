@@ -180,10 +180,14 @@ def list_agent_specs(*, public: bool = False) -> list[AgentSpec] | list[Dict[str
             "agent_id": spec["agent_id"],
             "phase": spec["phase"],
             "role": spec["role"],
-            "configurable": spec["configurable"],
-            "degradation_when_disabled": spec["degradation_when_disabled"],
             "input_contract": spec["input_contract"],
             "output_contract": spec["output_contract"],
+            "prompt_template": spec["prompt_template"],
+            "tool_policy": spec["tool_policy"],
+            "failure_policy": spec["failure_policy"],
+            "observability_fields": spec["observability_fields"],
+            "configurable": spec["configurable"],
+            "degradation_when_disabled": spec["degradation_when_disabled"],
         }
         for spec in specs
     ]
