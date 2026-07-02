@@ -54,6 +54,9 @@ PHASE_ORDER = [
 ]
 
 
+TRACE_PHASE_ORDER_INDEX = {phase: index for index, phase in enumerate(PHASE_ORDER)}
+
+
 PHASE_LABELS = {
     "supervisor": "Research planning",
     "literature_review": "Literature grounding",
@@ -278,6 +281,13 @@ def canonical_trace_phase(phase: str) -> Optional[str]:
     return TRACE_PHASE_ALIASES.get(normalized)
 
 
+def trace_phase_sort_key(phase: str, *, fallback_index: int = 0) -> tuple[int, int, str]:
+    canonical = canonical_trace_phase(phase)
+    if canonical is None:
+        return (len(PHASE_ORDER), fallback_index, str(phase or "").strip())
+    return (TRACE_PHASE_ORDER_INDEX[canonical], fallback_index, canonical)
+
+
 def get_trace_contract_payload() -> Dict[str, Any]:
     agents = list_agent_specs(public=True)
     phase_index = {
@@ -293,6 +303,8 @@ def get_trace_contract_payload() -> Dict[str, Any]:
         "phase_order": PHASE_ORDER,
         "phase_labels": PHASE_LABELS,
         "phase_aliases": TRACE_PHASE_ALIASES,
+        "phase_order_index": TRACE_PHASE_ORDER_INDEX,
+        "unknown_phase_order": "after_known_phases",
         "phase_index": phase_index,
         "required_fields": TRACE_REQUIRED_FIELDS,
         "optional_fields": TRACE_OPTIONAL_FIELDS,
