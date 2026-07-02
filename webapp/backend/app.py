@@ -4863,6 +4863,7 @@ async def run_real(record: RunRecord) -> None:
     try:
         normalize_provider_env()
         from open_coscientist import HypothesisGenerator
+        from open_coscientist.checkpointing import execution_memory_status, open_sqlite_checkpointer
         from open_coscientist.mcp_client import (
             reset_mcp_tool_call_observer,
             set_mcp_tool_call_observer,
@@ -4910,25 +4911,39 @@ async def run_real(record: RunRecord) -> None:
         combined_constraints.append(f"[reference_policy] {reference_constraints}")
         combined_constraints.append("[memory_boundary] Memory context is summary-only; raw records are not injected.")
 
-        result = await generator.generate_hypotheses(
-            research_goal=record.request.research_goal,
-            progress_callback=progress_callback,
-            opts={
-                "enable_literature_review_node": record.request.literature_review,
-                "enable_tool_calling_generation": False,
-                "preferences": record.request.preferences,
-                "attributes": record.request.attributes,
-                "constraints": combined_constraints,
-                "memory_context": memory_context,
-                "user_feedback": [item.model_dump() for item in record.request.user_feedback],
-                "user_inputs": {
-                    "starting_hypotheses": record.request.starting_hypotheses,
-                    "literature": memory_context.get("evidence_summaries", []),
-                },
+        generation_opts = {
+            "enable_literature_review_node": record.request.literature_review,
+            "enable_tool_calling_generation": False,
+            "preferences": record.request.preferences,
+            "attributes": record.request.attributes,
+            "constraints": combined_constraints,
+            "memory_context": memory_context,
+            "user_feedback": [item.model_dump() for item in record.request.user_feedback],
+            "user_inputs": {
+                "starting_hypotheses": record.request.starting_hypotheses,
+                "literature": memory_context.get("evidence_summaries", []),
             },
-            run_id=record.run_id,
-            stream=False,
-        )
+        }
+        checkpoint_status = execution_memory_status()
+
+        if checkpoint_status.get("langgraph_checkpoint_sqlite_available"):
+            async with open_sqlite_checkpointer(KB_ROOT / "langgraph_checkpoints.sqlite") as checkpointer:
+                generation_opts["checkpointer"] = checkpointer
+                result = await generator.generate_hypotheses(
+                    research_goal=record.request.research_goal,
+                    progress_callback=progress_callback,
+                    opts=generation_opts,
+                    run_id=record.run_id,
+                    stream=False,
+                )
+        else:
+            result = await generator.generate_hypotheses(
+                research_goal=record.request.research_goal,
+                progress_callback=progress_callback,
+                opts=generation_opts,
+                run_id=record.run_id,
+                stream=False,
+            )
 
         record.hypotheses = serialize_value(result.get("hypotheses", []))
         record.research_plan = serialize_value(result.get("research_plan", {}))
@@ -4945,6 +4960,7 @@ async def run_real(record: RunRecord) -> None:
         }
         record.tournament_matchups = serialize_value(result.get("tournament_matchups", []))
         record.metrics = serialize_value(result.get("metrics", {}))
+        record.metrics["execution_memory"] = checkpoint_status
         record.metrics["workflow_tool_policy_enforced"] = True
         record.metrics["direct_tool_calling_generation"] = False
         record.metrics["memory_context_used"] = {
