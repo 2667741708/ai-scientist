@@ -4530,6 +4530,24 @@ def memory_context_prompt_constraints(memory_context: Dict[str, Any]) -> List[st
     return constraints[:18]
 
 
+def run_request_feedback_prompt_constraints(feedback_items: List[FeedbackItem]) -> List[str]:
+    constraints: List[str] = []
+    for feedback in feedback_items:
+        text = _short_prompt_text(feedback.text, 360)
+        if not text:
+            continue
+        constraints.append(
+            "[user_feedback] "
+            f"type={feedback.feedback_type}; target={feedback.target_type}; feedback={text}."
+        )
+    if constraints:
+        constraints.append(
+            "[user_feedback_policy] Use user feedback as guidance for this run or continuation. "
+            "Do not present it as an immediate reversible edit to an already completed result."
+        )
+    return constraints[:12]
+
+
 def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any]:
     parent_run = memory_context.get("parent_run") if isinstance(memory_context.get("parent_run"), dict) else None
     prior_hypotheses = memory_context.get("prior_hypotheses") if isinstance(memory_context.get("prior_hypotheses"), list) else []
@@ -5448,6 +5466,7 @@ async def run_real(record: RunRecord) -> None:
         ]
         combined_constraints.append(f"[reference_policy] {reference_constraints}")
         combined_constraints.append("[memory_boundary] Memory context is summary-only; raw records are not injected.")
+        combined_constraints.extend(run_request_feedback_prompt_constraints(record.request.user_feedback))
         combined_constraints.extend(memory_context_prompt_constraints(memory_context))
 
         generation_opts = {
