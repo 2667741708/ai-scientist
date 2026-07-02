@@ -2800,6 +2800,16 @@ class KnowledgeBaseStore:
             "memory_sources": memory_sources,
             "evidence_boundary": self._evidence_memory_boundary(evidence_summaries),
             "known_gaps": known_gaps,
+            "injection_policy": self._memory_injection_policy(
+                memory_scope=normalized_scope,
+                memory_sources=memory_sources,
+                parent_run=parent_run,
+                related_runs=related_runs,
+                prior_hypotheses=prior_hypotheses,
+                feedback_items=feedback_items,
+                evidence_summaries=evidence_summaries,
+                known_gaps=known_gaps,
+            ),
             "memory_boundary": "Summaries only; raw records are not injected.",
         }
 
@@ -3177,6 +3187,62 @@ class KnowledgeBaseStore:
         if known_gaps:
             sources.append("memory_limitations")
         return sources
+
+    def _memory_injection_policy(
+        self,
+        *,
+        memory_scope: str,
+        memory_sources: list[str],
+        parent_run: Optional[Dict[str, Any]],
+        related_runs: list[Dict[str, Any]],
+        prior_hypotheses: list[Dict[str, Any]],
+        feedback_items: list[Dict[str, Any]],
+        evidence_summaries: list[Dict[str, Any]],
+        known_gaps: list[str],
+    ) -> Dict[str, Any]:
+        evidence_boundary = self._evidence_memory_boundary(evidence_summaries)
+        prompt_sections: list[str] = []
+        if isinstance(parent_run, dict):
+            prompt_sections.append("parent_run_summary")
+        if related_runs:
+            prompt_sections.append("related_run_summaries")
+        if prior_hypotheses:
+            prompt_sections.append("prior_hypothesis_summaries")
+        if feedback_items:
+            prompt_sections.append("feedback_type_and_target_summary")
+        if evidence_summaries:
+            prompt_sections.append("evidence_boundary_and_snippet_summaries")
+        if known_gaps:
+            prompt_sections.append("memory_limitations")
+        return {
+            "mode": "summary_only",
+            "memory_scope": memory_scope,
+            "memory_sources": list(memory_sources),
+            "prompt_sections": prompt_sections,
+            "counts": {
+                "related_runs": len(related_runs),
+                "prior_hypotheses": len(prior_hypotheses),
+                "feedback_items": len(feedback_items),
+                "evidence_summaries": len(evidence_summaries),
+                "known_gaps": len(known_gaps),
+            },
+            "evidence_status": evidence_boundary["status"],
+            "raw_injection_allowed": False,
+            "excluded_raw_fields": [
+                "chat_message_bodies",
+                "feedback_text",
+                "hypothesis_full_text",
+                "checkpoint_state",
+                "tool_result_json",
+                "provider_payloads",
+                "full_pdf_chunks",
+            ],
+            "target_prompts": ["supervisor", "generate", "review", "ranking"],
+            "boundary": (
+                "Memory injection uses summary-only guidance for planning, generation, review, and ranking; "
+                "raw chat, feedback, checkpoint, tool result, provider, and fulltext payloads stay out of prompts."
+            ),
+        }
 
     def _evidence_memory_boundary(self, evidence_summaries: list[Dict[str, Any]]) -> Dict[str, Any]:
         source_reliability_counts: Dict[str, int] = {}
