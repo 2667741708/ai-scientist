@@ -8508,6 +8508,8 @@ async def get_worker_status() -> Dict[str, Any]:
 
 @app.post("/api/worker/tick")
 async def tick_worker_once() -> Dict[str, Any]:
+    from open_coscientist.checkpointing import execution_memory_status
+
     global worker_runtime
     if worker_runtime is None:
         worker_runtime = build_worker_runtime()
@@ -8515,6 +8517,7 @@ async def tick_worker_once() -> Dict[str, Any]:
     return {
         **result,
         "auto_start_enabled": WORKER_AUTOSTART_ENABLED,
+        "execution_memory": execution_memory_status(),
         **worker_queue_snapshot(),
     }
 
