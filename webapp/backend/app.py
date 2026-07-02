@@ -4290,6 +4290,70 @@ def run_record_payload(record: RunRecord) -> Dict[str, Any]:
     return serialize_value(record)
 
 
+def _short_prompt_text(value: Any, limit: int = 420) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 3)].rstrip()}..."
+
+
+def memory_context_prompt_constraints(memory_context: Dict[str, Any]) -> List[str]:
+    constraints: List[str] = []
+    parent_run = memory_context.get("parent_run")
+    if isinstance(parent_run, dict):
+        goal = _short_prompt_text(parent_run.get("research_goal"), 220)
+        summary = _short_prompt_text(parent_run.get("summary"), 360)
+        constraints.append(
+            "[memory_parent_run] "
+            f"Prior run status={parent_run.get('status') or 'unknown'}; "
+            f"hypothesis_count={parent_run.get('hypothesis_count') or 0}; "
+            f"goal={goal or 'not summarized'}; summary={summary or 'not summarized'}."
+        )
+
+    for hypothesis in memory_context.get("prior_hypotheses") or []:
+        if not isinstance(hypothesis, dict):
+            continue
+        text = _short_prompt_text(hypothesis.get("text"), 360)
+        explanation = _short_prompt_text(hypothesis.get("explanation"), 220)
+        support = _short_prompt_text(hypothesis.get("support_level"), 80) or "unknown"
+        if text:
+            constraints.append(
+                "[memory_prior_hypothesis] "
+                f"{text}; support={support}; explanation={explanation or 'not summarized'}."
+            )
+
+    for feedback in memory_context.get("user_feedback") or []:
+        if not isinstance(feedback, dict):
+            continue
+        text = _short_prompt_text(feedback.get("text"), 360)
+        if text:
+            constraints.append(
+                "[memory_user_feedback] "
+                f"type={feedback.get('feedback_type') or 'unspecified'}; "
+                f"target={feedback.get('target_type') or 'run'}; feedback={text}."
+            )
+
+    for evidence in memory_context.get("evidence_summaries") or []:
+        if not isinstance(evidence, dict):
+            continue
+        title = _short_prompt_text(evidence.get("title"), 180) or "untitled source"
+        reliability = _short_prompt_text(evidence.get("source_reliability"), 80) or "unknown"
+        support = _short_prompt_text(evidence.get("support_level"), 80) or "unknown"
+        snippet = _short_prompt_text(evidence.get("snippet"), 420)
+        if snippet:
+            constraints.append(
+                "[memory_evidence_summary] "
+                f"title={title}; reliability={reliability}; support={support}; snippet={snippet}."
+            )
+
+    if constraints:
+        constraints.append(
+            "[memory_usage_policy] Use these memory entries as summary-only guidance. "
+            "Do not treat them as scientific evidence unless source reliability and support level justify it."
+        )
+    return constraints[:18]
+
+
 def persist_run_record(record: RunRecord) -> None:
     try:
         knowledge_base.record_research_run(run_record_payload(record))
@@ -4918,6 +4982,7 @@ async def run_real(record: RunRecord) -> None:
         ]
         combined_constraints.append(f"[reference_policy] {reference_constraints}")
         combined_constraints.append("[memory_boundary] Memory context is summary-only; raw records are not injected.")
+        combined_constraints.extend(memory_context_prompt_constraints(memory_context))
 
         generation_opts = {
             "enable_literature_review_node": record.request.literature_review,
