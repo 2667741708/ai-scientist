@@ -1126,11 +1126,20 @@ def test_agent_process_surface_summary_uses_phase_labels_without_raw_provider_pa
     ]
     registry = {
         "phase_index": {
+            "literature_review": {
+                "role": "Ground evidence for the run.",
+            },
             "review": {
                 "agent_id": "review-agent-secret",
                 "role": "Custom review role from registry.",
                 "prompt_template": "registry/review.md",
-            }
+            },
+            "ranking": {
+                "role": "Compare hypotheses.",
+            },
+            "evolve": {
+                "role": "Refine hypotheses.",
+            },
         }
     }
 
@@ -1139,6 +1148,14 @@ def test_agent_process_surface_summary_uses_phase_labels_without_raw_provider_pa
     assert summary["status"] == "partial"
     assert summary["trace_count"] == 3
     assert summary["phase_order"] == ["literature_review", "review", "ranking"]
+    assert summary["phase_coverage"] == {
+        "expected_phases": ["literature_review", "review", "ranking", "evolve"],
+        "observed_phases": ["literature_review", "review", "ranking"],
+        "missing_phases": ["evolve"],
+        "covered_count": 3,
+        "expected_count": 4,
+        "complete": False,
+    }
     assert summary["counts"]["complete"] == 2
     assert summary["counts"]["degraded"] == 1
     assert summary["counts"]["synthetic"] == 1
