@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from surface_models import (
+    agent_process_surface_summary,
     evidence_library_surface_summary,
     evidence_surface_collection,
     evidence_surface_summary,
@@ -624,6 +625,8 @@ def test_workspace_surface_summary_chooses_confirmation_layout_without_raw_detai
     assert summary["surfaces"]["confirmation"]["is_continuation"] is True
     assert summary["surfaces"]["memory"]["status"] == "ready"
     assert summary["surfaces"]["evidence_library"]["status"] == "ready"
+    assert summary["surfaces"]["process"]["status"] == "partial"
+    assert summary["surfaces"]["process"]["phase_order"] == ["process_summary"]
     assert summary["surfaces"]["runtime"]["status"] == "ready"
     inspectors = {item["id"]: item for item in summary["inspectors"]}
     assert inspectors["memory"]["available"] is True
@@ -675,6 +678,118 @@ def test_workspace_surface_summary_prefers_run_progress_for_queued_run() -> None
 
     assert expert_summary["internal_refs"]["run_id"] == "run-secret"
     assert expert_summary["internal_refs"]["work_item_ids"] == ["work-secret"]
+
+
+def test_agent_process_surface_summary_uses_phase_labels_without_raw_provider_payload() -> None:
+    trace = [
+        {
+            "event_id": "event-secret-rank",
+            "phase": "rank",
+            "agent_id": "ranking-agent-secret",
+            "output_summary": "Pairwise ranking completed with evidence-aware comparison.",
+            "prompt_template": "prompts/ranking.md",
+            "token_usage": {"total_tokens": 987},
+            "raw_provider_response": {"debug": "SECRET PROVIDER PAYLOAD"},
+        },
+        {
+            "event_id": "event-secret-review",
+            "phase": "review",
+            "output": "Reviewed soundness, feasibility, and safety for the candidate.",
+            "tool_calls": [{"args": {"raw": "SECRET TOOL ARG"}}],
+            "prompt_template": "prompts/review.md",
+            "token_usage": {"total_tokens": 1234},
+        },
+        {
+            "event_id": "event-secret-literature",
+            "phase": "literature",
+            "output_summary": "Literature grounding is unavailable; continue with a latent-knowledge boundary.",
+            "degradation_reason": "literature_review_disabled_latent_knowledge_boundary",
+            "synthetic": True,
+        },
+    ]
+    registry = {
+        "phase_index": {
+            "review": {
+                "agent_id": "review-agent-secret",
+                "role": "Custom review role from registry.",
+                "prompt_template": "registry/review.md",
+            }
+        }
+    }
+
+    summary = agent_process_surface_summary(trace, registry=registry)
+
+    assert summary["status"] == "partial"
+    assert summary["trace_count"] == 3
+    assert summary["phase_order"] == ["literature_review", "review", "ranking"]
+    assert summary["counts"]["complete"] == 2
+    assert summary["counts"]["degraded"] == 1
+    assert summary["counts"]["synthetic"] == 1
+    assert summary["counts"]["unknown_phase"] == 0
+    assert summary["current_phase"] == {
+        "phase": "ranking",
+        "label": "Tournament ranking",
+        "status": "complete",
+    }
+    assert summary["items"][0]["label"] == "Literature grounding"
+    assert summary["items"][0]["status"] == "degraded"
+    assert summary["items"][1]["label"] == "Scientific critique"
+    assert summary["items"][1]["role"] == "Custom review role from registry."
+    assert summary["items"][1]["tool_call_count"] == 1
+    assert summary["items"][2]["label"] == "Tournament ranking"
+    assert summary["next_actions"] == ["inspect_process_summary", "review_capability_degradation", "inspect_evidence"]
+    assert "internal_refs" not in summary
+    assert "event-secret" not in str(summary)
+    assert "ranking-agent-secret" not in str(summary)
+    assert "review-agent-secret" not in str(summary)
+    assert "prompts/" not in str(summary)
+    assert "registry/review.md" not in str(summary)
+    assert "total_tokens" not in str(summary)
+    assert "SECRET" not in str(summary)
+
+    expert_summary = agent_process_surface_summary(
+        trace,
+        registry=registry,
+        include_internal_refs=True,
+    )
+
+    assert expert_summary["internal_refs"]["event_ids"] == [
+        "event-secret-literature",
+        "event-secret-review",
+        "event-secret-rank",
+    ]
+    assert expert_summary["internal_refs"]["agent_ids"] == [
+        "review-agent-secret",
+        "ranking-agent-secret",
+    ]
+    assert expert_summary["internal_refs"]["prompt_templates"] == [
+        "prompts/review.md",
+        "prompts/ranking.md",
+    ]
+    assert expert_summary["internal_refs"]["token_usage_by_phase"] == {
+        "review": {"total_tokens": 1234},
+        "ranking": {"total_tokens": 987},
+    }
+    assert expert_summary["internal_refs"]["raw_trace_events"][1]["tool_calls"][0]["args"]["raw"] == "SECRET TOOL ARG"
+
+
+def test_agent_process_surface_summary_handles_absent_and_summary_only_trace() -> None:
+    absent = agent_process_surface_summary([])
+
+    assert absent["status"] == "absent"
+    assert absent["trace_count"] == 0
+    assert absent["items"] == []
+    assert absent["next_actions"] == ["run_research_task", "inspect_timeline"]
+
+    summary_only = agent_process_surface_summary({"trace_count": 2})
+
+    assert summary_only["status"] == "partial"
+    assert summary_only["trace_count"] == 1
+    assert summary_only["phase_order"] == ["process_summary"]
+    assert summary_only["counts"]["unknown_phase"] == 1
+    assert summary_only["items"][0]["label"] == "Process Summary"
+    assert summary_only["items"][0]["output_summary"] == "2 process trace event(s) are available in details."
+    assert summary_only["next_actions"] == ["inspect_process_summary", "inspect_unknown_steps", "inspect_evidence"]
 
 
 def test_evidence_surface_summary_hides_internal_refs_by_default() -> None:
