@@ -652,10 +652,19 @@ def get_phase_status_payload(*, disabled_phases: Optional[List[str]] = None) -> 
     }
 
 
-def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
+def get_agent_registry_payload(
+    *,
+    public: bool = True,
+    disabled_phases: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     agents = list_agent_specs(public=public)
     phases = [str(agent["phase"]) for agent in agents]
-    phase_status_payload = get_phase_status_payload()
+    requested_disabled_phases = [
+        str(phase)
+        for phase in (disabled_phases or [])
+        if str(phase or "").strip()
+    ]
+    phase_status_payload = get_phase_status_payload(disabled_phases=requested_disabled_phases)
     phase_index = {
         str(agent["phase"]): {
             "agent_id": agent["agent_id"],
@@ -681,6 +690,7 @@ def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
         "required_phases": [
             phase for phase in PHASE_ORDER if phase not in configurable_phases
         ],
+        "requested_disabled_phases": requested_disabled_phases,
         "phase_index": phase_index,
         "phase_statuses": phase_status_payload["phase_statuses"],
         "degraded_phases": phase_status_payload["degraded_phases"],
