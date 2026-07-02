@@ -10116,6 +10116,8 @@ async def list_run_checkpoints(run_id: str, limit: int = 20) -> Dict[str, Any]:
             else "not_available"
         ),
         "checkpoint_count": len(checkpoints),
+        "thread_id": run_id,
+        "latest_checkpoint_id": latest_checkpoint.get("checkpoint_id") if latest_checkpoint else None,
         "latest_status": latest_checkpoint.get("status") if latest_checkpoint else None,
         "latest_phase": latest_checkpoint.get("phase") if latest_checkpoint else None,
         "checkpoint_backend": latest_checkpoint.get("checkpoint_backend") if latest_checkpoint else None,
