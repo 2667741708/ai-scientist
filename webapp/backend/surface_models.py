@@ -946,12 +946,15 @@ def _report_limitations(
         max_items=8,
         max_length=220,
     )
+    boundary = _as_mapping(evidence_boundary)
     mode = str(mode_boundary.get("mode") or "")
     if mode == "demo_only":
         limitations.append("Demo output is for workflow/schema validation only, not scientific evidence.")
-    elif mode_boundary.get("evidence_status") in {"absent", "unknown", "limited"}:
+    elif mode_boundary.get("evidence_status") in {"absent", "unknown", "limited"} and boundary.get("status") not in {
+        "parsed_fulltext",
+        "experimental_data",
+    }:
         limitations.append("Evidence support is limited; treat findings as draft hypotheses until fulltext support is verified.")
-    boundary = _as_mapping(evidence_boundary)
     if boundary.get("status") == "contradicted":
         limitations.append("At least one evidence item contradicts or fails to support a reported claim.")
     elif boundary.get("status") == "absent":
