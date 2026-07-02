@@ -23,8 +23,16 @@ def execution_memory_status() -> Dict[str, Any]:
         "thread_id_required": True,
         "thread_id_source": "run_id",
         "checkpoint_backend": "langgraph_sqlite" if sqlite_available else "sqlite_metadata",
+        "checkpointer_package": "langgraph-checkpoint-sqlite",
         "langgraph_checkpoint_sqlite_available": sqlite_available,
+        "resume_supported": sqlite_available,
+        "resume_mode": "langgraph_thread_resume" if sqlite_available else "metadata_only_retry",
         "runtime_only_state_keys": sorted(RUNTIME_ONLY_STATE_KEYS),
+        "resume_boundary": (
+            "Stable thread_id=run_id can be used with LangGraph SQLite checkpoint summaries."
+            if sqlite_available
+            else "Only queue/checkpoint metadata is available; full LangGraph state resume remains limited."
+        ),
         "boundary": (
             "LangGraph SQLite checkpoint saver is available."
             if sqlite_available
