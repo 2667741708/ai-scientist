@@ -172,3 +172,59 @@ async def test_worker_does_not_complete_after_lease_expires_during_handler() -> 
         recovered_count = store.recover_expired_leases()
         assert recovered_count == 1
         assert store.get_work_item(item["work_item_id"])["status"] == "retrying"
+
+
+@pytest.mark.anyio
+async def test_worker_retries_and_completes_after_stale_lease_tick() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={"value": "recover-late"},
+            max_attempts=3,
+        )
+        calls = {"count": 0}
+
+        async def handler(work_item):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                with store._connection() as connection:
+                    connection.execute(
+                        """
+                        UPDATE research_work_items
+                        SET lease_expires_at = ?
+                        WHERE work_item_id = ?
+                        """,
+                        (0, work_item["work_item_id"]),
+                    )
+                return {"value": "stale"}
+            return {"value": work_item["arguments"]["value"], "attempt": calls["count"]}
+
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": handler},
+            owner="recover-worker",
+            concurrency=1,
+            enabled=True,
+        )
+
+        first_status = await runtime.tick()
+        assert first_status["leased_count"] == 1
+        first_results = await asyncio.gather(*runtime._running_tasks)
+        assert first_results[0]["status"] == "stale_lease"
+
+        stale = store.get_work_item(item["work_item_id"])
+        assert stale["status"] == "running"
+        assert stale["attempt_count"] == 1
+
+        second_status = await runtime.tick()
+        assert second_status["recovered_count"] == 1
+        assert second_status["leased_count"] == 1
+        second_results = await asyncio.gather(*runtime._running_tasks)
+        assert second_results[0]["status"] == "complete"
+
+        completed = store.get_work_item(item["work_item_id"])
+        assert completed["status"] == "complete"
+        assert completed["attempt_count"] == 2
+        assert completed["result_ref"]["value"] == "recover-late"
+        assert completed["result_ref"]["attempt"] == 2
