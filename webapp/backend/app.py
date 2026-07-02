@@ -4860,6 +4860,7 @@ async def run_real(record: RunRecord) -> None:
                     "literature": memory_context.get("evidence_summaries", []),
                 },
             },
+            run_id=record.run_id,
             stream=False,
         )
 
