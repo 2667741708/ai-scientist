@@ -123,3 +123,9 @@ def test_research_chat_capabilities_include_feedback_memory() -> None:
         assert feedback["intent"] == "apply_expert_feedback"
         assert feedback["taskArea"] == "hypothesis_audit"
         assert "下一轮" in feedback["availability"]["summary"]
+
+        continuation = next(item for item in capabilities if item["id"] == "research.continue_run")
+        assert continuation["intent"] == "continue_or_revise_run"
+        assert continuation["executionMode"] == "approval_required"
+        assert continuation["approvalScope"] == "research.start_live_run"
+        assert "摘要形式注入" in continuation["availability"]["summary"]
