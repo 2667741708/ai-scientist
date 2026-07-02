@@ -64,3 +64,10 @@ def test_run_lifecycle_persists_checkpoint_metadata(monkeypatch) -> None:
         assert latest["status"] == "complete"
         assert latest["phase"] == "complete"
         assert latest["state_summary"]["hypothesis_count"] == 1
+
+        api_response = client.get(f"/api/runs/{run_id}/checkpoints")
+        assert api_response.status_code == 200, api_response.text
+        api_payload = api_response.json()
+        assert api_payload["run_id"] == run_id
+        assert api_payload["count"] >= 3
+        assert "metadata index only" in api_payload["boundary"]
