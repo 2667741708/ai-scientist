@@ -43,6 +43,26 @@ def test_langgraph_thread_config_rejects_blank_run_id() -> None:
         langgraph_thread_config("   ")
 
 
+def test_langgraph_resume_config_adds_checkpoint_identity() -> None:
+    from open_coscientist.checkpointing import langgraph_resume_config
+
+    config = langgraph_resume_config(
+        " run-resume-config ",
+        checkpoint_id=" checkpoint-123 ",
+        checkpoint_ns="execution-memory",
+        recursion_limit=17,
+    )
+
+    assert config == {
+        "recursion_limit": 17,
+        "configurable": {
+            "thread_id": "run-resume-config",
+            "checkpoint_ns": "execution-memory",
+            "checkpoint_id": "checkpoint-123",
+        },
+    }
+
+
 def test_execution_memory_status_reports_sqlite_saver_boundary() -> None:
     from open_coscientist.checkpointing import execution_memory_status
 
@@ -51,6 +71,7 @@ def test_execution_memory_status_reports_sqlite_saver_boundary() -> None:
     assert status["thread_id_source"] == "run_id"
     assert status["checkpoint_backend"] in {"sqlite_metadata", "langgraph_sqlite"}
     assert status["checkpointer_package"] == "langgraph-checkpoint-sqlite"
+    assert status["resume_config_fields"] == ["thread_id", "checkpoint_id", "checkpoint_ns"]
     assert "progress_callback" in status["runtime_only_state_keys"]
     assert "tool_registry" in status["runtime_only_state_keys"]
     if status["langgraph_checkpoint_sqlite_available"]:
