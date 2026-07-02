@@ -350,6 +350,10 @@ def summarize_workflow_state_for_checkpoint_metadata(state: Mapping[str, Any]) -
         "evolution_detail_count": _collection_length(state.get("evolution_details")),
         "current_iteration": state.get("current_iteration"),
         "has_memory_context": bool(state.get("memory_context")),
+        "has_memory_prompt_packet": bool(state.get("memory_prompt_packet")),
+        "memory_prompt_packet_section_count": _prompt_packet_section_count(
+            state.get("memory_prompt_packet")
+        ),
         "has_starting_hypotheses": bool(state.get("starting_hypotheses")),
         "boundary": (
             "Workflow state metadata stores keys and counts only. Raw values are intentionally omitted."
@@ -510,3 +514,16 @@ def _collection_length(value: Any) -> int:
         return len(value)
     except TypeError:
         return 1
+
+
+def _prompt_packet_section_count(value: Any) -> int:
+    if not isinstance(value, Mapping):
+        return 0
+    explicit_count = value.get("section_count")
+    if explicit_count is not None:
+        try:
+            return max(0, int(explicit_count))
+        except (TypeError, ValueError):
+            return 0
+    sections = value.get("sections")
+    return _collection_length(sections) if isinstance(sections, list) else 0
