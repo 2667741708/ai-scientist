@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 
 class AgentSpec(TypedDict):
@@ -288,6 +288,76 @@ def trace_phase_sort_key(phase: str, *, fallback_index: int = 0) -> tuple[int, i
     return (TRACE_PHASE_ORDER_INDEX[canonical], fallback_index, canonical)
 
 
+def agent_trace_surface_summary(
+    trace_events: list[Any],
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    specs_by_phase = {spec["phase"]: spec for spec in AGENT_REGISTRY}
+    items: list[Dict[str, Any]] = []
+    for index, event in enumerate(trace_events or []):
+        raw_phase = str(_trace_value(event, "phase") or "").strip()
+        canonical_phase = canonical_trace_phase(raw_phase)
+        phase_key = canonical_phase or raw_phase or "unknown"
+        spec = specs_by_phase.get(canonical_phase or "")
+        degradation_reason = _trace_value(event, "degradation_reason")
+        synthetic = bool(_trace_value(event, "synthetic"))
+        item = {
+            "phase": phase_key,
+            "source_phase": raw_phase or None,
+            "label": PHASE_LABELS.get(phase_key, phase_key.replace("_", " ").title()),
+            "agent_id": _trace_value(event, "agent_id") or (spec["agent_id"] if spec else None),
+            "role": _trace_value(event, "role") or (spec["role"] if spec else None),
+            "status": "degraded" if degradation_reason else ("synthetic" if synthetic else "complete"),
+            "output_summary": _trace_output_summary(event),
+            "tool_call_count": _trace_tool_call_count(event),
+            "synthetic": synthetic,
+            "degradation_reason": degradation_reason,
+        }
+        if include_internal_refs:
+            item.update(
+                {
+                    "event_id": _trace_value(event, "event_id"),
+                    "prompt_template": _trace_value(event, "prompt_template")
+                    or (spec["prompt_template"] if spec else None),
+                    "confidence": _trace_value(event, "confidence"),
+                    "token_usage": _trace_value(event, "token_usage"),
+                }
+            )
+        items.append(item)
+
+    sorted_items = [
+        item
+        for _, item in sorted(
+            enumerate(items),
+            key=lambda pair: trace_phase_sort_key(pair[1]["phase"], fallback_index=pair[0]),
+        )
+    ]
+    degraded_phases = [
+        {"phase": item["phase"], "label": item["label"], "reason": item["degradation_reason"]}
+        for item in sorted_items
+        if item.get("degradation_reason")
+    ]
+    unknown_phases = [
+        item["phase"]
+        for item in sorted_items
+        if canonical_trace_phase(str(item.get("phase") or "")) is None
+    ]
+    return {
+        "trace_count": len(sorted_items),
+        "phase_order": [item["phase"] for item in sorted_items],
+        "items": sorted_items,
+        "degradation_count": len(degraded_phases),
+        "degraded_phases": degraded_phases,
+        "synthetic_count": sum(1 for item in sorted_items if item.get("synthetic")),
+        "unknown_phases": unknown_phases,
+        "visibility_boundary": (
+            "Agent process summaries expose phase, role, status, output summary, and tool counts by default; "
+            "event IDs, prompt templates, token usage, and raw tool/provider payloads require expert disclosure."
+        ),
+    }
+
+
 def get_trace_contract_payload() -> Dict[str, Any]:
     agents = list_agent_specs(public=True)
     phase_index = {
@@ -308,6 +378,17 @@ def get_trace_contract_payload() -> Dict[str, Any]:
         "phase_index": phase_index,
         "required_fields": TRACE_REQUIRED_FIELDS,
         "optional_fields": TRACE_OPTIONAL_FIELDS,
+        "surface_summary_fields": [
+            "phase",
+            "label",
+            "agent_id",
+            "role",
+            "status",
+            "output_summary",
+            "tool_call_count",
+            "synthetic",
+            "degradation_reason",
+        ],
         "observability_contract": BASE_OBSERVABILITY_FIELDS,
         "boundary": (
             "Trace summaries expose phase, agent identity, prompt template, output summary, "
@@ -404,3 +485,38 @@ def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
         "registry_version": "paper_level_v1",
         "boundary": "Static registry metadata; LangGraph nodes remain the runtime implementation.",
     }
+
+
+def _trace_value(event: Any, key: str) -> Any:
+    if isinstance(event, Mapping):
+        return event.get(key)
+    return getattr(event, key, None)
+
+
+def _trace_output_summary(event: Any) -> str:
+    for key in ("output_summary", "summary", "output", "content"):
+        value = _trace_value(event, key)
+        if value:
+            return _compact_trace_text(value)
+    return ""
+
+
+def _trace_tool_call_count(event: Any) -> int:
+    tool_calls = _trace_value(event, "tool_calls")
+    if isinstance(tool_calls, list):
+        return len(tool_calls)
+    if isinstance(tool_calls, tuple):
+        return len(tool_calls)
+    if isinstance(tool_calls, int):
+        return max(0, tool_calls)
+    tool_count = _trace_value(event, "tool_call_count")
+    if isinstance(tool_count, int):
+        return max(0, tool_count)
+    return 0
+
+
+def _compact_trace_text(value: Any, *, max_length: int = 280) -> str:
+    compact = " ".join(str(value).split())
+    if len(compact) <= max_length:
+        return compact
+    return f"{compact[: max_length - 3].rstrip()}..."
