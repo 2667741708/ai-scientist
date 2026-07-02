@@ -16,6 +16,7 @@ from surface_models import (
     runtime_readiness_surface_summary,
     run_confirmation_surface_summary,
     run_surface_summary,
+    work_queue_surface_summary,
     workspace_surface_summary,
 )
 
@@ -218,6 +219,107 @@ def test_runtime_readiness_surface_summary_reports_ready_state() -> None:
     assert summary["execution_memory"]["resume_supported"] is True
     assert summary["service_counts"]["ready"] == 2
     assert summary["next_actions"] == ["start_or_continue_research_run"]
+
+
+def test_work_queue_surface_summary_hides_raw_work_items_by_default() -> None:
+    snapshot = {
+        "counts": {"active": 2, "queued": 1, "running": 1, "retrying": 0, "error": 0},
+        "items": [
+            {
+                "work_item_id": "work-secret-1",
+                "run_id": "run-secret",
+                "workflow_name": "workflow.open_coscientist_run",
+                "phase": "review",
+                "agent_role": "review_agent",
+                "status": "running",
+                "priority": 4,
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "lease_owner": "owner-secret",
+                "lease_expires_at": "2026-07-02T10:00:00Z",
+                "arguments_json": {"provider_key": "SECRET PROVIDER KEY"},
+                "result_ref_json": {"path": "D:/secret/result.json"},
+                "error_message": "SECRET ERROR TEXT",
+            },
+            {
+                "work_item_id": "work-secret-2",
+                "run_id": "run-secret",
+                "phase": "ranking",
+                "agent_role": "ranking_agent",
+                "status": "queued",
+                "priority": 2,
+            },
+        ],
+    }
+    worker_status = {
+        "enabled": True,
+        "concurrency": 2,
+        "running_count": 1,
+        "owner": "owner-secret",
+    }
+
+    summary = work_queue_surface_summary(snapshot, worker_status=worker_status)
+
+    assert summary["status"] == "running"
+    assert summary["worker"] == {"enabled": True, "concurrency": 2, "running_count": 1}
+    assert summary["counts"]["active"] == 2
+    assert summary["counts"]["queued"] == 1
+    assert summary["counts"]["running"] == 1
+    assert summary["current_item"] == {
+        "index": 1,
+        "status": "running",
+        "status_label": "Running",
+        "workflow_name": "workflow.open_coscientist_run",
+        "phase": "review",
+        "agent_role": "review_agent",
+        "priority": 4,
+        "attempts": {"current": 1, "max": 3},
+        "next_action": "Monitor progress and process summary.",
+    }
+    assert summary["items_preview"][1]["phase"] == "ranking"
+    assert summary["next_actions"] == ["monitor_progress", "view_process_summary"]
+    assert "internal_refs" not in summary
+    assert "work-secret" not in str(summary)
+    assert "run-secret" not in str(summary)
+    assert "owner-secret" not in str(summary)
+    assert "SECRET" not in str(summary)
+    assert "D:/secret" not in str(summary)
+
+    expert_summary = work_queue_surface_summary(
+        snapshot,
+        worker_status=worker_status,
+        include_internal_refs=True,
+    )
+
+    assert expert_summary["internal_refs"]["work_item_ids"] == ["work-secret-1", "work-secret-2"]
+    assert expert_summary["internal_refs"]["run_ids"] == ["run-secret", "run-secret"]
+    assert expert_summary["internal_refs"]["lease_owners"] == ["owner-secret"]
+    assert expert_summary["internal_refs"]["lease_expires_at"] == ["2026-07-02T10:00:00Z"]
+    assert expert_summary["internal_refs"]["error_messages"] == ["SECRET ERROR TEXT"]
+    assert expert_summary["internal_refs"]["raw_items"][0]["arguments_json"]["provider_key"] == "SECRET PROVIDER KEY"
+
+
+def test_work_queue_surface_summary_reports_disabled_and_empty_states() -> None:
+    disabled = work_queue_surface_summary(
+        {"counts": {"active": 2, "queued": 2, "running": 0, "retrying": 0, "error": 0}},
+        worker_status={"enabled": False, "concurrency": 0},
+    )
+
+    assert disabled["status"] == "worker_disabled"
+    assert disabled["worker"]["enabled"] is False
+    assert disabled["counts"]["queued"] == 2
+    assert disabled["current_item"] is None
+    assert disabled["next_actions"] == ["start_worker_or_manual_tick", "monitor_queue"]
+
+    empty = work_queue_surface_summary(
+        {"counts": {"active": 0, "queued": 0, "running": 0, "retrying": 0, "error": 0}},
+        worker_status={"enabled": True, "concurrency": 1},
+    )
+
+    assert empty["status"] == "empty"
+    assert empty["current_item"] is None
+    assert empty["items_preview"] == []
+    assert empty["next_actions"] == ["start_or_continue_research_run"]
 
 
 def test_run_confirmation_surface_summary_counts_feedback_and_hides_raw_request() -> None:
