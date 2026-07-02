@@ -5,6 +5,7 @@ import inspect
 import socket
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -128,6 +129,29 @@ class ResearchWorkerRuntime:
             except asyncio.TimeoutError:
                 continue
 
+    def _lease_heartbeat_interval(self) -> float:
+        return max(0.1, min(30.0, float(self.lease_seconds or 1) / 3.0))
+
+    def _start_lease_heartbeat(self, work_item_id: str) -> Optional[asyncio.Task[None]]:
+        renew = getattr(self.store, "renew_work_item_lease", None)
+        if not callable(renew):
+            return None
+        return asyncio.create_task(
+            self._lease_heartbeat_loop(work_item_id),
+            name=f"coscientist-lease-heartbeat:{work_item_id}",
+        )
+
+    async def _lease_heartbeat_loop(self, work_item_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._lease_heartbeat_interval())
+            renewed = self.store.renew_work_item_lease(
+                work_item_id,
+                self.owner,
+                lease_seconds=self.lease_seconds,
+            )
+            if not renewed:
+                return
+
     def _owns_active_lease(self, work_item_id: str) -> bool:
         current = self.store.get_work_item(work_item_id)
         if not current:
@@ -152,6 +176,7 @@ class ResearchWorkerRuntime:
 
         if not self.store.mark_work_item_running(work_item_id, self.owner):
             return {"work_item_id": work_item_id, "status": "lease_conflict"}
+        heartbeat_task = self._start_lease_heartbeat(work_item_id)
         try:
             result = handler(item)
             if inspect.isawaitable(result):
@@ -169,3 +194,8 @@ class ResearchWorkerRuntime:
             if self._owns_active_lease(work_item_id):
                 self.store.fail_work_item(work_item_id, str(exc), retryable=True)
             return {"work_item_id": work_item_id, "status": "error", "error": str(exc)}
+        finally:
+            if heartbeat_task:
+                heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat_task
