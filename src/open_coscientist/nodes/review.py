@@ -7,6 +7,7 @@ Review node - adaptive peer review strategy based on hypothesis count.
 
 import asyncio
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List
 
 from ..constants import (
@@ -23,6 +24,96 @@ from ..prompts import get_review_batch_prompt, get_review_prompt
 from ..state import WorkflowState
 
 logger = logging.getLogger(__name__)
+
+
+def _short_review_guidance(value: Any, limit: int = 360) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}..."
+
+
+def _review_criteria_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if str(value or "").strip():
+        return [str(value).strip()]
+    return []
+
+
+def _append_review_feedback_criteria(criteria: List[str], feedback_items: Any, label: str) -> int:
+    if not isinstance(feedback_items, list):
+        return 0
+
+    appended = 0
+    for item in feedback_items[:5]:
+        if not isinstance(item, dict):
+            continue
+        text = _short_review_guidance(item.get("text"))
+        if not text:
+            continue
+        feedback_type = _short_review_guidance(item.get("feedback_type") or "critique", 80)
+        criteria.append(f"[{label}] type={feedback_type}; feedback={text}.")
+        appended += 1
+    return appended
+
+
+def augment_review_supervisor_guidance(
+    supervisor_guidance: Dict[str, Any] | None,
+    memory_context: Any,
+    user_feedback: Any,
+) -> Dict[str, Any] | None:
+    feedback_criteria: List[str] = []
+
+    if isinstance(memory_context, dict):
+        _append_review_feedback_criteria(
+            feedback_criteria,
+            memory_context.get("user_feedback"),
+            "memory_user_feedback",
+        )
+
+        evidence_summaries = memory_context.get("evidence_summaries")
+        if isinstance(evidence_summaries, list):
+            for evidence in evidence_summaries[:3]:
+                if not isinstance(evidence, dict):
+                    continue
+                title = _short_review_guidance(
+                    evidence.get("title")
+                    or evidence.get("source_title")
+                    or evidence.get("summary"),
+                    160,
+                )
+                if not title:
+                    continue
+                reliability = _short_review_guidance(
+                    evidence.get("source_reliability") or "unknown", 80
+                )
+                support = _short_review_guidance(evidence.get("support_level") or "unknown", 80)
+                feedback_criteria.append(
+                    "[memory_evidence_boundary] "
+                    f"source_reliability={reliability}; support={support}; summary={title}."
+                )
+
+    _append_review_feedback_criteria(feedback_criteria, user_feedback, "user_feedback")
+    if not feedback_criteria:
+        return supervisor_guidance
+
+    augmented = deepcopy(supervisor_guidance) if isinstance(supervisor_guidance, dict) else {}
+    workflow_plan = dict(augmented.get("workflow_plan") or {})
+    review_phase = dict(workflow_plan.get("review_phase") or {})
+    criteria = _review_criteria_list(review_phase.get("critical_criteria"))
+    criteria.extend(feedback_criteria)
+    review_phase["critical_criteria"] = criteria
+
+    existing_depth = _short_review_guidance(review_phase.get("review_depth"), 240)
+    feedback_policy = (
+        "Use human feedback and memory evidence boundaries as review guidance; "
+        "do not present feedback as an instant rewrite of completed results."
+    )
+    review_phase["review_depth"] = f"{existing_depth} {feedback_policy}".strip()
+    workflow_plan["review_phase"] = review_phase
+    augmented["workflow_plan"] = workflow_plan
+    return augmented
 
 
 async def review_single_hypothesis(
@@ -319,7 +410,11 @@ async def review_node(state: WorkflowState) -> Dict[str, Any]:
         )
 
     # Get supervisor guidance and meta_review from state
-    supervisor_guidance = state.get("supervisor_guidance")
+    supervisor_guidance = augment_review_supervisor_guidance(
+        state.get("supervisor_guidance"),
+        state.get("memory_context"),
+        state.get("user_feedback"),
+    )
     meta_review = state.get("meta_review")
 
     # Execute chosen strategy
