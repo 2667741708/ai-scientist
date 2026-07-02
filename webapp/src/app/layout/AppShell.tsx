@@ -21,6 +21,7 @@ export function AppShell() {
   const { user, signOut } = useAuth();
   const workspaceRef = useRef<HTMLElement | null>(null);
   const [sidePanelOpen, setSidePanelOpen] = useState(readStoredSidePanelState);
+  const isProjectChatRoute = location.pathname.startsWith("/project-chat");
   useRouteEntranceMotion(workspaceRef, location.pathname);
 
   useEffect(() => {
@@ -74,7 +75,7 @@ export function AppShell() {
         onClose={() => setSidePanelOpen(false)}
         onToggle={() => setSidePanelOpen((open) => !open)}
       />
-      <ResearchChatLauncher />
+      {isProjectChatRoute ? null : <ResearchChatLauncher />}
     </div>
   );
 }
