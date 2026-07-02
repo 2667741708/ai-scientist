@@ -435,6 +435,32 @@ def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
         assert review["prompt_template"] == "prompts/review.md"
 
 
+def test_agent_registry_endpoint_accepts_disabled_phase_query(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        response = client.get("/api/agents/registry?disabled_phases=literature_review,supervisor")
+        assert response.status_code == 200, response.text
+
+        payload = response.json()
+        statuses = {item["phase"]: item for item in payload["phase_statuses"]}
+
+        assert payload["requested_disabled_phases"] == ["literature_review", "supervisor"]
+        assert statuses["literature_review"]["enabled"] is False
+        assert "latent_knowledge" in statuses["literature_review"]["degradation_reason"]
+        assert statuses["supervisor"]["enabled"] is True
+        assert statuses["supervisor"]["degradation_reason"] is None
+        assert payload["degraded_phases"] == [statuses["literature_review"]]
+        assert payload["invalid_disabled_phases"] == [
+            {
+                "phase": "supervisor",
+                "label": "Research planning",
+                "reason": "required_phase_cannot_be_disabled",
+            }
+        ]
+
+
 def test_agent_trace_entries_include_registry_metadata(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
