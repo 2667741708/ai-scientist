@@ -232,6 +232,103 @@ def runtime_readiness_surface_summary(
     return summary
 
 
+def work_queue_surface_summary(
+    work_item_snapshot: Any = None,
+    *,
+    worker_status: Optional[Mapping[str, Any]] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    snapshot = _as_mapping(work_item_snapshot)
+    worker = _as_mapping(worker_status)
+    active_snapshot = _as_mapping(worker.get("active_work_item_snapshot"))
+    items = _record_items(
+        snapshot.get("items")
+        or active_snapshot.get("items")
+        or worker.get("active_work_items")
+        or worker.get("items")
+    )
+    counts = _work_queue_counts(snapshot=snapshot, worker=worker, items=items)
+    worker_enabled = bool(worker.get("enabled")) if "enabled" in worker else True
+    status = _work_queue_surface_status(
+        counts=counts,
+        worker_enabled=worker_enabled,
+    )
+    item_previews = [
+        _work_queue_item_surface(item, index=index)
+        for index, item in enumerate(items[:5])
+    ]
+    summary = {
+        "status": status,
+        "worker": {
+            "enabled": worker_enabled,
+            "concurrency": _safe_int(worker.get("concurrency")) or 0,
+            "running_count": _safe_int(worker.get("running_count")) or counts["running"],
+        },
+        "counts": counts,
+        "current_item": item_previews[0] if item_previews else None,
+        "items_preview": item_previews,
+        "next_actions": _work_queue_next_actions(status),
+        "disclosure": {
+            "default_state": "summary",
+            "safe_default_fields": [
+                "status",
+                "worker.enabled",
+                "worker.concurrency",
+                "counts",
+                "current_item.status",
+                "current_item.phase",
+                "current_item.agent_role",
+                "current_item.next_action",
+            ],
+            "expert_fields": [
+                "work item IDs",
+                "run IDs",
+                "lease owners",
+                "lease expiry",
+                "raw arguments",
+                "result references",
+                "raw errors",
+            ],
+        },
+        "visibility_boundary": (
+            "Work queue summaries expose queue state, worker readiness, counts, phase, agent role, "
+            "attempt counts, and next actions by default; work item IDs, run IDs, lease owners, "
+            "lease timing, raw arguments, result references, and raw errors require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "work_item_ids": [
+                _first_value(item, ("work_item_id", "id"))
+                for item in items
+                if _first_value(item, ("work_item_id", "id"))
+            ],
+            "run_ids": [
+                _first_value(item, ("run_id",))
+                for item in items
+                if _first_value(item, ("run_id",))
+            ],
+            "lease_owners": [
+                _first_value(item, ("lease_owner", "owner"))
+                for item in items
+                if _first_value(item, ("lease_owner", "owner"))
+            ],
+            "lease_expires_at": [
+                _first_value(item, ("lease_expires_at",))
+                for item in items
+                if _first_value(item, ("lease_expires_at",))
+            ],
+            "error_messages": [
+                _first_value(item, ("error_message", "error"))
+                for item in items
+                if _first_value(item, ("error_message", "error"))
+            ],
+            "raw_items": [dict(item) for item in items],
+            "raw_worker_status": dict(worker),
+        }
+    return summary
+
+
 def run_confirmation_surface_summary(
     request_preview: Any,
     *,
@@ -1941,6 +2038,118 @@ def _runtime_next_actions(
     if not actions:
         actions.append("start_or_continue_research_run" if overall_status == "ready" else "inspect_readiness_details")
     return actions
+
+
+def _work_queue_counts(
+    *,
+    snapshot: Mapping[str, Any],
+    worker: Mapping[str, Any],
+    items: list[Mapping[str, Any]],
+) -> Dict[str, int]:
+    active_snapshot = _as_mapping(worker.get("active_work_item_snapshot"))
+    raw_counts = _as_mapping(snapshot.get("counts")) or _as_mapping(active_snapshot.get("counts"))
+    queue_counts = _as_mapping(worker.get("queue_status_counts"))
+    statuses = ("queued", "leased", "running", "retrying", "blocked", "complete", "error", "cancelled")
+    counts: Dict[str, int] = {}
+    for status in statuses:
+        explicit = _first_value(raw_counts, (status,))
+        if explicit is None:
+            explicit = _first_value(queue_counts, (status, f"{status}_count"))
+        value = _safe_int(explicit)
+        if value is None:
+            value = sum(1 for item in items if str(item.get("status") or "").lower() == status)
+        counts[status] = max(0, value)
+    active_explicit = _first_value(raw_counts, ("active", "active_work_items", "active_work_item_count"))
+    if active_explicit is None:
+        active_explicit = _first_value(queue_counts, ("active", "active_count", "active_work_item_count"))
+    active = _safe_int(active_explicit)
+    if active is None:
+        active = sum(counts[status] for status in ("queued", "leased", "running", "retrying", "blocked"))
+    counts["active"] = max(0, active)
+    return counts
+
+
+def _work_queue_surface_status(*, counts: Mapping[str, int], worker_enabled: bool) -> str:
+    active = _safe_int(counts.get("active")) or 0
+    if active == 0 and (_safe_int(counts.get("error")) or 0) == 0:
+        return "empty"
+    if not worker_enabled and active > 0:
+        return "worker_disabled"
+    if (_safe_int(counts.get("blocked")) or 0) > 0 or (_safe_int(counts.get("error")) or 0) > 0:
+        return "needs_attention"
+    if (_safe_int(counts.get("retrying")) or 0) > 0:
+        return "retrying"
+    if (_safe_int(counts.get("running")) or 0) > 0 or (_safe_int(counts.get("leased")) or 0) > 0:
+        return "running"
+    if (_safe_int(counts.get("queued")) or 0) > 0:
+        return "queued"
+    return "active"
+
+
+def _work_queue_item_surface(item: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
+    status = str(_first_value(item, ("status",)) or "unknown").lower()
+    attempt_count = _safe_int(_first_value(item, ("attempt_count", "attempts"))) or 0
+    max_attempts = _safe_int(_first_value(item, ("max_attempts",))) or 0
+    return {
+        "index": index + 1,
+        "status": status,
+        "status_label": _first_value(item, ("status_label",)) or _work_queue_status_label(status),
+        "workflow_name": _compact_text(
+            _first_value(item, ("workflow_name", "workflow")) or "research_workflow",
+            max_length=96,
+        ),
+        "phase": _compact_text(_first_value(item, ("phase",)) or "workflow", max_length=80),
+        "agent_role": _compact_text(
+            _first_value(item, ("agent_role", "role")) or "workflow_runner",
+            max_length=80,
+        ),
+        "priority": _safe_int(item.get("priority")) or 0,
+        "attempts": {"current": attempt_count, "max": max_attempts},
+        "next_action": _first_value(item, ("next_action",)) or _work_queue_item_next_action(status),
+    }
+
+
+def _work_queue_status_label(status: str) -> str:
+    labels = {
+        "queued": "Queued",
+        "leased": "Preparing",
+        "running": "Running",
+        "retrying": "Retrying",
+        "blocked": "Blocked",
+        "complete": "Complete",
+        "error": "Error",
+        "cancelled": "Cancelled",
+    }
+    return labels.get(status, "Unknown")
+
+
+def _work_queue_item_next_action(status: str) -> str:
+    return {
+        "queued": "Wait for the worker to pick up this task.",
+        "leased": "Monitor worker startup for this task.",
+        "running": "Monitor progress and process summary.",
+        "retrying": "Wait for retry or inspect queue details.",
+        "blocked": "Inspect blocker before retrying.",
+        "error": "Inspect failure summary before retrying.",
+        "complete": "Inspect run results.",
+        "cancelled": "Start a new run if needed.",
+    }.get(status, "Inspect queue state.")
+
+
+def _work_queue_next_actions(status: str) -> list[str]:
+    if status == "empty":
+        return ["start_or_continue_research_run"]
+    if status == "worker_disabled":
+        return ["start_worker_or_manual_tick", "monitor_queue"]
+    if status == "needs_attention":
+        return ["inspect_queue", "retry_or_cancel_work_item"]
+    if status == "retrying":
+        return ["wait_for_retry", "inspect_queue"]
+    if status == "running":
+        return ["monitor_progress", "view_process_summary"]
+    if status == "queued":
+        return ["wait_for_worker", "check_worker_status"]
+    return ["inspect_queue"]
 
 
 def _runtime_researcher_label(status: str) -> str:
