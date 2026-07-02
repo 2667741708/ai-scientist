@@ -388,6 +388,34 @@ def test_memory_scope_library_filters_evidence_without_narrowing_project_or_glob
         assert {primary_library, secondary_library}.issubset(global_library_ids)
 
 
+def test_memory_context_prioritizes_grounded_evidence_summaries() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        query = "prioritymarker evidence retrieval"
+        store.ingest(
+            title="User note evidence",
+            content=f"# Notes\n\n{query} appears in a low reliability note.",
+            source="note",
+            source_reliability="user_provided",
+        )
+        store.ingest(
+            title="Parsed fulltext evidence",
+            content=f"# Results\n\n{query} appears in a parsed fulltext result section.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+
+        memory = store.build_memory_context(
+            research_goal=query,
+            memory_scope="project",
+            max_evidence=4,
+        )
+
+        assert len(memory["evidence_summaries"]) >= 2
+        assert memory["evidence_summaries"][0]["source_reliability"] == "parsed_fulltext"
+        assert memory["evidence_summaries"][0]["memory_priority"] > memory["evidence_summaries"][1]["memory_priority"]
+
+
 def test_library_memory_scope_without_library_id_uses_default_library() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
