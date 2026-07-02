@@ -1977,6 +1977,56 @@ test_feedback_composer_states_feedback_applies_to_next_run
 test_mode_boundary_bar_distinguishes_demo_live_literature_grounded
 ```
 
+### 8.14 页面级设计闸门
+
+任何涉及本计划四项能力的前端页面改动，都必须先通过页面级设计闸门。这个闸门不是额外文档负担，而是防止 queue、memory、agent trace、provider readiness 等内部机制错误暴露到普通研究路径里。
+
+每个页面开发前必须写清楚：
+
+```text
+用户角色：研究者、评审者、实验设计者、报告整理者、管理员。
+页面任务：用户在这个页面要完成的单一主要判断。
+首屏信息：3 秒内必须被看见的目标、状态和主操作。
+主路径：从入口到完成任务的最短操作链路。
+二级详情：证据、评审、排序、历史上下文、过程记录如何按需展开。
+桌面布局：左/中/右或列表/详情/抽屉如何分配。
+移动布局：哪些内容保留在主路径，哪些变成 tabs、drawer 或 bottom sheet。
+状态覆盖：empty、loading、queued、running、retrying、complete、limited、error、permission denied。
+组件复用：是否使用本节定义的稳定组件，而不是新增一次性控件。
+隐藏边界：默认不显示 raw JSON、内部 ID、local path、provider diagnostics、stack trace。
+```
+
+页面级规格卡如下：
+
+| 页面 | 设计闸门问题 | 顺手好用的默认答案 | 失败信号 |
+| --- | --- | --- | --- |
+| 研究主页 | 用户能否立即开始或继续一个研究目标？ | 中间是目标输入和继续研究；侧边只给证据/运行准备摘要。 | 首屏像指标墙，用户找不到“生成候选假设”。 |
+| Workspace | 用户能否用自然语言监督 run，并理解下一步？ | 左侧对话/确认，中间结果/进度，右侧上下文详情；移动端用对话/结果/证据 tabs。 | 用户必须理解 RunRequest、agent graph 或 worker queue 才能启动。 |
+| Papers / 资料库 | 用户能否准备证据并知道证据质量？ | library selector、上传/解析/search 主入口、paper cards/table、证据抽屉。 | 把 MCP payload、chunk id、SQLite path 当作默认内容。 |
+| Hypotheses | 用户能否比较候选方向并选择下一步？ | 列表显示 rank、origin、support level；详情显示解释、反馈、实验入口。 | 默认铺满 citation map、review rubric、raw tournament JSON。 |
+| Experiments | 用户能否把假设变成可证伪实验？ | 选中假设 + 变量/对照/指标/失败条件 + evidence risk。 | 只有一段模型建议，没有失败条件或替代解释。 |
+| Reports | 用户能否形成可审计输出？ | findings、evidence、experiment plan、limitations 和 mode boundary。 | 报告看起来像确定科学发现，却没有 evidence gap 和 demo/live 边界。 |
+| Runtime / Admin | 管理员能否判断系统是否可执行？ | worker/model/literature/PDF parser 的任务化状态和恢复动作。 | 普通研究者默认看到 endpoint、env var、lease_owner、stack trace。 |
+
+这个闸门应进入 PR/commit checklist。若某页面不能回答“用户此刻要判断什么”，就先不要加入新的按钮、指标卡或专家信息。
+
+### 8.15 可用性风险与设计缓解
+
+本计划引入 durable queue、execution memory、research memory、agent registry 和 feedback loop 后，最大风险不是功能不够，而是功能出现得太早、太散、太像后台控制台。前端实现必须按以下风险表审查。
+
+| 风险 | 典型表现 | 设计缓解 |
+| --- | --- | --- |
+| 信息过载 | 首屏同时展示目标、模型、队列、agent、memory、trace、metrics、citations。 | 首屏只保留当前任务、状态、主操作；其余放入 `查看过程与证据`、`参考文献`、`专家设置`。 |
+| 内部术语外露 | 普通路径出现 `work_item_id`、`checkpoint_id`、`lease_owner`、`MCP`、`Vector DB`。 | 用“后台任务”“可恢复状态”“文献服务”“历史上下文”替代；精确字段只在专家详情。 |
+| 状态不可信 | queued 看起来像 running，demo 输出看起来像真实证据。 | `ModeBoundaryBar` 和 `RunProgressStrip` 必须区分 demo/live/literature-grounded、queued/running/retrying。 |
+| 用户反馈误解 | 用户以为反馈能立刻改写正在运行的模型输出。 | `FeedbackComposer` 明确写成“用于下一轮/继续迭代”，除非 durable resume 已支持在线 refinement。 |
+| 证据边界模糊 | abstract、fulltext、metadata、model latent knowledge 混成同一种支撑。 | `EvidenceDrawer` 默认展示 source reliability、support level、parsed_fulltext/limited/ungrounded。 |
+| 移动端拥挤 | 三栏工作台直接压缩成不可读窄列。 | 移动端保留主任务单列；证据、trace、memory 进入 tabs、bottom sheet 或 drawer。 |
+| 错误不可恢复 | Toast 只写 failed，或直接显示 stack trace。 | 错误状态贴近任务说明原因和下一步；raw diagnostics 只在专家/debug。 |
+| 操作入口重复 | 同一个 run 可以从多个不一致按钮启动/继续/反馈。 | 统一到 `ResearchGoalComposer`、`RunConfirmationCard`、`FeedbackComposer`、`RunProgressStrip`。 |
+
+可用性验收必须同时覆盖桌面和移动。桌面重点验证三栏层级、详情折叠和主操作可见；移动重点验证 composer、主要结果、抽屉关闭、触摸目标和文本不溢出。
+
 ## 9. 测试矩阵
 
 ### 9.1 Backend unit tests
