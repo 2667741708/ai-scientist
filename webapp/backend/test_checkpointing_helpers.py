@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import TypedDict
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -13,6 +15,32 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from open_coscientist.models import ExecutionMetrics, Hypothesis
+
+
+def test_langgraph_thread_config_uses_run_id_as_thread_id() -> None:
+    from open_coscientist.checkpointing import langgraph_thread_config
+
+    config = langgraph_thread_config(
+        " run-thread-config ",
+        recursion_limit=42,
+        checkpoint_ns="execution-memory",
+    )
+
+    assert config == {
+        "recursion_limit": 42,
+        "configurable": {
+            "thread_id": "run-thread-config",
+            "checkpoint_ns": "execution-memory",
+        },
+    }
+    assert "channel_values" not in repr(config)
+
+
+def test_langgraph_thread_config_rejects_blank_run_id() -> None:
+    from open_coscientist.checkpointing import langgraph_thread_config
+
+    with pytest.raises(ValueError, match="run_id is required"):
+        langgraph_thread_config("   ")
 
 
 def test_execution_memory_status_reports_sqlite_saver_boundary() -> None:
