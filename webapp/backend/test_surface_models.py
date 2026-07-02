@@ -5,9 +5,105 @@ from surface_models import (
     evidence_surface_summary,
     hypothesis_surface_collection,
     hypothesis_surface_summary,
+    runtime_readiness_surface_summary,
     run_confirmation_surface_summary,
     run_surface_summary,
 )
+
+
+def test_runtime_readiness_surface_summary_hides_internal_refs_by_default() -> None:
+    worker_status = {
+        "enabled": False,
+        "owner": "owner-secret",
+        "concurrency": 2,
+        "lease_seconds": 300,
+        "poll_seconds": 2,
+        "last_error": "SECRET STACK TRACE",
+        "queue_status_counts": {"active": 2, "queued": 2, "running": 0, "retrying": 1, "error": 0},
+        "active_work_item_snapshot": {
+            "counts": {"active": 2, "queued": 2, "running": 0, "retrying": 1, "error": 0},
+        },
+    }
+    execution_memory = {
+        "status": "limited",
+        "resume_supported": False,
+        "checkpoint_backend": "sqlite_metadata",
+        "resume_mode": "metadata_only_retry",
+    }
+    service_statuses = {
+        "llm": {
+            "available": False,
+            "status": "permission_denied",
+            "summary": "Model provider needs authorization.",
+            "endpoint": "https://secret-provider.example",
+            "env": "SECRET_PROVIDER_KEY",
+            "required": True,
+        },
+        "pdf": {
+            "available": True,
+            "status": "ready",
+            "summary": "Parser ready.",
+            "endpoint": "file://secret-parser",
+        },
+    }
+
+    summary = runtime_readiness_surface_summary(
+        worker_status=worker_status,
+        execution_memory=execution_memory,
+        service_statuses=service_statuses,
+    )
+
+    assert summary["status"] == "permission_denied"
+    assert summary["worker"]["state"] == "disabled"
+    assert summary["worker"]["queue_counts"]["queued"] == 2
+    assert summary["execution_memory"]["resume_supported"] is False
+    assert summary["service_counts"]["permission_denied"] == 1
+    assert "start_worker_or_manual_tick" in summary["next_actions"]
+    assert "resolve_permissions" in summary["next_actions"]
+    assert "continue_with_metadata_only_execution_memory" in summary["next_actions"]
+    assert "internal_refs" not in summary
+    assert "owner-secret" not in str(summary)
+    assert "SECRET" not in str(summary)
+    assert "https://secret-provider.example" not in str(summary)
+    assert "file://secret-parser" not in str(summary)
+
+    expert_summary = runtime_readiness_surface_summary(
+        worker_status=worker_status,
+        execution_memory=execution_memory,
+        service_statuses=service_statuses,
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["worker_owner"] == "owner-secret"
+    assert expert_summary["internal_refs"]["last_error"] == "SECRET STACK TRACE"
+    assert expert_summary["internal_refs"]["service_debug"]["llm"]["endpoint"] == "https://secret-provider.example"
+
+
+def test_runtime_readiness_surface_summary_reports_ready_state() -> None:
+    summary = runtime_readiness_surface_summary(
+        worker_status={
+            "enabled": True,
+            "concurrency": 1,
+            "running_count": 0,
+            "queue_status_counts": {"active": 0, "queued": 0, "running": 0, "retrying": 0, "error": 0},
+        },
+        execution_memory={
+            "status": "ready",
+            "resume_supported": True,
+            "checkpoint_backend": "langgraph_sqlite",
+            "resume_mode": "langgraph_thread_resume",
+        },
+        service_statuses={
+            "llm": {"available": True, "status": "ready"},
+            "pdf": {"available": True, "status": "ready"},
+        },
+    )
+
+    assert summary["status"] == "ready"
+    assert summary["worker"]["state"] == "ready"
+    assert summary["worker"]["concurrency"] == 1
+    assert summary["execution_memory"]["resume_supported"] is True
+    assert summary["service_counts"]["ready"] == 2
+    assert summary["next_actions"] == ["start_or_continue_research_run"]
 
 
 def test_run_confirmation_surface_summary_counts_feedback_and_hides_raw_request() -> None:
