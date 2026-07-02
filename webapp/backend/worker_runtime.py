@@ -150,7 +150,8 @@ class ResearchWorkerRuntime:
             self.store.fail_work_item(work_item_id, message, retryable=False)
             return {"work_item_id": work_item_id, "status": "error", "error": message}
 
-        self.store.mark_work_item_running(work_item_id, self.owner)
+        if not self.store.mark_work_item_running(work_item_id, self.owner):
+            return {"work_item_id": work_item_id, "status": "lease_conflict"}
         try:
             result = handler(item)
             if inspect.isawaitable(result):
