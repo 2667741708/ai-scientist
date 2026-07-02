@@ -103,6 +103,7 @@ const starterPrompts = [
   "检验这个假设是否正确：VLA token 序列可以通过层级动作语法稳定转换为机器臂可执行动作",
   "解释当前 Elo 锦标赛排名，展示 winner/loser 和 before/after Elo",
   "检查第 1 个假设的证据边界",
+  "我更偏好第 1 个假设，因为它更容易被最小实验反证；请把这个反馈用于下一轮继续",
   "帮我解析 D:\\papers\\paper.pdf 并加入知识库",
 ];
 
@@ -111,7 +112,7 @@ function makeId(prefix: string) {
 }
 
 function promptForCapability(capability: Pick<ResearchChatCapability, "intent" | "userSummary">) {
-  switch (capability.intent) {
+  switch (String(capability.intent)) {
     case "discover_capabilities":
       return starterPrompts[0];
     case "start_research_run":
@@ -128,8 +129,11 @@ function promptForCapability(capability: Pick<ResearchChatCapability, "intent" |
       return starterPrompts[6];
     case "inspect_hypothesis":
       return starterPrompts[7];
-    case "parse_pdf_to_knowledge_base":
+    case "apply_expert_feedback":
+    case "critique_generated_hypothesis":
       return starterPrompts[8];
+    case "parse_pdf_to_knowledge_base":
+      return starterPrompts[9];
     case "extract_web_evidence":
       return "把这个网页保存为证据：https://example.org/article";
     case "search_knowledge_evidence":
@@ -557,6 +561,8 @@ function CapabilitySuggestions({ capabilities, onPick }: { capabilities: Researc
     "search_knowledge_evidence",
     "explain_ranking",
     "inspect_hypothesis",
+    "apply_expert_feedback",
+    "critique_generated_hypothesis",
     "parse_pdf_to_knowledge_base",
   ];
   const fallback = starterPrompts.map((prompt) => ({ userTitle: prompt, userSummary: prompt }));
