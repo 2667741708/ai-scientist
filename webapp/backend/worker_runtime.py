@@ -68,6 +68,7 @@ class ResearchWorkerRuntime:
         active_work_item_snapshot = self._active_work_item_snapshot()
         queue_status_counts = dict(active_work_item_snapshot.get("counts") or self._queue_status_counts())
         queue_count_summary = self._queue_count_summary(queue_status_counts)
+        running_count = len(self._running_tasks)
         return {
             "enabled": self.enabled,
             "owner": self.owner,
@@ -76,10 +77,11 @@ class ResearchWorkerRuntime:
             "poll_seconds": self.poll_seconds,
             "recovered_count": recovered_count,
             "leased_count": len(leased),
-            "running_count": len(self._running_tasks),
+            "running_count": running_count,
             "queue_status_counts": queue_status_counts,
             "active_work_item_snapshot": active_work_item_snapshot,
             **queue_count_summary,
+            "user_facing_status": self._user_facing_status(queue_status_counts, running_count=running_count),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
@@ -87,16 +89,18 @@ class ResearchWorkerRuntime:
     def status(self) -> Dict[str, Any]:
         active_work_item_snapshot = self._active_work_item_snapshot()
         queue_status_counts = dict(active_work_item_snapshot.get("counts") or self._queue_status_counts())
+        running_count = len([task for task in self._running_tasks if not task.done()])
         return {
             "enabled": self.enabled,
             "owner": self.owner,
             "concurrency": self.concurrency,
             "lease_seconds": self.lease_seconds,
             "poll_seconds": self.poll_seconds,
-            "running_count": len([task for task in self._running_tasks if not task.done()]),
+            "running_count": running_count,
             "queue_status_counts": queue_status_counts,
             "active_work_item_snapshot": active_work_item_snapshot,
             **self._queue_count_summary(queue_status_counts),
+            "user_facing_status": self._user_facing_status(queue_status_counts, running_count=running_count),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
@@ -137,6 +141,77 @@ class ResearchWorkerRuntime:
             "active_work_item_count": int(counts.get("active", 0)),
             "error_count": int(counts.get("error", 0)),
         }
+
+    def _user_facing_status(self, counts: Dict[str, int], *, running_count: int = 0) -> Dict[str, Any]:
+        queue_summary = self._queue_count_summary(counts)
+        state = self._user_facing_state(counts, running_count=running_count)
+        return {
+            "state": state,
+            "label": self._user_facing_label(state),
+            "next_actions": self._user_facing_next_actions(state),
+            "counts": queue_summary,
+            "safe_default_fields": [
+                "state",
+                "label",
+                "next_actions",
+                "counts.queued_count",
+                "counts.retrying_count",
+                "counts.active_work_item_count",
+                "counts.error_count",
+            ],
+            "expert_fields": [
+                "owner",
+                "lease_seconds",
+                "poll_seconds",
+                "lease_owner",
+                "lease_expires_at",
+                "last_error",
+                "raw work item arguments",
+            ],
+            "visibility_boundary": (
+                "Worker status exposes user-facing queue state, counts, and next actions by default; "
+                "owner identity, lease timing, worker internals, raw errors, and work item arguments "
+                "require expert disclosure."
+            ),
+        }
+
+    def _user_facing_state(self, counts: Dict[str, int], *, running_count: int = 0) -> str:
+        active_count = int(counts.get("active", 0))
+        if not self.enabled and active_count > 0:
+            return "worker_disabled"
+        if not self.enabled:
+            return "disabled"
+        if int(counts.get("error", 0)) > 0 or int(counts.get("blocked", 0)) > 0:
+            return "needs_attention"
+        if int(counts.get("retrying", 0)) > 0:
+            return "retrying"
+        if running_count > 0 or int(counts.get("running", 0)) > 0 or int(counts.get("leased", 0)) > 0:
+            return "running"
+        if int(counts.get("queued", 0)) > 0:
+            return "queued"
+        return "ready"
+
+    def _user_facing_label(self, state: str) -> str:
+        return {
+            "ready": "Background research worker is ready.",
+            "disabled": "Background worker is disabled.",
+            "worker_disabled": "Research work is queued but the worker is disabled.",
+            "queued": "Research work is queued.",
+            "running": "Research work is running.",
+            "retrying": "Research work is waiting for retry.",
+            "needs_attention": "Research work needs attention.",
+        }.get(state, "Inspect worker status.")
+
+    def _user_facing_next_actions(self, state: str) -> list[str]:
+        return {
+            "ready": ["start_or_continue_research_run"],
+            "disabled": ["enable_worker_or_use_manual_tick"],
+            "worker_disabled": ["enable_worker_or_manual_tick", "monitor_queue"],
+            "queued": ["wait_for_worker", "check_worker_status"],
+            "running": ["monitor_progress", "view_process_summary"],
+            "retrying": ["wait_for_retry", "inspect_queue_if_stuck"],
+            "needs_attention": ["inspect_queue", "retry_or_cancel_work_item"],
+        }.get(state, ["inspect_worker_status"])
 
     async def _run_loop(self) -> None:
         assert self._stop_event is not None
