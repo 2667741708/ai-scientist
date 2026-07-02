@@ -45,6 +45,8 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
         worker_status = client.get("/api/worker/status").json()
         assert worker_status["auto_start_enabled"] is False
         assert worker_status["queued_count"] >= 1
+        assert worker_status["execution_memory"]["thread_id_source"] == "run_id"
+        assert worker_status["execution_memory"]["status"] in {"limited", "ready"}
 
 
 def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
