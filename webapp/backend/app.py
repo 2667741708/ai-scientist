@@ -9951,10 +9951,33 @@ async def list_run_checkpoints(run_id: str, limit: int = 20) -> Dict[str, Any]:
     has_langgraph_summary = any(
         item.get("checkpoint_backend") == "langgraph_sqlite" for item in checkpoints
     )
+    latest_checkpoint = checkpoints[0] if checkpoints else None
+    checkpoint_summary = {
+        "status": (
+            "ready"
+            if has_langgraph_summary
+            else "metadata_only"
+            if latest_checkpoint
+            else "not_available"
+        ),
+        "checkpoint_count": len(checkpoints),
+        "latest_status": latest_checkpoint.get("status") if latest_checkpoint else None,
+        "latest_phase": latest_checkpoint.get("phase") if latest_checkpoint else None,
+        "checkpoint_backend": latest_checkpoint.get("checkpoint_backend") if latest_checkpoint else None,
+        "has_langgraph_summary": has_langgraph_summary,
+        "resume_boundary": (
+            "LangGraph checkpoint summary is available; raw state channels remain hidden."
+            if has_langgraph_summary
+            else "Only execution metadata is available; full LangGraph state resume remains limited."
+            if latest_checkpoint
+            else "No checkpoint metadata is available for this run."
+        ),
+    }
     return {
         "run_id": run_id,
         "checkpoints": checkpoints,
         "count": len(checkpoints),
+        "summary": checkpoint_summary,
         "boundary": (
             "Checkpoint metadata includes LangGraph checkpoint summaries when available; raw channel values are not exposed."
             if has_langgraph_summary
