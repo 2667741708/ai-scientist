@@ -2262,6 +2262,55 @@ class KnowledgeBaseStore:
         counts["active"] = sum(counts.get(status, 0) for status in ACTIVE_WORK_ITEM_STATUSES)
         return counts
 
+    def active_work_item_snapshot(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        workflow_name: Optional[str] = None,
+        limit: int = 20,
+        include_internal_refs: bool = False,
+    ) -> Dict[str, Any]:
+        """Return a UI-safe summary of active work without raw arguments/results."""
+        clauses = [f"status IN ({', '.join('?' for _ in ACTIVE_WORK_ITEM_STATUSES)})"]
+        params: list[Any] = [*ACTIVE_WORK_ITEM_STATUSES]
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if workflow_name:
+            clauses.append("workflow_name = ?")
+            params.append(workflow_name)
+        params.append(max(1, min(limit, 100)))
+        where = f"WHERE {' AND '.join(clauses)}"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM research_work_items
+                {where}
+                ORDER BY priority ASC, updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return {
+            "generated_at": time.time(),
+            "filters": {
+                "run_id": run_id if include_internal_refs else bool(run_id),
+                "workflow_name": workflow_name,
+                "limit": max(1, min(limit, 100)),
+            },
+            "counts": self.work_item_status_counts(run_id=run_id, workflow_name=workflow_name),
+            "active_statuses": list(ACTIVE_WORK_ITEM_STATUSES),
+            "items": [
+                self._work_item_snapshot_from_row(row, include_internal_refs=include_internal_refs)
+                for row in rows
+            ],
+            "visibility_boundary": (
+                "Default snapshot omits work item arguments, result payloads, worker internals, "
+                "and raw IDs unless include_internal_refs is explicitly enabled."
+            ),
+        }
+
     def lease_work_items(self, *, owner: str, limit: int = 1, lease_seconds: int = 300) -> list[Dict[str, Any]]:
         normalized_owner = owner.strip()
         if not normalized_owner:
@@ -2777,6 +2826,90 @@ class KnowledgeBaseStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _work_item_snapshot_from_row(
+        self,
+        row: sqlite3.Row,
+        *,
+        include_internal_refs: bool = False,
+    ) -> Dict[str, Any]:
+        status = str(row["status"])
+        attempt_count = int(row["attempt_count"] or 0)
+        max_attempts = int(row["max_attempts"] or 0)
+        snapshot = {
+            "workflow_name": row["workflow_name"],
+            "workflow_label": self._work_item_workflow_label(row["workflow_name"]),
+            "phase": row["phase"],
+            "agent_role": row["agent_role"],
+            "status": status,
+            "status_label": self._work_item_status_label(status),
+            "priority": int(row["priority"] or 0),
+            "attempts": {
+                "current": attempt_count,
+                "max": max_attempts,
+                "remaining": max(0, max_attempts - attempt_count),
+            },
+            "recoverable": status in {"queued", "retrying", "blocked"},
+            "next_action": self._work_item_next_action(status),
+            "error_summary": self._safe_work_item_text(row["error_message"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if include_internal_refs:
+            snapshot.update(
+                {
+                    "work_item_id": row["work_item_id"],
+                    "idempotency_key": row["idempotency_key"],
+                    "run_id": row["run_id"],
+                    "lease_owner": row["lease_owner"],
+                    "lease_expires_at": row["lease_expires_at"],
+                }
+            )
+        return snapshot
+
+    @staticmethod
+    def _work_item_status_label(status: str) -> str:
+        return {
+            "queued": "Queued for background execution",
+            "leased": "Claimed by a worker",
+            "running": "Running",
+            "retrying": "Waiting to retry",
+            "blocked": "Waiting for manual recovery",
+            "complete": "Complete",
+            "error": "Failed",
+            "cancelled": "Cancelled",
+        }.get(status, status.replace("_", " ").title())
+
+    @staticmethod
+    def _work_item_next_action(status: str) -> str:
+        return {
+            "queued": "Wait for a worker tick or start the background worker.",
+            "leased": "Wait for the active worker to start execution.",
+            "running": "Monitor progress from the run timeline.",
+            "retrying": "Wait for retry or inspect the previous failure.",
+            "blocked": "Resolve the manual recovery condition, then unblock the task.",
+            "complete": "Open the completed run or result.",
+            "error": "Inspect the failure and enqueue a new task if appropriate.",
+            "cancelled": "Create a new task if the work is still needed.",
+        }.get(status, "Inspect the task state before taking action.")
+
+    @staticmethod
+    def _work_item_workflow_label(workflow_name: str) -> str:
+        return {
+            "workflow.open_coscientist_run": "Research run",
+            "workflow.demo_coscientist_run": "Demo research run",
+            "tool.pdf_parse": "PDF parsing",
+            "tool.web_evidence": "Web evidence capture",
+        }.get(workflow_name, workflow_name.replace("_", " ").replace(".", " / "))
+
+    @staticmethod
+    def _safe_work_item_text(value: Optional[str], *, max_length: int = 180) -> Optional[str]:
+        if not value:
+            return None
+        compact = re.sub(r"\s+", " ", str(value)).strip()
+        if len(compact) <= max_length:
+            return compact
+        return f"{compact[: max_length - 3].rstrip()}..."
 
     def _feedback_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
