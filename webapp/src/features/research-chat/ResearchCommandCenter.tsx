@@ -104,6 +104,7 @@ const starterPrompts = [
   "解释当前 Elo 锦标赛排名，展示 winner/loser 和 before/after Elo",
   "检查第 1 个假设的证据边界",
   "我更偏好第 1 个假设，因为它更容易被最小实验反证；请把这个反馈用于下一轮继续",
+  "基于当前结果继续研究：沿着证据更强、实验更可证伪的方向重新生成并排序",
   "帮我解析 D:\\papers\\paper.pdf 并加入知识库",
 ];
 
@@ -132,8 +133,10 @@ function promptForCapability(capability: Pick<ResearchChatCapability, "intent" |
     case "apply_expert_feedback":
     case "critique_generated_hypothesis":
       return starterPrompts[8];
-    case "parse_pdf_to_knowledge_base":
+    case "continue_or_revise_run":
       return starterPrompts[9];
+    case "parse_pdf_to_knowledge_base":
+      return starterPrompts[10];
     case "extract_web_evidence":
       return "把这个网页保存为证据：https://example.org/article";
     case "search_knowledge_evidence":
@@ -563,6 +566,7 @@ function CapabilitySuggestions({ capabilities, onPick }: { capabilities: Researc
     "inspect_hypothesis",
     "apply_expert_feedback",
     "critique_generated_hypothesis",
+    "continue_or_revise_run",
     "parse_pdf_to_knowledge_base",
   ];
   const fallback = starterPrompts.map((prompt) => ({ userTitle: prompt, userSummary: prompt }));
