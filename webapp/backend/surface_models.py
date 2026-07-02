@@ -542,6 +542,78 @@ def memory_surface_summary(
     return summary
 
 
+def memory_prompt_packet_surface_summary(
+    prompt_packet: Any,
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    packet = _as_mapping(prompt_packet)
+    sections = _record_items(packet.get("sections"))
+    target_prompts = [
+        _compact_text(item, max_length=40)
+        for item in _as_list(packet.get("target_prompts"))
+        if str(item).strip()
+    ][:8]
+    excluded_raw_fields = [
+        _compact_text(item, max_length=80)
+        for item in _as_list(packet.get("excluded_raw_fields"))
+        if str(item).strip()
+    ]
+    raw_allowed = bool(packet.get("raw_injection_allowed"))
+    mode = _compact_text(packet.get("mode") or ("raw" if raw_allowed else "summary_only"), max_length=80)
+    section_summaries = [
+        _prompt_packet_section_surface(section, index=index)
+        for index, section in enumerate(sections[:8])
+    ]
+    section_count = _safe_int(packet.get("section_count")) or len(section_summaries)
+    item_count = sum(int(item.get("item_count") or 0) for item in section_summaries)
+    status = _prompt_packet_surface_status(
+        packet_available=bool(packet),
+        raw_allowed=raw_allowed,
+        section_count=section_count,
+    )
+    summary = {
+        "status": status,
+        "mode": mode,
+        "memory_scope": packet.get("memory_scope") or "project",
+        "target_prompts": target_prompts,
+        "section_count": section_count,
+        "sections": section_summaries,
+        "counts": {
+            "sections": section_count,
+            "items": item_count,
+            "target_prompts": len(target_prompts),
+            "excluded_raw_fields": len(excluded_raw_fields),
+        },
+        "raw_injection_allowed": raw_allowed,
+        "excluded_raw_field_count": len(excluded_raw_fields),
+        "excluded_raw_fields": excluded_raw_fields[:8],
+        "application_boundary": (
+            "Prompt memory packet is configured for raw injection; inspect expert details before running."
+            if raw_allowed
+            else "Prompt memory packet uses summary-only sections for generation guidance."
+        ),
+        "next_actions": _prompt_packet_next_actions(status),
+        "visibility_boundary": (
+            "Prompt packet summaries expose mode, memory scope, target prompts, section counts, "
+            "and raw-field exclusions by default; section item payloads, exact references, checkpoint "
+            "state, feedback text, hypothesis text, and raw packet JSON require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "raw_sections": [dict(section) for section in sections],
+            "raw_prompt_packet": dict(packet),
+            "section_item_counts": {
+                str(_first_value(section, ("section", "name", "id")) or f"section_{index + 1}"): len(
+                    _record_items(section.get("items"))
+                )
+                for index, section in enumerate(sections)
+            },
+        }
+    return summary
+
+
 def feedback_surface_summary(
     feedback_items: Any,
     *,
@@ -2509,6 +2581,58 @@ def _memory_injection_policy_surface_summary(policy: Mapping[str, Any]) -> Dict[
             else "Memory injection uses summary-only guidance; raw memory payloads require expert disclosure."
         ),
     }
+
+
+def _prompt_packet_section_surface(section: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
+    section_id = _compact_text(
+        _first_value(section, ("section", "name", "id")) or f"section_{index + 1}",
+        max_length=80,
+    )
+    item_count = len(_record_items(section.get("items")))
+    return {
+        "index": index + 1,
+        "section": section_id,
+        "label": _prompt_packet_section_label(section_id),
+        "item_count": item_count,
+        "default_state": "collapsed",
+    }
+
+
+def _prompt_packet_section_label(section_id: str) -> str:
+    labels = {
+        "parent_run_summary": "Parent run summary",
+        "related_run_summaries": "Related run summaries",
+        "prior_hypothesis_summaries": "Prior hypothesis summaries",
+        "feedback_type_and_target_summary": "Feedback type and target summary",
+        "evidence_boundary_and_snippet_summaries": "Evidence boundary summaries",
+        "memory_limitations": "Memory limitations",
+    }
+    return labels.get(section_id, section_id.replace("_", " ").title())
+
+
+def _prompt_packet_surface_status(
+    *,
+    packet_available: bool,
+    raw_allowed: bool,
+    section_count: int,
+) -> str:
+    if not packet_available:
+        return "absent"
+    if raw_allowed:
+        return "raw_allowed"
+    if section_count <= 0:
+        return "empty"
+    return "summary_only"
+
+
+def _prompt_packet_next_actions(status: str) -> list[str]:
+    if status == "absent":
+        return ["build_memory_context", "review_generation_request"]
+    if status == "raw_allowed":
+        return ["inspect_expert_prompt_packet", "disable_raw_memory_injection"]
+    if status == "empty":
+        return ["add_parent_run_feedback_or_evidence", "continue_without_memory"]
+    return ["review_memory_summary", "start_or_continue_run"]
 
 
 def _memory_surface_status(
