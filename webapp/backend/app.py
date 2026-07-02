@@ -8358,6 +8358,50 @@ def worker_status_counts() -> Dict[str, int]:
     }
 
 
+def summarize_worker_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "work_item_id": item.get("work_item_id"),
+        "run_id": item.get("run_id"),
+        "workflow_name": item.get("workflow_name"),
+        "phase": item.get("phase"),
+        "agent_role": item.get("agent_role"),
+        "status": item.get("status"),
+        "priority": item.get("priority"),
+        "lease_owner": item.get("lease_owner"),
+        "lease_expires_at": item.get("lease_expires_at"),
+        "attempt_count": item.get("attempt_count"),
+        "max_attempts": item.get("max_attempts"),
+        "updated_at": item.get("updated_at"),
+    }
+
+
+def worker_queue_snapshot(limit: int = 20) -> Dict[str, Any]:
+    active_statuses = {"queued", "leased", "running", "retrying", "blocked"}
+    recent_items = knowledge_base.list_work_items(limit=max(1, min(limit, 50)))
+    active_items = [item for item in recent_items if item.get("status") in active_statuses]
+    counts = worker_status_counts()
+    if counts.get("blocked_count", 0) > 0:
+        health = "blocked"
+    elif counts.get("retrying_count", 0) > 0:
+        health = "retrying"
+    elif counts.get("leased_count", 0) + counts.get("running_count", 0) > 0:
+        health = "running"
+    elif counts.get("queued_count", 0) > 0:
+        health = "backlog"
+    else:
+        health = "idle"
+    return {
+        **counts,
+        "queue_health": health,
+        "active_work_items": [summarize_worker_item(item) for item in active_items[:limit]],
+        "active_work_item_count": len(active_items),
+        "boundary": (
+            "Worker status exposes queue and lease metadata for runtime readiness. "
+            "Work item arguments and result payloads are intentionally omitted from this summary."
+        ),
+    }
+
+
 @app.get("/api/worker/status")
 async def get_worker_status() -> Dict[str, Any]:
     from open_coscientist.checkpointing import execution_memory_status
@@ -8367,7 +8411,7 @@ async def get_worker_status() -> Dict[str, Any]:
         **runtime.status(),
         "auto_start_enabled": WORKER_AUTOSTART_ENABLED,
         "execution_memory": execution_memory_status(),
-        **worker_status_counts(),
+        **worker_queue_snapshot(),
     }
 
 
@@ -8380,7 +8424,7 @@ async def tick_worker_once() -> Dict[str, Any]:
     return {
         **result,
         "auto_start_enabled": WORKER_AUTOSTART_ENABLED,
-        **worker_status_counts(),
+        **worker_queue_snapshot(),
     }
 
 
