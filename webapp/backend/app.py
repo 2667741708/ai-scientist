@@ -4383,6 +4383,24 @@ def slug_label(value: str) -> str:
     return slug or "phase"
 
 
+def extract_trace_metadata(message: Dict[str, Any]) -> Dict[str, Any]:
+    candidates: List[Any] = [
+        message.get("metadata"),
+        message.get("additional_kwargs", {}).get("metadata")
+        if isinstance(message.get("additional_kwargs"), dict)
+        else None,
+        message.get("kwargs", {}).get("metadata") if isinstance(message.get("kwargs"), dict) else None,
+        message.get("kwargs", {}).get("additional_kwargs", {}).get("metadata")
+        if isinstance(message.get("kwargs"), dict)
+        and isinstance(message.get("kwargs", {}).get("additional_kwargs"), dict)
+        else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
 def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[AgentTrace]:
     traces: List[AgentTrace] = []
     messages = serialize_value(result.get("messages", []))
@@ -4392,7 +4410,7 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
             if not isinstance(message, dict):
                 continue
 
-            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            metadata = extract_trace_metadata(message)
             phase = str(
                 metadata.get("phase")
                 or message.get("name")
