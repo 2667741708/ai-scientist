@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 import tempfile
+import time
 
 from fastapi.testclient import TestClient
 
@@ -63,16 +64,23 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
 
         tick_status = client.post("/api/worker/tick").json()
         assert tick_status["auto_start_enabled"] is False
+        assert tick_status["forced_tick"] is True
         assert tick_status["execution_memory"]["thread_id_source"] == "run_id"
         assert tick_status["execution_memory"]["status"] in {"limited", "ready"}
-        assert tick_status["queue_health"] == "backlog"
-        assert tick_status["leased_count"] == 0
-        assert tick_status["guidance"]["status"] == "worker_disabled"
+        assert tick_status["queue_health"] in {"running", "idle"}
+        assert tick_status["leased_count"] >= 1
+        assert tick_status["guidance"]["status"] in {"worker_disabled", "running", "idle"}
         assert "arguments and result payloads are intentionally omitted" in tick_status["boundary"]
         for active_item in tick_status["active_work_items"]:
             assert "arguments" not in active_item
             assert "result_ref" not in active_item
-        assert client.get(f"/api/runs/{payload['run_id']}").json()["status"] == "queued"
+        run = {}
+        for _ in range(40):
+            run = client.get(f"/api/runs/{payload['run_id']}").json()
+            if run["status"] == "complete":
+                break
+            time.sleep(0.2)
+        assert run["status"] == "complete"
 
 
 def test_create_run_persists_extended_supervision_fields(monkeypatch) -> None:
