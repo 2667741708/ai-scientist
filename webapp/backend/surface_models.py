@@ -828,8 +828,9 @@ def agent_process_surface_summary(
     )
     displayed_items = sorted_items[: max(0, max_items)]
     counts = _agent_process_counts(sorted_items)
-    status = _agent_process_status(counts)
     phase_coverage = _agent_process_phase_coverage(sorted_items, phase_index=phase_index)
+    counts["missing_phase"] = len(phase_coverage.get("missing_phases") or [])
+    status = _agent_process_status(counts)
     summary = {
         "status": status,
         "trace_count": len(sorted_items),
@@ -3084,7 +3085,12 @@ def _agent_process_status(counts: Mapping[str, int]) -> str:
         return "needs_attention"
     if int(counts.get("running", 0)) > 0:
         return "in_progress"
-    if int(counts.get("degraded", 0)) > 0 or int(counts.get("unknown_phase", 0)) > 0 or int(counts.get("unknown_status", 0)) > 0:
+    if (
+        int(counts.get("degraded", 0)) > 0
+        or int(counts.get("missing_phase", 0)) > 0
+        or int(counts.get("unknown_phase", 0)) > 0
+        or int(counts.get("unknown_status", 0)) > 0
+    ):
         return "partial"
     return "ready"
 
@@ -3138,6 +3144,8 @@ def _agent_process_next_actions(*, status: str, counts: Mapping[str, int]) -> li
         actions = ["inspect_process_summary"]
         if int(counts.get("degraded", 0)) > 0:
             actions.append("review_capability_degradation")
+        if int(counts.get("missing_phase", 0)) > 0:
+            actions.append("inspect_missing_research_steps")
         if int(counts.get("unknown_phase", 0)) > 0:
             actions.append("inspect_unknown_steps")
         actions.append("inspect_evidence")
