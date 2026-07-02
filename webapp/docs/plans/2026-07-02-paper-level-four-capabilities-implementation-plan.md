@@ -2280,6 +2280,150 @@ Papers:
 
 此小节是前端实现的产品约束：新增按钮、抽屉、卡片或状态条前，必须能说明它服务的是哪个用户阶段；如果只能说明它对应某个后端表、endpoint 或 agent phase，就应移到专家详情或暂不加入默认页面。
 
+### 8.18 前端 ViewModel 与功能显隐控制
+
+页面设计逻辑最终必须落实到前端展示模型，而不是只停留在文档原则。后端为了实现论文级能力会产生 `run_id`、`work_item_id`、`lease_owner`、`checkpoint_id`、`memory_context`、`agent_trace`、`tool_result` 等大量实现字段；页面组件不能直接把这些 raw records 当作 props 铺到 UI。应在 API client 或 view-model 层先转换为研究任务语言：
+
+```text
+Backend API record
+-> Page/domain view model
+-> Component props
+-> User-facing surface
+-> Optional detail/expert/debug disclosure
+```
+
+ViewModel 的职责：
+
+```text
+把内部状态翻译成任务状态。
+把 raw IDs、provider payload、checkpoint refs、tool JSON 默认隐藏。
+把 demo/live/literature-grounded 边界变成稳定 UI 信号。
+把 next action 放到用户当前阶段，而不是后端能力所在模块。
+把 error、limited、ungrounded、retrying 变成可恢复路径。
+```
+
+推荐新增或整理的展示模型：
+
+| ViewModel | 输入来源 | 默认给页面的字段 | 只给详情/专家的字段 | 使用页面 |
+| --- | --- | --- | --- | --- |
+| `RunSurfaceModel` | `RunRecord`、`WorkItem`、checkpoint summary | `status_label`、`phase_label`、`mode_boundary`、`next_action`、`recoverable` | `run_id`、`work_item_id`、`checkpoint_id`、`lease_owner` | Workspace、Hypotheses、Runtime |
+| `RunConfirmationModel` | chat extraction、extended `RunRequest` | research goal、用户假设数量、约束摘要、feedback 摘要、模式边界 | extracted raw request、intent debug、parent exact refs | Workspace |
+| `HypothesisSurfaceModel` | hypothesis、review、ranking、origin metadata | title、plain summary、origin badge、Elo/rank、support level、next actions | full review rubric、raw tournament matchup、evolution refs | Hypotheses、Experiments |
+| `EvidenceSurfaceModel` | evidence links、paper chunks、parse runs | source title、reliability、support level、matched snippet summary、evidence gap | chunk id、artifact path、citation map、media refs | Papers、EvidenceDrawer、Reports |
+| `MemorySurfaceModel` | `/api/runs/{run_id}/memory`、parent run、feedback | parent summary、feedback count、evidence scope、history summary | exact feedback excerpts、checkpoint metadata、raw retrieval diagnostics | Workspace、Hypotheses、Reports |
+| `AgentProcessModel` | agent trace、registry、timeline | phase label、agent role、status、output summary、tool count | prompt/template name、token usage、tool args/results | Process disclosure、Runtime |
+| `RuntimeReadinessModel` | health、worker status、service readiness | worker enabled、queue counts、limited/offline guidance、recovery action | endpoint、env var、owner、debug payload | Runtime/Admin、专家设置 |
+
+功能显隐层级：
+
+```text
+Primary surface:
+  当前任务、当前状态、一个主操作、一个自然下一步。
+
+Detail surface:
+  用户主动点击后的证据、评审、排序、历史上下文和过程摘要。
+
+Expert surface:
+  管理员或高级用户需要的 worker、checkpoint、provider、trace、token usage、prompt/template 信息。
+
+Debug surface:
+  raw JSON、HTTP payload、provider error、stack trace、endpoint、env、local path。
+  普通产品路径永不默认显示，只能在明确 debug/diagnostic 入口出现。
+```
+
+功能显示决策应按以下顺序执行：
+
+```text
+1. 先判断用户角色：researcher 不能默认看到 admin/runtime/debug 内容。
+2. 再判断用户阶段：未开始、确认中、排队中、运行中、完成、继续迭代、失败恢复。
+3. 再判断证据边界：demo、live、literature-grounded、limited、ungrounded。
+4. 再判断当前对象：project、run、hypothesis、paper、experiment、report。
+5. 最后才决定是否展示 queue、memory、agent trace 或 checkpoint。
+```
+
+示例规则：
+
+```text
+如果 run.status=queued:
+  Workspace 默认显示“已进入后台任务，等待执行”。
+  不显示 lease_owner，也不显示 worker pid。
+
+如果 work item lease expired 且可 retry:
+  普通 UI 显示“运行可恢复，正在等待重试或管理员处理”。
+  Expert UI 才显示 lease expiry 和 attempt_count。
+
+如果 hypothesis.origin=user_seeded:
+  HypothesisCard 默认显示 user seeded badge。
+  评审详情中说明它和模型候选一起进入 review/ranking/evolution。
+
+如果 memory_context 使用 parent_run_id:
+  Confirmation 和 Hypotheses 显示 parent run 摘要、反馈数量、证据来源数量。
+  不默认展示历史 chat message 全文或 raw memory JSON。
+
+如果 evidence.source_reliability=parsed_fulltext:
+  EvidenceDrawer 可以标记为 fulltext/parsed support。
+  如果只是 abstract/metadata，必须显示 limited support。
+
+如果 mode=demo:
+  所有结果页保留 demo-only boundary。
+  报告页不得把 finding 文案写成真实科学发现。
+```
+
+页面组合顺序应稳定，避免每个页面重新发明布局：
+
+```text
+Home:
+  ModeBoundaryBar -> ResearchGoalComposer -> recent projects -> evidence/readiness hints.
+
+Workspace:
+  Project header -> ModeBoundaryBar -> chat/control -> RunConfirmationCard 或 RunProgressStrip
+  -> active result canvas -> collapsible memory/evidence/process inspector.
+
+Papers:
+  Library selector -> ingest/search actions -> parse/job status -> paper list/table
+  -> EvidenceDrawer opened by explicit object selection.
+
+Hypotheses:
+  run/mode/evidence summary -> ranked hypothesis list -> selected hypothesis panel
+  -> evidence/review/ranking/process details behind tabs or drawer.
+
+Experiments:
+  selected hypothesis -> falsifiable design canvas -> evidence/risk side panel
+  -> export/write-to-report action.
+
+Reports:
+  outline -> findings/evidence/experiment/limitations draft -> citation QA
+  -> export actions.
+
+Runtime/Admin:
+  readiness summary -> queue/worker controls -> diagnostics disclosure.
+```
+
+前端实现时应避免以下代码层反模式：
+
+```text
+页面组件直接渲染 API response 的任意字段。
+把 `JSON.stringify(run)`、`error.message`、`detail` 或 provider response 放到普通页面。
+在多个页面各自实现一套 status 文案，导致 queued/running/retrying 语义不一致。
+把 Admin/Runtime 的内部状态复制到 Home 或 Workspace 首屏。
+把 EvidenceDrawer 当作 raw citation map / chunk dump，而不是证据判断面。
+```
+
+对应测试应验证展示模型，而不仅验证 DOM 存在：
+
+```text
+test_run_surface_model_hides_raw_ids_for_researcher
+test_run_surface_model_exposes_retry_guidance_for_expired_lease
+test_confirmation_model_summarizes_starting_hypotheses_and_feedback
+test_hypothesis_surface_model_marks_user_seeded_and_evolved_origins
+test_evidence_surface_model_distinguishes_parsed_fulltext_from_limited_metadata
+test_memory_surface_model_summarizes_parent_run_without_raw_messages
+test_agent_process_model_uses_phase_labels_without_raw_provider_payload
+test_runtime_readiness_model_is_admin_only
+```
+
+这层 ViewModel 是前端“顺手好用”的保护层：后端可以继续变复杂，但普通研究者看到的仍然是研究目标、证据质量、候选假设、可证伪实验、报告产出和下一步操作。
+
 ## 9. 测试矩阵
 
 ### 9.1 Backend unit tests
