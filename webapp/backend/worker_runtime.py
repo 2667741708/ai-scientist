@@ -102,6 +102,19 @@ class ResearchWorkerRuntime:
             except asyncio.TimeoutError:
                 continue
 
+    def _owns_active_lease(self, work_item_id: str) -> bool:
+        current = self.store.get_work_item(work_item_id)
+        if not current:
+            return False
+        if current.get("lease_owner") != self.owner:
+            return False
+        if current.get("status") not in {"leased", "running"}:
+            return False
+        lease_expires_at = current.get("lease_expires_at")
+        if lease_expires_at is not None and float(lease_expires_at) <= time.time():
+            return False
+        return True
+
     async def _execute_work_item(self, item: WorkItem) -> Dict[str, Any]:
         work_item_id = str(item["work_item_id"])
         workflow_name = str(item["workflow_name"])
@@ -117,11 +130,15 @@ class ResearchWorkerRuntime:
             if inspect.isawaitable(result):
                 result = await result
             result_ref = result or {}
+            if not self._owns_active_lease(work_item_id):
+                return {"work_item_id": work_item_id, "status": "stale_lease"}
             self.store.complete_work_item(work_item_id, result_ref)
             return {"work_item_id": work_item_id, "status": "complete", "result_ref": result_ref}
         except asyncio.CancelledError:
-            self.store.fail_work_item(work_item_id, "Worker task was cancelled.", retryable=True)
+            if self._owns_active_lease(work_item_id):
+                self.store.fail_work_item(work_item_id, "Worker task was cancelled.", retryable=True)
             raise
         except Exception as exc:
-            self.store.fail_work_item(work_item_id, str(exc), retryable=True)
+            if self._owns_active_lease(work_item_id):
+                self.store.fail_work_item(work_item_id, str(exc), retryable=True)
             return {"work_item_id": work_item_id, "status": "error", "error": str(exc)}
