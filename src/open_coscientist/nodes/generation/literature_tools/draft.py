@@ -56,7 +56,7 @@ async def draft_hypotheses(
     articles_with_reasoning = state.get("articles_with_reasoning")
     preferences = state.get("preferences")
     attributes = state.get("attributes")
-    user_hypotheses = state.get("user_inputs", {}).get("starting_hypotheses")
+    user_hypotheses = state.get("starting_hypotheses")
     articles = state.get("articles", [])
 
     # create shared slug for corpus (reuse lit review slug for warm start)
