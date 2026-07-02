@@ -7180,10 +7180,15 @@ async def health_debug() -> Dict[str, Any]:
 
 
 @app.get("/api/agents/registry")
-async def get_agent_registry() -> Dict[str, Any]:
+async def get_agent_registry(disabled_phases: Optional[str] = None) -> Dict[str, Any]:
     from open_coscientist.agents.registry import get_agent_registry_payload
 
-    return get_agent_registry_payload(public=True)
+    disabled_phase_list = [
+        phase.strip()
+        for phase in str(disabled_phases or "").split(",")
+        if phase.strip()
+    ]
+    return get_agent_registry_payload(public=True, disabled_phases=disabled_phase_list)
 
 
 @app.get("/api/tools/registry")
