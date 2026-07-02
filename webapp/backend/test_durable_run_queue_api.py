@@ -133,6 +133,30 @@ def test_chat_confirmation_persists_starting_hypothesis(monkeypatch) -> None:
         assert run["request"]["preferences"] == "优先最小验证实验"
 
 
+def test_chat_confirmation_parses_chinese_full_stop_clauses(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+    message = (
+        "研究目标：找出 PDF fulltext 解析损失导致证据漂移的机制。"
+        "我的假设是 methods 小节丢失会导致实验指标证据链断裂。"
+        "偏好：优先可复现的最小验证。"
+        "约束：只使用本地解析过的论文。"
+        "请一起评审排序"
+    )
+
+    with tempdir, TestClient(studio.app) as client:
+        turn = client.post(
+            "/api/research-chat/turn",
+            json={"message": message, "context": {"mode": "workspace", "language": "zh"}},
+        )
+        assert turn.status_code == 200, turn.text
+        preview = turn.json()["assistant_message"]["proposal"]["requestPreview"]
+        assert preview["research_goal"] == "找出 PDF fulltext 解析损失导致证据漂移的机制"
+        assert preview["starting_hypotheses"] == ["methods 小节丢失会导致实验指标证据链断裂"]
+        assert preview["constraints"] == ["只使用本地解析过的论文"]
+        assert preview["preferences"] == "优先可复现的最小验证"
+
+
 def test_continue_run_enqueues_child_with_parent_memory(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
