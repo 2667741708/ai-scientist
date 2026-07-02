@@ -9420,6 +9420,19 @@ async def get_run_memory(run_id: str) -> Dict[str, Any]:
     return {"run_id": run_id, "memory": memory}
 
 
+@app.get("/api/runs/{run_id}/checkpoints")
+async def list_run_checkpoints(run_id: str, limit: int = 20) -> Dict[str, Any]:
+    if not load_run_record(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    checkpoints = knowledge_base.list_checkpoint_metadata(run_id=run_id, limit=max(1, min(limit, 200)))
+    return {
+        "run_id": run_id,
+        "checkpoints": checkpoints,
+        "count": len(checkpoints),
+        "boundary": "Execution metadata index only; LangGraph state saver is not enabled.",
+    }
+
+
 @app.get("/api/runs/{run_id}/trace")
 async def get_run_trace(run_id: str) -> Dict[str, List[AgentTrace]]:
     record = load_run_record(run_id)
