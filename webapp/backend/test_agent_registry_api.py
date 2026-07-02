@@ -119,6 +119,37 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
         assert "required phases remain enabled" in status_payload["boundary"]
 
 
+def test_agent_registry_payload_marks_requested_disabled_phases(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents import get_agent_registry_payload
+
+        payload = get_agent_registry_payload(
+            public=True,
+            disabled_phases=["literature_review", "supervisor", ""],
+        )
+        statuses = {item["phase"]: item for item in payload["phase_statuses"]}
+
+        assert payload["requested_disabled_phases"] == ["literature_review", "supervisor"]
+        assert statuses["literature_review"]["enabled"] is False
+        assert statuses["literature_review"]["configurable"] is True
+        assert "latent_knowledge" in statuses["literature_review"]["degradation_reason"]
+        assert statuses["supervisor"]["enabled"] is True
+        assert statuses["supervisor"]["configurable"] is False
+        assert statuses["supervisor"]["degradation_reason"] is None
+        assert payload["degraded_phases"] == [statuses["literature_review"]]
+        assert payload["degradation_count"] == 1
+        assert payload["invalid_disabled_phases"] == [
+            {
+                "phase": "supervisor",
+                "label": "Research planning",
+                "reason": "required_phase_cannot_be_disabled",
+            }
+        ]
+
+
 def test_agent_registry_contract_audit_flags_incomplete_specs(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     load_studio_app(monkeypatch, tempdir.name)
