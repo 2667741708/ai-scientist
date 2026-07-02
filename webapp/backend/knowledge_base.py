@@ -3143,6 +3143,7 @@ class KnowledgeBaseStore:
                 "max": max_attempts,
                 "remaining": max(0, max_attempts - attempt_count),
             },
+            "recovery_action": self._work_item_recovery_action(status, attempt_count, max_attempts),
             "recoverable": status in {"queued", "retrying", "blocked"},
             "next_action": self._work_item_next_action(status),
             "error_summary": self._safe_work_item_text(row["error_message"]),
@@ -3186,6 +3187,22 @@ class KnowledgeBaseStore:
             "error": "Inspect the failure and enqueue a new task if appropriate.",
             "cancelled": "Create a new task if the work is still needed.",
         }.get(status, "Inspect the task state before taking action.")
+
+    @staticmethod
+    def _work_item_recovery_action(status: str, attempt_count: int, max_attempts: int) -> str:
+        if status in {"queued", "leased", "running"}:
+            return "wait"
+        if status == "retrying":
+            return "retry"
+        if status == "blocked":
+            return "unblock"
+        if status in {"error", "failed"}:
+            if max_attempts <= 0 or attempt_count < max_attempts:
+                return "retry"
+            return "escalate"
+        if status in {"complete", "cancelled"}:
+            return "none"
+        return "inspect"
 
     @staticmethod
     def _work_item_workflow_label(workflow_name: str) -> str:
