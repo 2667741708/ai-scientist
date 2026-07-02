@@ -1,0 +1,494 @@
+@media (max-width: 1279px) {
+  .card-grid > *,
+  .compact-grid > * {
+    grid-column: span 6;
+  }
+
+  .studio-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .login-shell,
+  .home-command-layout,
+  .home-dashboard-grid,
+  .literature-library-grid,
+  .project-hypothesis-grid,
+  .workflow-queue-summary,
+  .tool-console-shell,
+  .report-workspace,
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .readiness-rail {
+    position: static;
+  }
+
+  .tool-grid,
+  .tool-workbench-grid,
+  .data-summary-grid,
+  .admin-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hypothesis-decision-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .matchup-elo-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .selected-hypothesis-panel {
+    position: static;
+  }
+
+  .report-selection-panel,
+  .report-evidence-panel {
+    position: static;
+  }
+}
+
+@media (max-width: 959px) {
+  .app-shell {
+    display: block;
+    height: auto;
+    overflow: visible;
+  }
+
+  .nav-rail {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    width: auto;
+    height: auto;
+    overflow-y: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding: var(--space-xs) var(--space-sm);
+    gap: var(--space-xs);
+  }
+
+  .brand-block {
+    min-width: 0;
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .workspace {
+    height: auto;
+    overflow: visible;
+    margin-left: 0;
+  }
+
+  .primary-nav {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: var(--space-xs);
+    max-height: 48vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior-block: contain;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .primary-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-item {
+    min-height: 36px;
+    padding: 0 12px;
+  }
+
+  .rail-account-card {
+    grid-column: 2;
+    grid-row: 1;
+    margin-top: 0;
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 4px;
+  }
+
+  .rail-account-card strong {
+    max-width: 34vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rail-account-card small {
+    display: none;
+  }
+
+  .rail-account-card .button-ghost {
+    width: auto;
+    min-height: 30px;
+    margin-top: 0;
+    margin-left: auto;
+    padding: 0 10px;
+  }
+
+  .rail-footer {
+    display: none;
+  }
+
+  .page-header,
+  .task-header,
+  .output-header {
+    flex-direction: column;
+  }
+
+  .overview-grid,
+  .card-grid,
+  .paper-discovery-form,
+  .workflow-path,
+  .workflow-lane-grid,
+  .workflow-queue-fields,
+  .workflow-hub-grid,
+  .compact-tool-grid,
+  .tool-operations-panel,
+  .project-table-row,
+  .report-editor-header {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-queue-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workflow-queue-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .workflow-queue-row > .button-secondary {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .project-table-stats,
+  .report-editor-actions {
+    justify-content: flex-start;
+  }
+
+  .login-shell {
+    padding: var(--space-md);
+  }
+
+  .role-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .card-grid > *,
+  .compact-grid > * {
+    grid-column: auto;
+  }
+
+  .asset-table-card {
+    overflow-x: auto;
+  }
+
+  .asset-table-header,
+  .asset-row {
+    min-width: 760px;
+  }
+
+  .event-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ranking-summary-header,
+  .matchup-brief-heading {
+    flex-direction: column;
+  }
+
+  .ranking-summary-counts {
+    justify-items: start;
+  }
+
+  .ranking-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .ranking-metric-strip,
+  .ranking-row-actions {
+    grid-column: 1 / -1;
+  }
+
+  .ranking-metric-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-xs);
+  }
+
+  .ranking-score-pill,
+  .ranking-record-pill {
+    justify-items: start;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-top: var(--space-xs);
+    padding-left: 0;
+  }
+
+  .ranking-row-actions {
+    justify-content: flex-start;
+  }
+
+  .ranking-row-actions .button-secondary,
+  .ranking-row-actions .button-ghost {
+    width: auto;
+  }
+
+  .matchup-elo-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+  }
+
+  .ranking-hypothesis-copy em {
+    -webkit-line-clamp: 1;
+  }
+
+  .matchup-brief-card {
+    gap: var(--space-xs);
+  }
+
+  .matchup-brief-card header {
+    justify-content: flex-start;
+  }
+
+  .matchup-elo-grid div {
+    min-height: 34px;
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-2xs);
+    padding: 6px 8px;
+  }
+
+  .matchup-elo-grid dt {
+    font-size: 10px;
+  }
+
+  .matchup-elo-grid dd {
+    font-size: 12px;
+  }
+
+  .matchup-brief-card p {
+    -webkit-line-clamp: 2;
+  }
+
+  .research-flow-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-progress-steps {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 639px) {
+  .workspace {
+    padding: var(--space-sm);
+  }
+
+  .primary-nav {
+    margin-inline: calc(var(--space-sm) * -1);
+    padding-inline: var(--space-sm);
+  }
+
+  .brand-mark {
+    width: 34px;
+    height: 34px;
+  }
+
+  .brand-block span {
+    display: none;
+  }
+
+  .rail-account-card span {
+    display: none;
+  }
+
+  .page-header h1 {
+    font-size: 24px;
+  }
+
+  .drawer-backdrop {
+    padding: var(--space-sm);
+  }
+
+  .reference-drawer {
+    width: 100%;
+    height: calc(100vh - var(--space-sm));
+  }
+
+  .research-chat-launcher {
+    right: var(--space-sm);
+    bottom: var(--space-sm);
+  }
+
+  .research-chat-drawer {
+    height: calc(100vh - var(--space-sm));
+  }
+
+  .pdf-reader-backdrop {
+    padding: var(--space-xs) var(--space-xs) 0;
+  }
+
+  .pdf-reader-sheet {
+    height: calc(100vh - var(--space-xs));
+    padding: var(--space-sm);
+  }
+
+  .pdf-reader-header,
+  .pdf-reader-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pdf-reader-actions .button-secondary,
+  .pdf-reader-actions .drawer-close {
+    width: 100%;
+  }
+
+  .research-chat-composer-actions,
+  .chat-proposal-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chat-metric-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-nav,
+  .page-header-actions,
+  .project-create-footer,
+  .project-hypothesis-actions,
+  .next-actions,
+  .task-actions,
+  .decision-actions {
+    width: 100%;
+  }
+
+  .detail-nav a,
+  .button-primary,
+  .button-secondary,
+  .button-ghost,
+  .project-create-footer button,
+  .project-hypothesis-actions a,
+  .next-actions a,
+  .task-actions a,
+  .decision-actions a,
+  .decision-actions button {
+    width: 100%;
+  }
+
+  .research-flow-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .ranking-metric-strip,
+  .ranking-row-actions {
+    margin-left: 0;
+  }
+
+  .ranking-row-actions .button-secondary,
+  .ranking-row-actions .button-ghost {
+    width: 100%;
+  }
+
+  .matchup-elo-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .active-run-progress header {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .run-progress-state {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .run-progress-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-progress-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ranking-summary-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ranking-summary-actions .button-secondary {
+    width: 100%;
+  }
+
+  .tool-grid,
+  .tool-workbench-grid,
+  .tool-console-shell,
+  .data-summary-grid,
+  .admin-metric-grid,
+  .report-checklist,
+  .workflow-queue-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .tool-workbench-panel > .section-heading,
+  .tool-form-row,
+  .tool-inline-fields,
+  .tool-catalog-disclosure > summary {
+    grid-template-columns: 1fr;
+  }
+
+  .tool-catalog-disclosure > summary {
+    min-height: auto;
+    align-items: flex-start;
+    flex-direction: column;
+    padding-block: var(--space-sm);
+  }
+
+  .report-draft-editor textarea {
+    min-height: 420px;
+  }
+
+  .tool-status-strip {
+    justify-content: flex-start;
+  }
+
+  .workflow-step-card,
+  .tool-card,
+  .workflow-hub-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .workflow-step-card > svg:last-child,
+  .tool-card > svg:last-child,
+  .workflow-hub-card > svg:last-child {
+    display: none;
+  }
+
+  .admin-table-row,
+  .admin-table.compact .admin-table-row {
+    grid-template-columns: 1fr;
+    align-items: start;
+    padding: var(--space-sm);
+  }
+
+  .login-copy h1 {
+    font-size: 26px;
+  }
+}
