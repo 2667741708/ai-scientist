@@ -191,6 +191,12 @@ class WorkflowState(TypedDict):
     literature: Optional[List[str]]
     """Optional: User-provided literature references to incorporate."""
 
+    memory_context: Optional[Dict[str, Any]]
+    """Optional: Summary-only execution/research/evidence memory injected for this run."""
+
+    user_feedback: Optional[List[Dict[str, Any]]]
+    """Optional: Human feedback items that guide the current run or continuation."""
+
     articles_with_reasoning: Optional[str]
     """Literature review results with analytical reasoning (formatted for prompts)."""
 
