@@ -129,6 +129,99 @@ def test_execution_recovery_policy_summarizes_resume_and_retry_modes() -> None:
     assert failed_without_checkpoint["work_item_recoverable"] is False
 
 
+def test_execution_resume_readiness_combines_checkpoint_and_work_item_state() -> None:
+    from open_coscientist.checkpointing import execution_resume_readiness
+
+    readiness = execution_resume_readiness(
+        run_id=" run-resume-ready ",
+        execution_memory={
+            "status": "ready",
+            "checkpoint_backend": "langgraph_sqlite",
+            "resume_supported": True,
+            "resume_config_fields": ["thread_id", "checkpoint_id", "checkpoint_ns"],
+        },
+        checkpoint_metadata={
+            "run_id": "run-resume-ready",
+            "thread_id": "run-resume-ready",
+            "checkpoint_id": "checkpoint-secret",
+            "checkpoint_ns": "execution-memory",
+            "checkpoint_backend": "langgraph_sqlite",
+            "phase": "review",
+            "status": "saved",
+            "state_summary": {"raw": "SECRET STATE"},
+        },
+        work_item={"status": "running", "lease_owner": "worker-secret"},
+    )
+
+    assert readiness["status"] == "ready_to_resume"
+    assert readiness["run_id"] == "run-resume-ready"
+    assert readiness["thread_id"] == "run-resume-ready"
+    assert readiness["thread_id_matches_run_id"] is True
+    assert readiness["checkpoint_available"] is True
+    assert readiness["checkpoint_backend"] == "langgraph_sqlite"
+    assert readiness["checkpoint_phase"] == "review"
+    assert readiness["checkpoint_status"] == "saved"
+    assert readiness["work_item_status"] == "running"
+    assert readiness["work_item_recoverable"] is True
+    assert readiness["recovery_mode"] == "resume_from_checkpoint"
+    assert readiness["can_resume"] is True
+    assert readiness["should_retry"] is False
+    assert readiness["resume_config"]["configurable"] == {
+        "thread_id": "run-resume-ready",
+        "checkpoint_ns": "execution-memory",
+        "checkpoint_id": "checkpoint-secret",
+    }
+    assert readiness["next_actions"] == ["resume_langgraph_thread", "monitor_progress"]
+    assert "SECRET STATE" not in str(readiness)
+    assert "worker-secret" not in str(readiness)
+    assert "raw checkpoint channel values" in readiness["boundary"]
+
+
+def test_execution_resume_readiness_reports_metadata_retry_and_thread_mismatch() -> None:
+    from open_coscientist.checkpointing import execution_resume_readiness
+
+    metadata_retry = execution_resume_readiness(
+        run_id="run-metadata-retry",
+        execution_memory={
+            "status": "limited",
+            "checkpoint_backend": "sqlite_metadata",
+            "resume_supported": False,
+        },
+        checkpoint_metadata={
+            "thread_id": "run-metadata-retry",
+            "checkpoint_id": "checkpoint-metadata",
+            "phase": "ranking",
+            "status": "saved",
+        },
+        work_item={"status": "retrying"},
+    )
+
+    assert metadata_retry["status"] == "metadata_guided_retry"
+    assert metadata_retry["recovery_mode"] == "metadata_guided_retry"
+    assert metadata_retry["can_resume"] is False
+    assert metadata_retry["should_retry"] is True
+    assert metadata_retry["resume_config"]["configurable"] == {
+        "thread_id": "run-metadata-retry",
+        "checkpoint_id": "checkpoint-metadata",
+    }
+    assert metadata_retry["next_actions"] == ["retry_work_item", "monitor_progress"]
+
+    mismatch = execution_resume_readiness(
+        run_id="run-a",
+        execution_memory={"status": "ready", "resume_supported": True},
+        checkpoint_metadata={"thread_id": "run-b", "checkpoint_id": "checkpoint-secret"},
+        work_item={"status": "running"},
+    )
+
+    assert mismatch["status"] == "needs_attention"
+    assert mismatch["thread_id_matches_run_id"] is False
+    assert mismatch["recovery_mode"] == "checkpoint_thread_mismatch"
+    assert mismatch["can_resume"] is False
+    assert mismatch["should_retry"] is False
+    assert mismatch["resume_config"]["configurable"] == {"thread_id": "run-a"}
+    assert mismatch["next_actions"] == ["inspect_checkpoint_thread_mismatch", "start_new_run_or_requeue"]
+
+
 def test_build_checkpoint_metadata_record_hides_raw_workflow_state() -> None:
     from open_coscientist.checkpointing import build_checkpoint_metadata_record
 
