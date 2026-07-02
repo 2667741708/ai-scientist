@@ -948,6 +948,26 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
             "availability": {"available": True, "status": "ready", "summary": "可读取当前或最近一次 run。"},
         },
         {
+            "id": "research.continue_run",
+            "userTitle": "基于当前结果继续研究",
+            "userSummary": "把当前 run、历史假设、用户反馈和证据摘要作为下一轮 continuation/refinement 的上下文。",
+            "intent": "continue_or_revise_run",
+            "taskArea": "research_run",
+            "executionMode": "approval_required",
+            "approvalScope": "research.start_live_run",
+            "requiredInputs": [
+                {"key": "run_id", "label": "当前运行", "type": "run_ref", "required": True},
+                {"key": "research_goal", "label": "继续后的研究目标", "type": "text", "required": False},
+            ],
+            "expectedOutputs": ["continuation run", "memory summary", "queued work item", "refined hypotheses"],
+            "groundingBoundary": "run_audit",
+            "availability": {
+                "available": True,
+                "status": "ready",
+                "summary": "继续运行会创建新的 queued run；历史上下文以摘要形式注入，不会即时改写当前结果。",
+            },
+        },
+        {
             "id": "hypothesis.inspect",
             "userTitle": "检查某条假设",
             "userSummary": "解释候选假设、评分、review、证据边界、实验计划和后续动作。",
