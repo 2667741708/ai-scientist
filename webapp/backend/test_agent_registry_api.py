@@ -70,6 +70,23 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
         assert "required phases remain enabled" in payload["phase_status_boundary"]
         assert "tool_calls" in payload["observability_contract"]
         assert "degradation_reason" in payload["observability_contract"]
+        registry_audit = payload["registry_contract_audit"]
+        assert registry_audit["status"] == "ready"
+        assert registry_audit["expected_phase_count"] == 9
+        assert registry_audit["counts"] == {
+            "agents": 9,
+            "missing_fields": 0,
+            "contract_gaps": 0,
+            "missing_observability": 0,
+            "duplicate_agent_ids": 0,
+            "duplicate_phases": 0,
+            "missing_phases": 0,
+            "extra_phases": 0,
+        }
+        assert registry_audit["items"][0]["agent_id"] == "supervisor_agent"
+        assert registry_audit["items"][0]["contract_gaps"] == []
+        assert registry_audit["items"][0]["missing_observability_fields"] == []
+        assert "raw prompts" in registry_audit["boundary"]
 
         agents = {agent["agent_id"]: agent for agent in payload["agents"]}
         supervisor = agents["supervisor_agent"]
@@ -100,6 +117,47 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
             }
         ]
         assert "required phases remain enabled" in status_payload["boundary"]
+
+
+def test_agent_registry_contract_audit_flags_incomplete_specs(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents.registry import agent_registry_contract_audit, list_agent_specs
+
+        specs = list_agent_specs(public=True)
+        broken = dict(specs[0])
+        broken["agent_id"] = "broken_agent"
+        broken["phase"] = "supervisor"
+        broken["input_contract"] = {}
+        broken["tool_policy"] = {"direct_tool_calls": False, "allowed_phase": "wrong_phase"}
+        broken["failure_policy"] = {"retryable": True}
+        broken["observability_fields"] = ["phase", "agent_id"]
+        broken["configurable"] = False
+        broken["degradation_when_disabled"] = "unexpected_degradation"
+        audit = agent_registry_contract_audit([broken, *specs])
+
+        assert audit["status"] == "needs_attention"
+        assert audit["counts"]["agents"] == 10
+        assert audit["counts"]["contract_gaps"] >= 1
+        assert audit["counts"]["missing_observability"] >= 1
+        assert audit["counts"]["duplicate_phases"] == 1
+        assert audit["duplicate_phases"] == ["supervisor"]
+        assert audit["missing_phases"] == []
+        assert audit["extra_phases"] == []
+        broken_item = audit["items"][0]
+        assert broken_item["agent_id"] == "broken_agent"
+        assert broken_item["contract_gaps"] == [
+            "input_contract.required",
+            "tool_policy.allowed_phase_mismatch",
+            "failure_policy.fallback",
+            "required_phase_degradation_boundary",
+        ]
+        assert "prompt_template" in broken_item["missing_observability_fields"]
+        assert broken_item["tool_policy_valid"] is False
+        assert broken_item["failure_policy_valid"] is False
+        assert "unexpected_degradation" not in str(audit)
 
 
 def test_agent_trace_contract_canonicalizes_runtime_phase_aliases(monkeypatch) -> None:
