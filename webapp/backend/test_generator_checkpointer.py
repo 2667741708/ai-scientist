@@ -20,6 +20,7 @@ def test_generator_prepare_generation_accepts_checkpointer() -> None:
         generator = HypothesisGenerator(max_iterations=0, initial_hypotheses_count=1)
         state, _start_time, run_id = await generator._prepare_generation(
             "Find recoverable LangGraph checkpoint semantics",
+            progress_callback=lambda *_args: None,
             opts={"enable_literature_review_node": False, "checkpointer": InMemorySaver()},
             run_id="run-checkpointer-test",
         )
@@ -28,6 +29,8 @@ def test_generator_prepare_generation_accepts_checkpointer() -> None:
     generator, state, run_id = asyncio.run(prepare_with_checkpointer())
     assert run_id == "run-checkpointer-test"
     assert state["run_id"] == "run-checkpointer-test"
+    assert state["progress_callback"] is None
+    assert state["tool_registry"] is None
     assert generator._graph is not None
     assert generator._graph_checkpointer_enabled is True
 
