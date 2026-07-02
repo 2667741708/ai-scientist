@@ -31,6 +31,9 @@ def test_generator_prepare_generation_accepts_checkpointer() -> None:
     assert state["run_id"] == "run-checkpointer-test"
     assert state["progress_callback"] is None
     assert state["tool_registry"] is None
+    from open_coscientist.checkpointing import checkpoint_state_serializability
+
+    assert checkpoint_state_serializability(state)["serializable"] is True
     assert generator._graph is not None
     assert generator._graph_checkpointer_enabled is True
 
