@@ -70,6 +70,9 @@ def test_run_lifecycle_persists_checkpoint_metadata(monkeypatch) -> None:
         api_payload = api_response.json()
         assert api_payload["run_id"] == run_id
         assert api_payload["count"] >= 3
+        assert api_payload["summary"]["status"] == "metadata_only"
+        assert api_payload["summary"]["latest_status"] == "complete"
+        assert api_payload["summary"]["has_langgraph_summary"] is False
         assert "metadata index only" in api_payload["boundary"]
 
 
@@ -129,5 +132,38 @@ def test_checkpoint_metadata_helper_persists_langgraph_summary(monkeypatch) -> N
         assert api_response.status_code == 200, api_response.text
         api_payload = api_response.json()
         assert api_payload["count"] == 1
+        assert api_payload["summary"]["status"] == "ready"
+        assert api_payload["summary"]["has_langgraph_summary"] is True
+        assert api_payload["summary"]["checkpoint_backend"] == "langgraph_sqlite"
         assert "LangGraph checkpoint summaries" in api_payload["boundary"]
         assert "raw channel values are not exposed" in api_payload["boundary"]
+
+
+def test_checkpoint_endpoint_reports_not_available_without_metadata(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir, TestClient(studio.app) as client:
+        record = studio.RunRecord(
+            run_id="run-no-checkpoints",
+            status="queued",
+            created_at=1.0,
+            updated_at=1.0,
+            request=studio.RunRequest(
+                research_goal="Inspect checkpoint readiness when metadata is absent",
+                demo_mode=True,
+                literature_review=False,
+            ),
+        )
+        studio.persist_run_record(record)
+
+        response = client.get("/api/runs/run-no-checkpoints/checkpoints")
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["count"] == 0
+        assert payload["checkpoints"] == []
+        assert payload["summary"]["status"] == "not_available"
+        assert payload["summary"]["checkpoint_count"] == 0
+        assert payload["summary"]["latest_status"] is None
+        assert payload["summary"]["resume_boundary"] == "No checkpoint metadata is available for this run."
