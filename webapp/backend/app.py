@@ -558,13 +558,16 @@ class TimelineEvent(BaseModel):
 class AgentTrace(BaseModel):
     event_id: str
     parent_event_id: Optional[str] = None
+    agent_id: Optional[str] = None
     agent: str
     role: str
     phase: str
+    prompt_template: Optional[str] = None
     status: Literal["queued", "active", "complete", "error"] = "complete"
     output: str
     tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
     token_usage: Dict[str, int] = Field(default_factory=dict)
+    degradation_reason: Optional[str] = None
     synthetic: bool = True
     confidence: float = Field(..., ge=0, le=1)
 
@@ -4652,6 +4655,51 @@ def slug_label(value: str) -> str:
     return slug or "phase"
 
 
+AGENT_TRACE_PHASE_ALIASES = {
+    "literature": "literature_review",
+    "literature_review": "literature_review",
+    "lit_review": "literature_review",
+    "generate": "generate",
+    "generation": "generate",
+    "review": "review",
+    "rank": "ranking",
+    "ranking": "ranking",
+    "meta": "meta_review",
+    "meta_review": "meta_review",
+    "evolution": "evolve",
+    "evolve": "evolve",
+    "proximity": "proximity",
+    "reflection": "reflection",
+    "supervisor": "supervisor",
+    "planning": "supervisor",
+}
+
+
+def registry_agent_for_phase(phase: str) -> Optional[Dict[str, Any]]:
+    canonical_phase = AGENT_TRACE_PHASE_ALIASES.get(str(phase).lower(), str(phase).lower())
+    try:
+        from open_coscientist.agents.registry import list_agent_specs
+
+        for spec in list_agent_specs(public=True):
+            if spec.get("phase") == canonical_phase:
+                return spec
+    except Exception:
+        return None
+    return None
+
+
+def agent_trace_from_registry(**kwargs: Any) -> AgentTrace:
+    phase = str(kwargs.get("phase") or "")
+    spec = registry_agent_for_phase(phase)
+    if spec:
+        kwargs.setdefault("agent_id", spec.get("agent_id"))
+        kwargs.setdefault("prompt_template", spec.get("prompt_template"))
+        kwargs.setdefault("role", spec.get("role") or "Specialized research agent")
+        if kwargs.get("degradation_reason") is None:
+            kwargs["degradation_reason"] = None
+    return AgentTrace(**kwargs)
+
+
 def extract_trace_metadata(message: Dict[str, Any]) -> Dict[str, Any]:
     candidates: List[Any] = [
         message.get("metadata"),
@@ -4693,7 +4741,7 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
                 continue
 
             traces.append(
-                AgentTrace(
+                agent_trace_from_registry(
                     agent=phase.replace("_", " ").title(),
                     role="Live LangGraph node",
                     event_id=f"trace-live-message-{index + 1}-{slug_label(phase)}",
@@ -4715,7 +4763,7 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
             status = "complete"
 
         traces.append(
-            AgentTrace(
+            agent_trace_from_registry(
                 agent=event.stage,
                 role="Live workflow phase",
                 event_id=f"trace-live-event-{index + 1}-{slug_label(event.stage)}",
@@ -4730,7 +4778,7 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
         )
 
     return traces or [
-        AgentTrace(
+        agent_trace_from_registry(
             agent="Open Coscientist",
             role="Live workflow",
             event_id="trace-live-workflow",
@@ -4936,7 +4984,7 @@ def demo_hypotheses(goal: str) -> List[Dict[str, Any]]:
 def demo_agent_trace(goal: str) -> List[AgentTrace]:
     subject = goal.strip().rstrip(".")
     return [
-        AgentTrace(
+        agent_trace_from_registry(
             event_id="trace-supervisor",
             agent="Supervisor",
             role="Research planner",
@@ -4949,7 +4997,7 @@ def demo_agent_trace(goal: str) -> List[AgentTrace]:
             token_usage={"prompt": 0, "completion": 0},
             confidence=0.91,
         ),
-        AgentTrace(
+        agent_trace_from_registry(
             event_id="trace-literature",
             parent_event_id="trace-supervisor",
             agent="Literature Scout",
@@ -4963,7 +5011,7 @@ def demo_agent_trace(goal: str) -> List[AgentTrace]:
             token_usage={"prompt": 0, "completion": 0},
             confidence=0.72,
         ),
-        AgentTrace(
+        agent_trace_from_registry(
             event_id="trace-generator",
             parent_event_id="trace-supervisor",
             agent="Generator",
@@ -4977,7 +5025,7 @@ def demo_agent_trace(goal: str) -> List[AgentTrace]:
             token_usage={"prompt": 0, "completion": 0},
             confidence=0.84,
         ),
-        AgentTrace(
+        agent_trace_from_registry(
             event_id="trace-reviewer",
             parent_event_id="trace-generator",
             agent="Reviewer",
@@ -4991,7 +5039,7 @@ def demo_agent_trace(goal: str) -> List[AgentTrace]:
             token_usage={"prompt": 0, "completion": 0},
             confidence=0.86,
         ),
-        AgentTrace(
+        agent_trace_from_registry(
             event_id="trace-ranker",
             parent_event_id="trace-reviewer",
             agent="Ranker",
@@ -5005,7 +5053,7 @@ def demo_agent_trace(goal: str) -> List[AgentTrace]:
             token_usage={"prompt": 0, "completion": 0},
             confidence=0.88,
         ),
-        AgentTrace(
+        agent_trace_from_registry(
             event_id="trace-proximity",
             parent_event_id="trace-ranker",
             agent="Proximity",
