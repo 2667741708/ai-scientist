@@ -356,6 +356,15 @@ def test_build_checkpoint_metadata_record_hides_raw_workflow_state() -> None:
             "tournament_matchups": [{"winner": "hidden"}],
             "evolution_details": [{"lineage": "hidden"}],
             "memory_context": {"raw": "SECRET MEMORY"},
+            "memory_prompt_packet": {
+                "section_count": 2,
+                "sections": [
+                    {
+                        "section": "execution_memory_summary",
+                        "items": [{"checkpoint_ref": "SECRET CHECKPOINT REF"}],
+                    }
+                ],
+            },
             "starting_hypotheses": ["SECRET USER SEED"],
             "current_iteration": 2,
             "progress_callback": lambda *_args: None,
@@ -393,6 +402,8 @@ def test_build_checkpoint_metadata_record_hides_raw_workflow_state() -> None:
     assert record["state_summary"]["evolution_detail_count"] == 1
     assert record["state_summary"]["current_iteration"] == 2
     assert record["state_summary"]["has_memory_context"] is True
+    assert record["state_summary"]["has_memory_prompt_packet"] is True
+    assert record["state_summary"]["memory_prompt_packet_section_count"] == 2
     assert record["state_summary"]["has_starting_hypotheses"] is True
     assert record["state_summary"]["omitted_runtime_only_keys"] == [
         "progress_callback",
