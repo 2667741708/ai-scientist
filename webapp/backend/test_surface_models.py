@@ -472,6 +472,8 @@ def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> No
     assert summary["memory"]["evidence_source_count"] == 3
     assert summary["memory"]["execution_memory_status"] == "limited"
     assert summary["recovery"]["recovery_mode"] == "queue_retry_without_checkpoint"
+    assert summary["recovery"]["label"] == "Run can retry through the durable queue."
+    assert summary["recovery"]["recovery_action"] == "retry"
     assert "internal_refs" not in summary
     assert "run-secret" not in str(summary)
     assert "work-secret" not in str(summary)
