@@ -4558,6 +4558,7 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
         else []
     )
     related_runs = memory_context.get("related_runs") if isinstance(memory_context.get("related_runs"), list) else []
+    known_gaps = memory_context.get("known_gaps") if isinstance(memory_context.get("known_gaps"), list) else []
     source_types: List[str] = []
     if parent_run:
         source_types.append("parent_run")
@@ -4569,6 +4570,8 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
         source_types.append("knowledge_base")
     if related_runs:
         source_types.append("related_runs")
+    if known_gaps:
+        source_types.append("memory_limitations")
 
     sections: List[Dict[str, Any]] = []
     if parent_run:
@@ -4621,6 +4624,21 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
                 "support_level_counts": support_counts,
             }
         )
+    if known_gaps:
+        summarized_gaps = [
+            _short_prompt_text(gap, 180)
+            for gap in known_gaps[:5]
+            if _short_prompt_text(gap, 180)
+        ]
+        sections.append(
+            {
+                "type": "memory_limitations",
+                "title": "Memory limitations",
+                "summary": f"{len(known_gaps)} memory limitation(s) apply to this run.",
+                "count": len(known_gaps),
+                "items": summarized_gaps,
+            }
+        )
 
     return {
         "memory_scope": memory_context.get("memory_scope"),
@@ -4631,6 +4649,7 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
         "user_feedback_count": len(user_feedback),
         "evidence_summary_count": len(evidence_summaries),
         "related_run_count": len(related_runs),
+        "known_gaps_count": len(known_gaps),
         "sections": sections,
         "boundary": (
             "Summary-only memory view for UI disclosure. Raw chat messages, raw records, "
