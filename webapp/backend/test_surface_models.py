@@ -3,6 +3,7 @@ from __future__ import annotations
 from surface_models import (
     evidence_surface_collection,
     evidence_surface_summary,
+    experiment_design_surface_summary,
     hypothesis_surface_collection,
     hypothesis_surface_summary,
     ranking_surface_summary,
@@ -443,6 +444,74 @@ def test_hypothesis_surface_collection_counts_model_evolved_and_tool_origins() -
     assert collection["items"][2]["origin_label"] == "tool grounded"
     assert "inspect_review" in collection["items"][2]["next_actions"]
     assert "citation_map" not in str(collection)
+
+
+def test_experiment_design_surface_summary_requires_falsifiable_sections() -> None:
+    experiment = {
+        "id": "hyp-exp-secret",
+        "title": "Retrieval-audited generation protocol",
+        "text": "A candidate hypothesis for retrieval-audited generation.",
+        "experiment_job_id": "experiment-job-secret",
+        "script_path": "D:/secret/experiment.py",
+        "experiment_plan": "Compare a retrieval-audited generator against a flat generator on held-out claims.",
+        "observable_variables": ["claim support precision", "contradiction rate"],
+        "controls": ["flat generator baseline", "metadata-only retrieval baseline"],
+        "metrics": {"support_precision": ">= 0.80", "contradiction_rate": "<= 0.10"},
+        "failure_conditions": ["Fails if support precision stays below 0.70 after fulltext retrieval."],
+        "alternative_explanations": ["Reviewer preference may reflect wording rather than evidence quality."],
+        "required_data": ["held-out paper fulltext set", "claim-level citation labels"],
+        "minimal_validation_path": "Run a 50-claim pilot before any expensive benchmark.",
+        "experimental_support_summaries": [
+            {
+                "paper_id": "paper-secret",
+                "chunk_id": "chunk-secret",
+                "title": "Evidence benchmark paper",
+                "source_reliability": "parsed_fulltext",
+                "support_level": "experimental_data",
+                "experiment_data_summary": "Benchmark reports claim support precision.",
+            }
+        ],
+        "raw_tool_payload": {"debug": "provider-secret"},
+    }
+
+    summary = experiment_design_surface_summary(experiment)
+
+    assert summary["status"] == "ready"
+    assert summary["hypothesis"]["title"] == "Retrieval-audited generation protocol"
+    assert summary["plan_summary"] == "Compare a retrieval-audited generator against a flat generator on held-out claims."
+    assert summary["observable_variables"] == ["claim support precision", "contradiction rate"]
+    assert summary["controls"] == ["flat generator baseline", "metadata-only retrieval baseline"]
+    assert summary["metrics"] == ["support_precision: >= 0.80", "contradiction_rate: <= 0.10"]
+    assert summary["failure_conditions"] == ["Fails if support precision stays below 0.70 after fulltext retrieval."]
+    assert summary["alternative_explanations"] == ["Reviewer preference may reflect wording rather than evidence quality."]
+    assert summary["required_data"] == ["held-out paper fulltext set", "claim-level citation labels"]
+    assert summary["minimal_validation_path"] == "Run a 50-claim pilot before any expensive benchmark."
+    assert summary["evidence"]["evidence_count"] == 1
+    assert summary["evidence"]["boundary"]["status"] == "parsed_fulltext"
+    assert summary["missing_sections"] == []
+    assert summary["next_actions"] == ["inspect_evidence", "prepare_execution_workflow", "export_to_report"]
+    assert "internal_refs" not in summary
+    assert "hyp-exp-secret" not in str(summary)
+    assert "experiment-job-secret" not in str(summary)
+    assert "D:/secret" not in str(summary)
+    assert "provider-secret" not in str(summary)
+    assert "chunk-secret" not in str(summary)
+
+    expert_summary = experiment_design_surface_summary(experiment, include_internal_refs=True)
+    assert expert_summary["internal_refs"]["hypothesis_id"] == "hyp-exp-secret"
+    assert expert_summary["internal_refs"]["experiment_id"] == "experiment-job-secret"
+    assert expert_summary["internal_refs"]["script_path"] == "D:/secret/experiment.py"
+    assert expert_summary["internal_refs"]["raw_source"]["raw_tool_payload"]["debug"] == "provider-secret"
+
+
+def test_experiment_design_surface_summary_reports_absent_plan() -> None:
+    summary = experiment_design_surface_summary({"title": "Candidate without experiment"})
+
+    assert summary["status"] == "absent"
+    assert "plan_summary" in summary["missing_sections"]
+    assert "observable_variables" in summary["missing_sections"]
+    assert summary["plan_summary"] == ""
+    assert summary["next_actions"] == ["draft_experiment_plan", "select_hypothesis"]
 
 
 def test_ranking_surface_summary_exposes_elo_audit_without_raw_payload() -> None:
