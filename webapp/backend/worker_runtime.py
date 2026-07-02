@@ -144,6 +144,7 @@ class ResearchWorkerRuntime:
                 task.add_done_callback(self._running_tasks.discard)
         active_work_item_snapshot = self._active_work_item_snapshot()
         queue_status_counts = dict(active_work_item_snapshot.get("counts") or self._queue_status_counts())
+        recovery_action_counts = dict(active_work_item_snapshot.get("recovery_action_counts") or {})
         queue_count_summary = self._queue_count_summary(queue_status_counts)
         running_count = len(self._running_tasks)
         return {
@@ -158,7 +159,11 @@ class ResearchWorkerRuntime:
             "queue_status_counts": queue_status_counts,
             "active_work_item_snapshot": active_work_item_snapshot,
             **queue_count_summary,
-            "user_facing_status": self._user_facing_status(queue_status_counts, running_count=running_count),
+            "user_facing_status": self._user_facing_status(
+                queue_status_counts,
+                running_count=running_count,
+                recovery_action_counts=recovery_action_counts,
+            ),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
@@ -166,6 +171,7 @@ class ResearchWorkerRuntime:
     def status(self) -> Dict[str, Any]:
         active_work_item_snapshot = self._active_work_item_snapshot()
         queue_status_counts = dict(active_work_item_snapshot.get("counts") or self._queue_status_counts())
+        recovery_action_counts = dict(active_work_item_snapshot.get("recovery_action_counts") or {})
         running_count = len([task for task in self._running_tasks if not task.done()])
         return {
             "enabled": self.enabled,
@@ -177,7 +183,11 @@ class ResearchWorkerRuntime:
             "queue_status_counts": queue_status_counts,
             "active_work_item_snapshot": active_work_item_snapshot,
             **self._queue_count_summary(queue_status_counts),
-            "user_facing_status": self._user_facing_status(queue_status_counts, running_count=running_count),
+            "user_facing_status": self._user_facing_status(
+                queue_status_counts,
+                running_count=running_count,
+                recovery_action_counts=recovery_action_counts,
+            ),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
@@ -219,14 +229,25 @@ class ResearchWorkerRuntime:
             "error_count": int(counts.get("error", 0)),
         }
 
-    def _user_facing_status(self, counts: Dict[str, int], *, running_count: int = 0) -> Dict[str, Any]:
+    def _user_facing_status(
+        self,
+        counts: Dict[str, int],
+        *,
+        running_count: int = 0,
+        recovery_action_counts: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
         queue_summary = self._queue_count_summary(counts)
+        recovery_counts = {
+            action: int((recovery_action_counts or {}).get(action, 0))
+            for action in ("wait", "retry", "unblock", "escalate", "inspect", "none")
+        }
         state = self._user_facing_state(counts, running_count=running_count)
         return {
             "state": state,
             "label": self._user_facing_label(state),
             "next_actions": self._user_facing_next_actions(state),
             "counts": queue_summary,
+            "recovery_action_counts": recovery_counts,
             "safe_default_fields": [
                 "state",
                 "label",
@@ -235,6 +256,7 @@ class ResearchWorkerRuntime:
                 "counts.retrying_count",
                 "counts.active_work_item_count",
                 "counts.error_count",
+                "recovery_action_counts",
             ],
             "expert_fields": [
                 "owner",
