@@ -8,11 +8,103 @@ from surface_models import (
     hypothesis_surface_collection,
     hypothesis_surface_summary,
     ranking_surface_summary,
+    research_goal_readiness_surface_summary,
     report_surface_summary,
     runtime_readiness_surface_summary,
     run_confirmation_surface_summary,
     run_surface_summary,
 )
+
+
+def test_research_goal_readiness_surface_summary_marks_ready_goal_without_raw_request() -> None:
+    request = {
+        "research_goal": (
+            "Develop a causal retrieval-audit mechanism to reduce citation drift; "
+            "measure support precision and contradiction rate against a parsed fulltext benchmark; "
+            "validate with an ablation baseline and fail if support precision remains below 0.70."
+        ),
+        "preferences": "Use parsed fulltext evidence before model priors.",
+        "constraints": ["Use local fulltext evidence first.", "Report failure thresholds."],
+        "attributes": ["falsifiable", "evidence-grounded"],
+        "starting_hypotheses": ["A claim-gating mechanism reduces unsupported citations."],
+        "user_feedback": [
+            {
+                "feedback_id": "feedback-secret",
+                "text": "SECRET FEEDBACK",
+                "feedback_type": "prefer",
+            }
+        ],
+        "parent_run_id": "parent-secret",
+        "library_id": "library-secret",
+        "memory_scope": "project",
+    }
+
+    summary = research_goal_readiness_surface_summary(request)
+
+    assert summary["status"] == "ready"
+    assert all(summary["signals"].values())
+    assert summary["missing_elements"] == []
+    assert summary["counts"] == {
+        "constraints": 2,
+        "attributes": 2,
+        "starting_hypotheses": 1,
+        "user_feedback": 1,
+    }
+    assert summary["next_actions"] == ["review_confirmation", "start_run"]
+    assert summary["constraint_previews"] == [
+        "Use local fulltext evidence first.",
+        "Report failure thresholds.",
+    ]
+    assert summary["attribute_previews"] == ["falsifiable", "evidence-grounded"]
+    assert summary["starting_hypothesis_previews"] == [
+        "A claim-gating mechanism reduces unsupported citations."
+    ]
+    assert "internal_refs" not in summary
+    assert "feedback-secret" not in str(summary)
+    assert "SECRET FEEDBACK" not in str(summary)
+    assert "parent-secret" not in str(summary)
+    assert "library-secret" not in str(summary)
+
+    expert_summary = research_goal_readiness_surface_summary(
+        request,
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["parent_run_id"] == "parent-secret"
+    assert expert_summary["internal_refs"]["library_id"] == "library-secret"
+    assert expert_summary["internal_refs"]["memory_scope"] == "project"
+    assert expert_summary["internal_refs"]["request_preview"]["user_feedback"][0]["feedback_id"] == "feedback-secret"
+
+
+def test_research_goal_readiness_surface_summary_guides_refinement_and_empty_goal() -> None:
+    vague = research_goal_readiness_surface_summary("Improve AI research")
+
+    assert vague["status"] == "needs_refinement"
+    assert vague["missing_elements"] == [
+        "mechanism_or_method",
+        "observable_variables",
+        "validation_path",
+        "failure_conditions",
+        "evidence_scope",
+    ]
+    assert "mechanism or method" in vague["guidance"]
+    assert vague["next_actions"] == [
+        "refine_research_goal",
+        "add_or_select_evidence",
+        "add_validation_constraints",
+        "review_confirmation",
+        "start_run",
+    ]
+
+    empty = research_goal_readiness_surface_summary({"research_goal": "short"})
+
+    assert empty["status"] == "empty"
+    assert empty["next_actions"] == ["write_research_goal", "parse_evidence_first"]
+    assert empty["counts"] == {
+        "constraints": 0,
+        "attributes": 0,
+        "starting_hypotheses": 0,
+        "user_feedback": 0,
+    }
 
 
 def test_runtime_readiness_surface_summary_hides_internal_refs_by_default() -> None:
