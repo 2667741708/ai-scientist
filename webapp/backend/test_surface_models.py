@@ -225,6 +225,8 @@ def test_runtime_readiness_surface_summary_reports_ready_state() -> None:
 def test_work_queue_surface_summary_hides_raw_work_items_by_default() -> None:
     snapshot = {
         "counts": {"active": 2, "queued": 1, "running": 1, "retrying": 0, "error": 0},
+        "recovery_action": "wait",
+        "recovery_action_counts": {"wait": 2, "retry": 0, "unblock": 0, "escalate": 0, "inspect": 0, "none": 0},
         "items": [
             {
                 "work_item_id": "work-secret-1",
@@ -263,6 +265,10 @@ def test_work_queue_surface_summary_hides_raw_work_items_by_default() -> None:
     summary = work_queue_surface_summary(snapshot, worker_status=worker_status)
 
     assert summary["status"] == "running"
+    assert summary["recovery_action"] == "wait"
+    assert summary["recovery_action_counts"]["wait"] == 2
+    assert "recovery_action" in summary["disclosure"]["safe_default_fields"]
+    assert "recovery_action_counts" in summary["disclosure"]["safe_default_fields"]
     assert summary["worker"] == {"enabled": True, "concurrency": 2, "running_count": 1}
     assert summary["counts"]["active"] == 2
     assert summary["counts"]["queued"] == 1
@@ -424,6 +430,8 @@ def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> No
     }
     work_snapshot = {
         "counts": {"active": 1, "queued": 1, "retrying": 0, "running": 0},
+        "recovery_action": "retry",
+        "recovery_action_counts": {"wait": 0, "retry": 1, "unblock": 0, "escalate": 0, "inspect": 0, "none": 0},
         "items": [
             {
                 "work_item_id": "work-secret",
@@ -466,6 +474,8 @@ def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> No
     assert summary["next_actions"] == ["monitor_queue", "check_worker_status"]
     assert summary["counts"] == {"hypotheses": 0, "starting_hypotheses": 1, "user_feedback": 1}
     assert summary["queue"]["active_work_item_count"] == 1
+    assert summary["queue"]["recovery_action"] == "retry"
+    assert summary["queue"]["recovery_action_counts"]["retry"] == 1
     assert summary["queue"]["current_work_status"] == "queued"
     assert summary["queue"]["current_work_recovery_action"] == "wait"
     assert summary["memory"]["feedback_count"] == 1
