@@ -90,6 +90,32 @@ def test_research_work_item_can_be_blocked_for_manual_recovery() -> None:
         assert store.lease_work_items(owner="worker-block", limit=1) == []
 
 
+def test_blocked_work_item_can_be_unblocked_for_retry() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.needs_approval",
+            arguments={"approval": "required"},
+            max_attempts=3,
+        )
+        store.lease_work_items(owner="worker-block", limit=1)
+        store.block_work_item(item["work_item_id"], "Waiting for expert approval.")
+
+        assert store.unblock_work_item(item["work_item_id"], "Expert approval granted.") is True
+        unblocked = store.get_work_item(item["work_item_id"])
+        assert unblocked["status"] == "retrying"
+        assert unblocked["error_message"] == "Expert approval granted."
+        assert store.work_item_status_counts()["retrying"] == 1
+
+        leased_again = store.lease_work_items(owner="worker-after-approval", limit=1)
+        assert leased_again[0]["work_item_id"] == item["work_item_id"]
+        assert leased_again[0]["attempt_count"] == 2
+
+        store.complete_work_item(item["work_item_id"], {"done": True})
+        assert store.unblock_work_item(item["work_item_id"]) is False
+        assert store.get_work_item(item["work_item_id"])["status"] == "complete"
+
+
 def test_work_item_status_counts_can_scope_worker_progress() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
