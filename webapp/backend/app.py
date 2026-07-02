@@ -5664,7 +5664,7 @@ def build_worker_runtime() -> ResearchWorkerRuntime:
         concurrency=WORKER_CONCURRENCY,
         lease_seconds=WORKER_LEASE_SECONDS,
         poll_seconds=WORKER_POLL_SECONDS,
-        enabled=True,
+        enabled=WORKER_AUTOSTART_ENABLED,
     )
 
 
