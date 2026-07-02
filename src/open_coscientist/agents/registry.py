@@ -32,6 +32,32 @@ BASE_OBSERVABILITY_FIELDS = [
 ]
 
 
+PHASE_ORDER = [
+    "supervisor",
+    "literature_review",
+    "generate",
+    "reflection",
+    "review",
+    "ranking",
+    "meta_review",
+    "evolve",
+    "proximity",
+]
+
+
+PHASE_LABELS = {
+    "supervisor": "Research planning",
+    "literature_review": "Literature grounding",
+    "generate": "Hypothesis generation",
+    "reflection": "Evidence reflection",
+    "review": "Scientific critique",
+    "ranking": "Tournament ranking",
+    "meta_review": "Meta-review synthesis",
+    "evolve": "Hypothesis evolution",
+    "proximity": "Diversity control",
+}
+
+
 AGENT_REGISTRY: list[AgentSpec] = [
     {
         "agent_id": "supervisor_agent",
@@ -213,10 +239,21 @@ def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
         }
         for agent in agents
     }
+    configurable_phases = [
+        str(agent["phase"])
+        for agent in agents
+        if bool(agent["configurable"])
+    ]
     return {
         "agents": agents,
         "count": len(agents),
         "phases": phases,
+        "phase_order": PHASE_ORDER,
+        "phase_labels": PHASE_LABELS,
+        "configurable_phases": configurable_phases,
+        "required_phases": [
+            phase for phase in PHASE_ORDER if phase not in configurable_phases
+        ],
         "phase_index": phase_index,
         "observability_contract": BASE_OBSERVABILITY_FIELDS,
         "registry_version": "paper_level_v1",
