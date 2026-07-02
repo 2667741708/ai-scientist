@@ -1171,7 +1171,13 @@ def test_agent_process_surface_summary_uses_phase_labels_without_raw_provider_pa
     assert summary["items"][1]["role"] == "Custom review role from registry."
     assert summary["items"][1]["tool_call_count"] == 1
     assert summary["items"][2]["label"] == "Tournament ranking"
-    assert summary["next_actions"] == ["inspect_process_summary", "review_capability_degradation", "inspect_evidence"]
+    assert summary["counts"]["missing_phase"] == 1
+    assert summary["next_actions"] == [
+        "inspect_process_summary",
+        "review_capability_degradation",
+        "inspect_missing_research_steps",
+        "inspect_evidence",
+    ]
     assert "internal_refs" not in summary
     assert "event-secret" not in str(summary)
     assert "ranking-agent-secret" not in str(summary)
@@ -1220,10 +1226,16 @@ def test_agent_process_surface_summary_handles_absent_and_summary_only_trace() -
     assert summary_only["status"] == "partial"
     assert summary_only["trace_count"] == 1
     assert summary_only["phase_order"] == ["process_summary"]
+    assert summary_only["counts"]["missing_phase"] == 9
     assert summary_only["counts"]["unknown_phase"] == 1
     assert summary_only["items"][0]["label"] == "Process Summary"
     assert summary_only["items"][0]["output_summary"] == "2 process trace event(s) are available in details."
-    assert summary_only["next_actions"] == ["inspect_process_summary", "inspect_unknown_steps", "inspect_evidence"]
+    assert summary_only["next_actions"] == [
+        "inspect_process_summary",
+        "inspect_missing_research_steps",
+        "inspect_unknown_steps",
+        "inspect_evidence",
+    ]
 
 
 def test_evidence_surface_summary_hides_internal_refs_by_default() -> None:
