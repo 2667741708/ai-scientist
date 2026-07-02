@@ -467,6 +467,7 @@ def memory_surface_summary(
     user_feedback = _record_items(source.get("user_feedback"))
     evidence_summaries = _record_items(source.get("evidence_summaries") or source.get("evidence_items"))
     execution_memory = _as_mapping(source.get("execution_memory"))
+    injection_policy = _as_mapping(source.get("injection_policy"))
     evidence_collection = evidence_surface_collection(evidence_summaries)
     evidence_scope = _memory_evidence_scope(source=source, evidence_collection=evidence_collection)
     known_gaps = _surface_text_items(source.get("known_gaps"), max_items=5, max_length=180)
@@ -497,12 +498,14 @@ def memory_surface_summary(
         ),
         "evidence_scope": evidence_scope,
         "execution_memory": _memory_execution_surface_summary(execution_memory),
+        "injection_policy": _memory_injection_policy_surface_summary(injection_policy),
         "known_gap_summaries": known_gaps[:3],
         "next_actions": _memory_next_actions(status=status, evidence_status=str(evidence_scope.get("status") or "")),
         "visibility_boundary": (
             "Memory surface summaries expose parent-run context, counts, evidence scope, execution-memory "
-            "status, and next actions by default; raw chat messages, exact feedback text, checkpoint refs, "
-            "retrieval diagnostics, internal IDs, and raw memory JSON require expert disclosure."
+            "status, summary-only injection policy, and next actions by default; raw chat messages, exact "
+            "feedback text, checkpoint refs, retrieval diagnostics, internal IDs, and raw memory JSON require "
+            "expert disclosure."
         ),
     }
     if include_internal_refs:
@@ -533,6 +536,7 @@ def memory_surface_summary(
             ],
             "checkpoint_id": _memory_checkpoint_value(execution_memory, "checkpoint_id"),
             "checkpoint_ref": _memory_checkpoint_value(execution_memory, "checkpoint_ref"),
+            "raw_injection_policy": dict(injection_policy),
             "raw_memory_context": dict(source),
         }
     return summary
@@ -2457,6 +2461,49 @@ def _memory_execution_surface_summary(execution_memory: Mapping[str, Any]) -> Di
         "resume_supported": bool(execution_memory.get("resume_supported")),
         "checkpoint_backend": execution_memory.get("checkpoint_backend"),
         "resume_mode": execution_memory.get("resume_mode"),
+    }
+
+
+def _memory_injection_policy_surface_summary(policy: Mapping[str, Any]) -> Dict[str, Any]:
+    if not policy:
+        return {
+            "status": "not_declared",
+            "mode": "unknown",
+            "raw_injection_allowed": False,
+            "prompt_sections": [],
+            "target_prompts": [],
+            "excluded_raw_field_count": 0,
+            "boundary_summary": "No memory injection policy was declared for this context.",
+        }
+    prompt_sections = [
+        _compact_text(item, max_length=80)
+        for item in _as_list(policy.get("prompt_sections"))
+        if str(item).strip()
+    ][:8]
+    target_prompts = [
+        _compact_text(item, max_length=40)
+        for item in _as_list(policy.get("target_prompts"))
+        if str(item).strip()
+    ][:8]
+    excluded_raw_fields = [
+        _compact_text(item, max_length=80)
+        for item in _as_list(policy.get("excluded_raw_fields"))
+        if str(item).strip()
+    ]
+    raw_allowed = bool(policy.get("raw_injection_allowed"))
+    return {
+        "status": "raw_allowed" if raw_allowed else "summary_only",
+        "mode": _compact_text(policy.get("mode") or "summary_only", max_length=80),
+        "memory_scope": policy.get("memory_scope"),
+        "memory_sources": _preview_list(_as_list(policy.get("memory_sources")), max_items=8, max_length=60),
+        "prompt_sections": prompt_sections,
+        "target_prompts": target_prompts,
+        "counts": dict(_as_mapping(policy.get("counts"))),
+        "evidence_status": policy.get("evidence_status"),
+        "raw_injection_allowed": raw_allowed,
+        "excluded_raw_field_count": len(excluded_raw_fields),
+        "excluded_raw_fields": excluded_raw_fields[:8],
+        "boundary_summary": _compact_text(policy.get("boundary"), max_length=260),
     }
 
 
