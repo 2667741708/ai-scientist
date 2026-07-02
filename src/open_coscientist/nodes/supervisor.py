@@ -3,7 +3,7 @@ Supervisor node - create research plan and workflow guidance.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from ..constants import (
     EXTENDED_MAX_TOKENS,
@@ -17,6 +17,112 @@ from ..prompts import get_supervisor_prompt
 from ..state import WorkflowState
 
 logger = logging.getLogger(__name__)
+
+
+def _short_guidance_text(value: Any, limit: int = 360) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}..."
+
+
+def _append_feedback_guidance(
+    constraints: List[str],
+    feedback_items: Any,
+    *,
+    prefix: str,
+) -> None:
+    if not isinstance(feedback_items, list):
+        return
+
+    appended = 0
+    for item in feedback_items[:5]:
+        if not isinstance(item, dict):
+            continue
+        text = _short_guidance_text(item.get("text"))
+        if not text:
+            continue
+        feedback_type = _short_guidance_text(item.get("feedback_type") or "critique", 80)
+        constraints.append(f"[{prefix}] type={feedback_type}; feedback={text}.")
+        appended += 1
+
+    if appended:
+        constraints.append(
+            f"[{prefix}_policy] Treat human feedback as guidance for this run or continuation; "
+            "do not claim it instantly rewrites already completed results."
+        )
+
+
+def build_supervisor_context_constraints(
+    constraints: Optional[List[str]],
+    memory_context: Any,
+    user_feedback: Any,
+) -> List[str]:
+    combined = [item for item in (constraints or []) if str(item).strip()]
+
+    if isinstance(memory_context, dict):
+        parent_run = memory_context.get("parent_run")
+        if isinstance(parent_run, dict):
+            summary = _short_guidance_text(
+                parent_run.get("summary") or parent_run.get("research_goal")
+            )
+            if summary:
+                combined.append(f"[memory_parent_run] Prior run summary: {summary}.")
+
+        prior_hypotheses = memory_context.get("prior_hypotheses")
+        if isinstance(prior_hypotheses, list):
+            for hypothesis in prior_hypotheses[:3]:
+                if not isinstance(hypothesis, dict):
+                    continue
+                text = _short_guidance_text(
+                    hypothesis.get("text")
+                    or hypothesis.get("hypothesis")
+                    or hypothesis.get("summary")
+                )
+                if not text:
+                    continue
+                support_level = _short_guidance_text(
+                    hypothesis.get("support_level") or "unknown", 80
+                )
+                combined.append(
+                    f"[memory_prior_hypothesis] support={support_level}; summary={text}."
+                )
+
+        _append_feedback_guidance(
+            combined,
+            memory_context.get("user_feedback"),
+            prefix="memory_user_feedback",
+        )
+
+        evidence_summaries = memory_context.get("evidence_summaries")
+        if isinstance(evidence_summaries, list):
+            for evidence in evidence_summaries[:3]:
+                if not isinstance(evidence, dict):
+                    continue
+                title = _short_guidance_text(
+                    evidence.get("title")
+                    or evidence.get("source_title")
+                    or evidence.get("summary"),
+                    160,
+                )
+                reliability = _short_guidance_text(
+                    evidence.get("source_reliability") or "unknown", 80
+                )
+                support = _short_guidance_text(evidence.get("support_level") or "unknown", 80)
+                if title:
+                    combined.append(
+                        "[memory_evidence] "
+                        f"source_reliability={reliability}; support={support}; summary={title}."
+                    )
+
+        if len(combined) > len(constraints or []):
+            combined.append(
+                "[memory_usage_policy] Memory is summary-only planning context. "
+                "Do not treat cache hits, internal ids, or unstated evidence as scientific support."
+            )
+
+    _append_feedback_guidance(combined, user_feedback, prefix="user_feedback")
+    return combined
 
 
 async def supervisor_node(state: WorkflowState) -> Dict[str, Any]:
@@ -39,7 +145,11 @@ async def supervisor_node(state: WorkflowState) -> Dict[str, Any]:
     # extract optional user inputs from state
     preferences = state.get("preferences")
     attributes = state.get("attributes")
-    constraints = state.get("constraints")
+    constraints = build_supervisor_context_constraints(
+        state.get("constraints"),
+        state.get("memory_context"),
+        state.get("user_feedback"),
+    )
     user_hypotheses = state.get("starting_hypotheses")
     user_literature = state.get("literature")
 
