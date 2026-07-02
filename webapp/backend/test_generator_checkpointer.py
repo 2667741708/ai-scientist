@@ -38,6 +38,50 @@ def test_generator_prepare_generation_accepts_checkpointer() -> None:
     assert generator._graph_checkpointer_enabled is True
 
 
+def test_generator_prepare_generation_preserves_memory_context_and_feedback() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from open_coscientist.checkpointing import checkpoint_state_serializability
+    from open_coscientist.generator import HypothesisGenerator
+
+    memory_context = {
+        "memory_scope": "project",
+        "parent_run": {"summary": "Prior run favored falsifiable evidence links."},
+        "user_feedback": [{"feedback_type": "prefer", "text": "Prefer parsed fulltext evidence."}],
+    }
+    user_feedback = [
+        {
+            "feedback_type": "constraint",
+            "text": "Use feedback only as next-run guidance.",
+        }
+    ]
+
+    async def prepare_with_memory():
+        generator = HypothesisGenerator(max_iterations=0, initial_hypotheses_count=1)
+        state, _start_time, _run_id = await generator._prepare_generation(
+            "Use continuation memory when generating hypotheses",
+            opts={
+                "enable_literature_review_node": False,
+                "checkpointer": InMemorySaver(),
+                "memory_context": memory_context,
+                "user_feedback": user_feedback,
+                "user_inputs": {
+                    "starting_hypotheses": ["User seed hypothesis enters the candidate pool."],
+                    "literature": [{"source_reliability": "parsed_fulltext"}],
+                },
+            },
+            run_id="run-memory-feedback-state",
+        )
+        return state
+
+    state = asyncio.run(prepare_with_memory())
+    assert state["memory_context"] == memory_context
+    assert state["user_feedback"] == user_feedback
+    assert state["starting_hypotheses"] == ["User seed hypothesis enters the candidate pool."]
+    assert state["literature"] == [{"source_reliability": "parsed_fulltext"}]
+    assert checkpoint_state_serializability(state)["serializable"] is True
+
+
 def test_generator_rebuilds_graph_when_checkpoint_mode_changes() -> None:
     from langgraph.checkpoint.memory import InMemorySaver
 
