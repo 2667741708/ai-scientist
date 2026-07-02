@@ -169,6 +169,15 @@ def test_run_real_passes_parent_memory_summary_constraints(monkeypatch) -> None:
     assert "[memory_usage_policy]" in joined_constraints
     assert "parent-run-memory" not in joined_constraints
 
+    opts = captured["generate_kwargs"]["opts"]
+    memory_context = opts["memory_context"]
+    assert memory_context["parent_run"]["run_id"] == "parent-run-memory"
+    assert memory_context["prior_hypotheses"][0]["hypothesis_id"] == "hyp-parent-1"
+    assert memory_context["user_feedback"][0]["feedback_type"] == "prefer"
+    assert opts["user_inputs"]["literature"] == memory_context["evidence_summaries"]
+    assert record.metrics["memory_context_used"]["memory_scope"] == "project"
+    assert record.metrics["memory_context_used"]["parent_run_id"] == "parent-run-memory"
+
 
 def test_run_real_passes_current_request_feedback_constraints(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
