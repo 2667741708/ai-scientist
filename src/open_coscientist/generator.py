@@ -336,6 +336,8 @@ class HypothesisGenerator:
 
         checkpointer = opts.get("checkpointer")
         checkpointer_enabled = checkpointer is not None
+        runtime_progress_callback = None if checkpointer_enabled else progress_callback
+        runtime_tool_registry = None if checkpointer_enabled else self._tool_registry
 
         # Build graph if not already built, or rebuild if checkpoint mode changed.
         if self._graph is None or self._graph_checkpointer_enabled != checkpointer_enabled:
@@ -362,7 +364,7 @@ class HypothesisGenerator:
             "metrics": ExecutionMetrics(),
             "start_time": start_time,
             "run_id": run_id,
-            "progress_callback": progress_callback,
+            "progress_callback": runtime_progress_callback,
             "messages": [],
             # system availability flags
             "mcp_available": mcp_available,
@@ -370,7 +372,7 @@ class HypothesisGenerator:
             "enable_tool_calling_generation": enable_tool_calling_generation,
             "dev_test_lit_tools_isolation": dev_test_lit_tools_isolation,
             # tool registry for config-driven tool selection
-            "tool_registry": self._tool_registry,
+            "tool_registry": runtime_tool_registry,
             # Optional user preferences and inputs
             "preferences": opts.get("preferences"),
             "attributes": opts.get("attributes"),
