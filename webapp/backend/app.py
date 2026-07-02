@@ -8666,16 +8666,61 @@ def worker_queue_snapshot(limit: int = 20) -> Dict[str, Any]:
     }
 
 
+def worker_status_guidance(*, enabled: bool, queue_health: str, active_count: int) -> Dict[str, Any]:
+    if not enabled and active_count > 0:
+        return {
+            "status": "worker_disabled",
+            "summary": "Background worker is disabled; queued research tasks will remain waiting until a worker is enabled or an administrator runs a manual worker tick.",
+            "next_actions": ["Enable the local worker", "Run an administrator worker tick", "Keep the run queued and check back later"],
+        }
+    if queue_health == "blocked":
+        return {
+            "status": "blocked",
+            "summary": "At least one background task is blocked and needs administrative review before it can continue.",
+            "next_actions": ["Open runtime readiness", "Review blocked task details", "Retry or cancel the affected task"],
+        }
+    if queue_health == "retrying":
+        return {
+            "status": "retrying",
+            "summary": "Some background tasks are retrying after a recoverable failure or expired lease.",
+            "next_actions": ["Wait for the next worker tick", "Review runtime readiness if retrying persists"],
+        }
+    if queue_health == "running":
+        return {
+            "status": "running",
+            "summary": "Background research work is currently running.",
+            "next_actions": ["Monitor run progress", "Open process and evidence details when results are available"],
+        }
+    if queue_health == "backlog":
+        return {
+            "status": "queued",
+            "summary": "Background research work is queued and waiting for an available worker slot.",
+            "next_actions": ["Wait for a worker slot", "Check runtime readiness if the queue does not move"],
+        }
+    return {
+        "status": "idle",
+        "summary": "No active background research work is waiting or running.",
+        "next_actions": ["Start a research run"],
+    }
+
+
 @app.get("/api/worker/status")
 async def get_worker_status() -> Dict[str, Any]:
     from open_coscientist.checkpointing import execution_memory_status
 
     runtime = worker_runtime or build_worker_runtime()
+    runtime_status = runtime.status()
+    queue_snapshot = worker_queue_snapshot()
     return {
-        **runtime.status(),
+        **runtime_status,
         "auto_start_enabled": WORKER_AUTOSTART_ENABLED,
         "execution_memory": execution_memory_status(),
-        **worker_queue_snapshot(),
+        **queue_snapshot,
+        "guidance": worker_status_guidance(
+            enabled=bool(runtime_status.get("enabled")),
+            queue_health=str(queue_snapshot.get("queue_health") or "idle"),
+            active_count=int(queue_snapshot.get("active_work_item_count") or 0),
+        ),
     }
 
 
@@ -8687,11 +8732,17 @@ async def tick_worker_once() -> Dict[str, Any]:
     if worker_runtime is None:
         worker_runtime = build_worker_runtime()
     result = await worker_runtime.tick()
+    queue_snapshot = worker_queue_snapshot()
     return {
         **result,
         "auto_start_enabled": WORKER_AUTOSTART_ENABLED,
         "execution_memory": execution_memory_status(),
-        **worker_queue_snapshot(),
+        **queue_snapshot,
+        "guidance": worker_status_guidance(
+            enabled=bool(result.get("enabled")),
+            queue_health=str(queue_snapshot.get("queue_health") or "idle"),
+            active_count=int(queue_snapshot.get("active_work_item_count") or 0),
+        ),
     }
 
 
