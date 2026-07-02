@@ -2643,6 +2643,25 @@ class KnowledgeBaseStore:
             )
         return self.get_checkpoint_metadata(normalized_id) or {}
 
+    def persist_checkpoint_metadata_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(record or {})
+        run_id = str(normalized.get("run_id") or "").strip()
+        thread_id = str(normalized.get("thread_id") or "").strip()
+        if not run_id or not thread_id:
+            raise ValueError("checkpoint metadata record requires run_id and thread_id")
+        if thread_id != run_id:
+            raise ValueError("checkpoint metadata record requires thread_id to match run_id")
+        return self.persist_checkpoint_metadata(
+            checkpoint_id=str(normalized.get("checkpoint_id") or "").strip() or None,
+            run_id=run_id,
+            thread_id=thread_id,
+            phase=str(normalized.get("phase") or "").strip() or None,
+            status=str(normalized.get("status") or "saved").strip() or "saved",
+            checkpoint_backend=str(normalized.get("checkpoint_backend") or "sqlite_metadata").strip(),
+            checkpoint_ref=normalized.get("checkpoint_ref"),
+            state_summary=normalized.get("state_summary") if isinstance(normalized.get("state_summary"), dict) else {},
+        )
+
     def get_checkpoint_metadata(self, checkpoint_id: str) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
             row = connection.execute(
