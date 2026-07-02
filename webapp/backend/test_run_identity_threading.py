@@ -57,6 +57,8 @@ def test_run_real_passes_record_run_id_to_generator(monkeypatch) -> None:
             iterations=0,
             min_references=0,
             max_references=1,
+            preferences="Prefer hypotheses with compact validation.",
+            attributes=["falsifiable", "evidence-grounded"],
         )
         record = studio.RunRecord(
             run_id="run-webapp-identity",
@@ -73,6 +75,8 @@ def test_run_real_passes_record_run_id_to_generator(monkeypatch) -> None:
     assert generate_kwargs["run_id"] == "run-webapp-identity"
     assert generate_kwargs["stream"] is False
     assert generate_kwargs["opts"]["enable_literature_review_node"] is False
+    assert generate_kwargs["opts"]["preferences"] == "Prefer hypotheses with compact validation."
+    assert generate_kwargs["opts"]["attributes"] == ["falsifiable", "evidence-grounded"]
     if record.metrics["execution_memory"]["langgraph_checkpoint_sqlite_available"]:
         assert generate_kwargs["opts"]["checkpointer"] is not None
     else:
