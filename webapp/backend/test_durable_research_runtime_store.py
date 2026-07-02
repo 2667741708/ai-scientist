@@ -223,6 +223,8 @@ def test_active_work_item_snapshot_hides_internal_refs_by_default() -> None:
         snapshot = store.active_work_item_snapshot(run_id="run-snapshot")
         assert snapshot["counts"]["retrying"] == 1
         assert snapshot["counts"]["active"] == 1
+        assert snapshot["recovery_action_counts"]["retry"] == 1
+        assert snapshot["recovery_action_counts"]["wait"] == 0
         assert snapshot["filters"]["run_id"] is True
         assert snapshot["items"][0]["status"] == "retrying"
         assert snapshot["items"][0]["workflow_label"] == "Research run"
