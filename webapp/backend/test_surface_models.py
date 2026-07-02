@@ -430,6 +430,7 @@ def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> No
                 "status": "queued",
                 "status_label": "Queued",
                 "phase": "generate",
+                "recovery_action": "wait",
                 "next_action": "Wait for worker.",
             }
         ],
@@ -466,6 +467,7 @@ def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> No
     assert summary["counts"] == {"hypotheses": 0, "starting_hypotheses": 1, "user_feedback": 1}
     assert summary["queue"]["active_work_item_count"] == 1
     assert summary["queue"]["current_work_status"] == "queued"
+    assert summary["queue"]["current_work_recovery_action"] == "wait"
     assert summary["memory"]["feedback_count"] == 1
     assert summary["memory"]["evidence_source_count"] == 3
     assert summary["memory"]["execution_memory_status"] == "limited"
