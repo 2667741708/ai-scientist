@@ -178,6 +178,25 @@ class RunRequest(BaseModel):
     library_id: Optional[str] = Field(default=None, max_length=120)
 
 
+class ContinueRunRequest(BaseModel):
+    research_goal: Optional[str] = Field(default=None, min_length=8)
+    model_name: Optional[str] = None
+    demo_mode: Optional[bool] = None
+    literature_review: Optional[bool] = None
+    initial_hypotheses: Optional[int] = Field(default=None, ge=1, le=8)
+    iterations: Optional[int] = Field(default=None, ge=0, le=3)
+    min_references: Optional[int] = Field(default=None, ge=0, le=12)
+    max_references: Optional[int] = Field(default=None, ge=0, le=12)
+    preferences: Optional[str] = Field(default=None, max_length=4000)
+    attributes: List[str] = Field(default_factory=list, max_length=20)
+    constraints: List[str] = Field(default_factory=list, max_length=40)
+    starting_hypotheses: List[str] = Field(default_factory=list, max_length=20)
+    user_feedback: List[FeedbackItem] = Field(default_factory=list, max_length=40)
+    refinement_mode: Literal["new_run", "continue_from_run", "revise_hypotheses"] = "continue_from_run"
+    memory_scope: Optional[Literal["current_run", "project", "library", "global"]] = None
+    library_id: Optional[str] = Field(default=None, max_length=120)
+
+
 class TranslationRequest(BaseModel):
     model_name: str = "deepseek/deepseek-v4-pro"
     text: str = Field(..., min_length=1)
@@ -9276,6 +9295,39 @@ async def create_run(request: RunRequest) -> Dict[str, str]:
         },
     )
     return {"run_id": run_id, "work_item_id": work_item.get("work_item_id", "")}
+
+
+@app.post("/api/runs/{run_id}/continue")
+async def continue_run(run_id: str, request: ContinueRunRequest) -> Dict[str, str]:
+    parent = load_run_record(run_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    parent_request = parent.request
+    continued_request = RunRequest(
+        research_goal=request.research_goal or parent_request.research_goal,
+        model_name=request.model_name or parent_request.model_name,
+        demo_mode=parent_request.demo_mode if request.demo_mode is None else request.demo_mode,
+        literature_review=parent_request.literature_review
+        if request.literature_review is None
+        else request.literature_review,
+        initial_hypotheses=request.initial_hypotheses or parent_request.initial_hypotheses,
+        iterations=parent_request.iterations if request.iterations is None else request.iterations,
+        min_references=parent_request.min_references if request.min_references is None else request.min_references,
+        max_references=parent_request.max_references if request.max_references is None else request.max_references,
+        preferences=request.preferences if request.preferences is not None else parent_request.preferences,
+        attributes=[*parent_request.attributes, *request.attributes],
+        constraints=[*parent_request.constraints, *request.constraints],
+        starting_hypotheses=[*parent_request.starting_hypotheses, *request.starting_hypotheses],
+        user_feedback=request.user_feedback,
+        parent_run_id=run_id,
+        refinement_mode=request.refinement_mode,
+        memory_scope=request.memory_scope or parent_request.memory_scope,
+        library_id=request.library_id if request.library_id is not None else parent_request.library_id,
+    )
+    response = await create_run(continued_request)
+    response["parent_run_id"] = run_id
+    return response
 
 
 @app.get("/api/runs/{run_id}")
