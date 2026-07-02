@@ -129,6 +129,83 @@ def test_execution_recovery_policy_summarizes_resume_and_retry_modes() -> None:
     assert failed_without_checkpoint["work_item_recoverable"] is False
 
 
+def test_build_checkpoint_metadata_record_hides_raw_workflow_state() -> None:
+    from open_coscientist.checkpointing import build_checkpoint_metadata_record
+
+    record = build_checkpoint_metadata_record(
+        run_id=" run-checkpoint-metadata ",
+        phase=" review ",
+        status=" saved ",
+        checkpoint_ref="checkpoint-ref-secret",
+        state_summary={
+            "research_goal": "SECRET RESEARCH GOAL should not be persisted in metadata summary.",
+            "hypotheses": [
+                {"text": "SECRET HYPOTHESIS TEXT"},
+                {"text": "Another hidden hypothesis"},
+            ],
+            "messages": [{"content": "SECRET MESSAGE"}],
+            "tournament_matchups": [{"winner": "hidden"}],
+            "evolution_details": [{"lineage": "hidden"}],
+            "memory_context": {"raw": "SECRET MEMORY"},
+            "starting_hypotheses": ["SECRET USER SEED"],
+            "current_iteration": 2,
+            "progress_callback": lambda *_args: None,
+            "tool_registry": object(),
+        },
+        checkpoint_tuple_summary={
+            "checkpoint_id": " checkpoint-secret ",
+            "checkpoint_ns": " execution-memory ",
+            "parent_checkpoint_id": "parent-checkpoint-secret",
+            "checkpoint_ts": "2026-07-02T00:00:00Z",
+            "channel_keys": ["hypotheses", "messages", "research_goal"],
+            "pending_writes_count": 3,
+        },
+    )
+
+    assert record["run_id"] == "run-checkpoint-metadata"
+    assert record["thread_id"] == "run-checkpoint-metadata"
+    assert record["thread_id_matches_run_id"] is True
+    assert record["phase"] == "review"
+    assert record["status"] == "saved"
+    assert record["checkpoint_id"] == "checkpoint-secret"
+    assert record["checkpoint_ns"] == "execution-memory"
+    assert record["checkpoint_backend"] == "langgraph_sqlite"
+    assert record["resume_config"]["configurable"] == {
+        "thread_id": "run-checkpoint-metadata",
+        "checkpoint_ns": "execution-memory",
+        "checkpoint_id": "checkpoint-secret",
+    }
+    assert record["checkpoint_tuple"]["parent_checkpoint_id"] == "parent-checkpoint-secret"
+    assert record["checkpoint_tuple"]["channel_keys"] == ["hypotheses", "messages", "research_goal"]
+    assert record["checkpoint_tuple"]["pending_writes_count"] == 3
+    assert record["state_summary"]["hypothesis_count"] == 2
+    assert record["state_summary"]["message_count"] == 1
+    assert record["state_summary"]["tournament_matchup_count"] == 1
+    assert record["state_summary"]["evolution_detail_count"] == 1
+    assert record["state_summary"]["current_iteration"] == 2
+    assert record["state_summary"]["has_memory_context"] is True
+    assert record["state_summary"]["has_starting_hypotheses"] is True
+    assert record["state_summary"]["omitted_runtime_only_keys"] == [
+        "progress_callback",
+        "tool_registry",
+    ]
+    assert "SECRET" not in str(record["state_summary"])
+    assert "SECRET" not in record["visibility_boundary"]
+
+
+def test_build_checkpoint_metadata_record_enforces_thread_id_run_id_contract() -> None:
+    from open_coscientist.checkpointing import build_checkpoint_metadata_record
+
+    with pytest.raises(ValueError, match="thread_id to match run_id"):
+        build_checkpoint_metadata_record(
+            run_id="run-a",
+            thread_id="run-b",
+        )
+
+    with pytest.raises(ValueError, match="run_id is required"):
+        build_checkpoint_metadata_record(run_id="   ")
+
+
 def test_sanitize_workflow_state_removes_runtime_only_values() -> None:
     from open_coscientist.checkpointing import sanitize_workflow_state_for_checkpoint
 
