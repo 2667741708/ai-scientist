@@ -169,6 +169,13 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
             feedback_type="prefer",
             text="Prefer this because it is easier to falsify.",
         )
+        store.store_feedback_item(
+            run_id="run_memory",
+            target_type="run",
+            target_ref={},
+            feedback_type="critique",
+            text="Run-level critique should not match hypothesis preference filters.",
+        )
         checkpoint = store.persist_checkpoint_metadata(
             checkpoint_id="checkpoint_memory",
             run_id="run_memory",
@@ -180,6 +187,12 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         )
 
         assert store.get_feedback_item(feedback["feedback_id"])["target_ref"]["hypothesis_index"] == 0
+        hypothesis_preferences = store.list_feedback_items(
+            run_id="run_memory",
+            target_type="hypothesis",
+            feedback_type="prefer",
+        )
+        assert [item["feedback_id"] for item in hypothesis_preferences] == [feedback["feedback_id"]]
         assert store.latest_checkpoint_metadata("run_memory")["checkpoint_id"] == checkpoint["checkpoint_id"]
 
         memory = store.build_memory_context(
@@ -189,7 +202,7 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         )
         assert memory["parent_run"]["run_id"] == "run_memory"
         assert memory["prior_hypotheses"][0]["hypothesis_id"] == "hyp_1"
-        assert memory["user_feedback"][0]["feedback_type"] == "prefer"
+        assert {item["feedback_type"] for item in memory["user_feedback"]} == {"critique", "prefer"}
         assert memory["memory_sources"] == [
             "parent_run",
             "prior_hypotheses",
