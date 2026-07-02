@@ -2601,6 +2601,47 @@ class KnowledgeBaseStore:
         checkpoints = self.list_checkpoint_metadata(run_id=run_id, limit=1)
         return checkpoints[0] if checkpoints else None
 
+    def checkpoint_status_summary(self, run_id: str) -> Dict[str, Any]:
+        normalized_run_id = (run_id or "").strip()
+        latest = self.latest_checkpoint_metadata(normalized_run_id) if normalized_run_id else None
+        if not latest:
+            return {
+                "status": "not_available",
+                "run_id": normalized_run_id or None,
+                "checkpoint_available": False,
+                "resume_supported": False,
+                "resume_mode": "none",
+                "latest_checkpoint": None,
+                "resume_config_fields": [],
+                "boundary": "No checkpoint metadata has been persisted for this run.",
+            }
+
+        backend = str(latest.get("checkpoint_backend") or "")
+        resume_supported = backend == "langgraph_sqlite"
+        return {
+            "status": "ready" if resume_supported else "limited",
+            "run_id": normalized_run_id,
+            "thread_id": latest.get("thread_id"),
+            "checkpoint_available": True,
+            "resume_supported": resume_supported,
+            "resume_mode": "langgraph_thread_resume" if resume_supported else "metadata_only_retry",
+            "latest_checkpoint": {
+                "checkpoint_id": latest.get("checkpoint_id"),
+                "phase": latest.get("phase"),
+                "status": latest.get("status"),
+                "checkpoint_backend": backend,
+                "checkpoint_ref": latest.get("checkpoint_ref"),
+                "updated_at": latest.get("updated_at"),
+                "state_summary": latest.get("state_summary") or {},
+            },
+            "resume_config_fields": ["thread_id", "checkpoint_id", "checkpoint_ns"] if resume_supported else ["thread_id"],
+            "boundary": (
+                "Latest checkpoint can be used with LangGraph thread resume."
+                if resume_supported
+                else "Checkpoint metadata is available for audit/retry guidance, but full LangGraph state resume remains limited."
+            ),
+        }
+
     def build_memory_context(
         self,
         *,
