@@ -240,3 +240,45 @@ async def test_worker_retries_and_completes_after_stale_lease_tick() -> None:
         assert completed["attempt_count"] == 2
         assert completed["result_ref"]["value"] == "recover-late"
         assert completed["result_ref"]["attempt"] == 2
+
+
+@pytest.mark.anyio
+async def test_worker_skips_handler_when_running_mark_loses_lease() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.test",
+            arguments={"value": "do-not-run"},
+        )
+        leased = store.lease_work_items(owner="lease-conflict-worker", lease_seconds=1)
+        with store._connection() as connection:
+            connection.execute(
+                """
+                UPDATE research_work_items
+                SET lease_expires_at = ?
+                WHERE work_item_id = ?
+                """,
+                (0, leased[0]["work_item_id"]),
+            )
+
+        calls = {"count": 0}
+
+        async def handler(_work_item):
+            calls["count"] += 1
+            return {"handled": True}
+
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={"workflow.test": handler},
+            owner="lease-conflict-worker",
+            concurrency=1,
+            enabled=True,
+        )
+
+        result = await runtime._execute_work_item(leased[0])
+
+        assert result["status"] == "lease_conflict"
+        assert calls["count"] == 0
+        stale = store.get_work_item(item["work_item_id"])
+        assert stale["status"] == "leased"
+        assert stale["result_ref"] == {}
