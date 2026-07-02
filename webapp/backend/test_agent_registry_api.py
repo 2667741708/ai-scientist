@@ -149,6 +149,63 @@ def test_agent_trace_contract_canonicalizes_runtime_phase_aliases(monkeypatch) -
         assert "raw provider payloads" in contract["boundary"]
 
 
+def test_agent_trace_surface_summary_hides_expert_details_by_default(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        from open_coscientist.agents import agent_trace_surface_summary as exported_trace_summary
+        from open_coscientist.agents.registry import agent_trace_surface_summary
+
+        trace = [
+            {
+                "event_id": "event-secret-review",
+                "phase": "review",
+                "agent_id": "hypothesis_review_agent",
+                "output": "Reviewed soundness and feasibility for the candidate.",
+                "prompt_template": "prompts/review.md",
+                "tool_calls": [{"args": {"raw": "SECRET TOOL ARG"}}],
+                "token_usage": {"total_tokens": 1234},
+                "confidence": 0.8,
+            },
+            {
+                "event_id": "event-secret-literature",
+                "phase": "literature",
+                "output_summary": "Literature grounding is unavailable.",
+                "degradation_reason": "literature_review_disabled_latent_knowledge_boundary",
+                "synthetic": True,
+            },
+            {
+                "event_id": "event-secret-unknown",
+                "phase": "vendor_extra",
+                "output": "Vendor extra trace event.",
+            },
+        ]
+
+        summary = agent_trace_surface_summary(trace)
+
+        assert summary["phase_order"] == ["literature_review", "review", "vendor_extra"]
+        assert summary["trace_count"] == 3
+        assert summary["degradation_count"] == 1
+        assert summary["synthetic_count"] == 1
+        assert summary["unknown_phases"] == ["vendor_extra"]
+        assert summary["items"][0]["status"] == "degraded"
+        assert summary["items"][0]["label"] == "Literature grounding"
+        assert summary["items"][1]["tool_call_count"] == 1
+        assert "prompt_template" not in summary["items"][1]
+        assert "event_id" not in summary["items"][1]
+        assert "token_usage" not in summary["items"][1]
+        assert "SECRET TOOL ARG" not in str(summary)
+        assert "event-secret" not in str(summary)
+        assert exported_trace_summary(trace)["phase_order"] == summary["phase_order"]
+
+        expert_summary = agent_trace_surface_summary(trace, include_internal_refs=True)
+        assert expert_summary["items"][1]["event_id"] == "event-secret-review"
+        assert expert_summary["items"][1]["prompt_template"] == "prompts/review.md"
+        assert expert_summary["items"][1]["token_usage"] == {"total_tokens": 1234}
+        assert expert_summary["items"][1]["confidence"] == 0.8
+
+
 def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
     tempdir = tempfile.TemporaryDirectory()
     studio = load_studio_app(monkeypatch, tempdir.name)
