@@ -57,12 +57,16 @@ def test_create_run_enqueues_durable_work_item(monkeypatch) -> None:
         assert "arguments and result payloads are intentionally omitted" in worker_status["boundary"]
         assert worker_status["execution_memory"]["thread_id_source"] == "run_id"
         assert worker_status["execution_memory"]["status"] in {"limited", "ready"}
+        assert worker_status["guidance"]["status"] == "queued"
+        assert "queued" in worker_status["guidance"]["summary"]
+        assert "Wait for a worker slot" in worker_status["guidance"]["next_actions"]
 
         tick_status = client.post("/api/worker/tick").json()
         assert tick_status["auto_start_enabled"] is False
         assert tick_status["execution_memory"]["thread_id_source"] == "run_id"
         assert tick_status["execution_memory"]["status"] in {"limited", "ready"}
         assert tick_status["queue_health"] in {"backlog", "running"}
+        assert tick_status["guidance"]["status"] in {"queued", "running"}
         assert "arguments and result payloads are intentionally omitted" in tick_status["boundary"]
         for active_item in tick_status["active_work_items"]:
             assert "arguments" not in active_item
