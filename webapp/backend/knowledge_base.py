@@ -2328,6 +2328,24 @@ class KnowledgeBaseStore:
             )
         return result.rowcount > 0
 
+    def renew_work_item_lease(self, work_item_id: str, owner: str, lease_seconds: int = 300) -> bool:
+        now = time.time()
+        lease_until = now + max(1, int(lease_seconds or 1))
+        with self._connection() as connection:
+            result = connection.execute(
+                """
+                UPDATE research_work_items
+                SET lease_expires_at = ?,
+                    updated_at = ?
+                WHERE work_item_id = ?
+                  AND lease_owner = ?
+                  AND status IN ('leased', 'running')
+                  AND (lease_expires_at IS NULL OR lease_expires_at > ?)
+                """,
+                (lease_until, now, work_item_id, owner, now),
+            )
+        return result.rowcount > 0
+
     def complete_work_item(self, work_item_id: str, result_ref: Optional[Dict[str, Any]] = None) -> None:
         with self._connection() as connection:
             connection.execute(
