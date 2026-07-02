@@ -2166,7 +2166,7 @@ def _work_queue_item_surface(item: Mapping[str, Any], *, index: int) -> Dict[str
     status = str(_first_value(item, ("status",)) or "unknown").lower()
     attempt_count = _safe_int(_first_value(item, ("attempt_count", "attempts"))) or 0
     max_attempts = _safe_int(_first_value(item, ("max_attempts",))) or 0
-    return {
+    surface = {
         "index": index + 1,
         "status": status,
         "status_label": _first_value(item, ("status_label",)) or _work_queue_status_label(status),
@@ -2183,6 +2183,10 @@ def _work_queue_item_surface(item: Mapping[str, Any], *, index: int) -> Dict[str
         "attempts": {"current": attempt_count, "max": max_attempts},
         "next_action": _first_value(item, ("next_action",)) or _work_queue_item_next_action(status),
     }
+    recovery_action = _first_value(item, ("recovery_action",))
+    if recovery_action:
+        surface["recovery_action"] = _compact_text(recovery_action, max_length=40)
+    return surface
 
 
 def _work_queue_status_label(status: str) -> str:
