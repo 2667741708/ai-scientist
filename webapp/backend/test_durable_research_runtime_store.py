@@ -341,7 +341,91 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         assert memory["evidence_boundary"]["status"] == "absent"
         assert memory["evidence_boundary"]["evidence_count"] == 0
         assert "absent evidence is not support" in memory["evidence_boundary"]["boundary"]
+        assert memory["injection_policy"]["mode"] == "summary_only"
+        assert memory["injection_policy"]["memory_scope"] == "project"
+        assert memory["injection_policy"]["memory_sources"] == [
+            "parent_run",
+            "prior_hypotheses",
+            "chat_feedback",
+        ]
+        assert memory["injection_policy"]["prompt_sections"] == [
+            "parent_run_summary",
+            "prior_hypothesis_summaries",
+            "feedback_type_and_target_summary",
+        ]
+        assert memory["injection_policy"]["counts"] == {
+            "related_runs": 0,
+            "prior_hypotheses": 1,
+            "feedback_items": 2,
+            "evidence_summaries": 0,
+            "known_gaps": 0,
+        }
+        assert memory["injection_policy"]["raw_injection_allowed"] is False
+        assert memory["injection_policy"]["target_prompts"] == ["supervisor", "generate", "review", "ranking"]
         assert memory["memory_boundary"] == "Summaries only; raw records are not injected."
+
+
+def test_memory_context_injection_policy_is_summary_only_and_hides_raw_payloads() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        store.record_research_run(
+            {
+                "run_id": "run_injection_policy",
+                "status": "complete",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {"research_goal": "SECRET RAW GOAL should not be in injection policy"},
+                "hypotheses": [
+                    {
+                        "id": "hyp_injection_secret",
+                        "text": "SECRET HYPOTHESIS TEXT should not appear in injection policy.",
+                    }
+                ],
+            }
+        )
+        store.store_feedback_item(
+            run_id="run_injection_policy",
+            target_type="hypothesis",
+            target_ref={"hypothesis_id": "hyp_injection_secret"},
+            feedback_type="critique",
+            text="SECRET FEEDBACK TEXT should not appear in injection policy.",
+        )
+        store.ingest(
+            title="Injection policy evidence",
+            content="Injection policy should use parsed fulltext evidence summaries only.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+
+        memory = store.build_memory_context(
+            research_goal="Injection policy parsed fulltext evidence",
+            parent_run_id="run_injection_policy",
+            memory_scope="project",
+        )
+        policy = memory["injection_policy"]
+
+        assert policy["mode"] == "summary_only"
+        assert policy["raw_injection_allowed"] is False
+        assert "parent_run_summary" in policy["prompt_sections"]
+        assert "prior_hypothesis_summaries" in policy["prompt_sections"]
+        assert "feedback_type_and_target_summary" in policy["prompt_sections"]
+        assert "evidence_boundary_and_snippet_summaries" in policy["prompt_sections"]
+        assert policy["counts"]["prior_hypotheses"] == 1
+        assert policy["counts"]["feedback_items"] == 1
+        assert policy["counts"]["evidence_summaries"] >= 1
+        assert policy["evidence_status"] == "parsed_fulltext"
+        assert policy["excluded_raw_fields"] == [
+            "chat_message_bodies",
+            "feedback_text",
+            "hypothesis_full_text",
+            "checkpoint_state",
+            "tool_result_json",
+            "provider_payloads",
+            "full_pdf_chunks",
+        ]
+        assert "SECRET" not in str(policy)
+        assert "hyp_injection_secret" not in str(policy)
+        assert "raw chat" in policy["boundary"]
 
 
 def test_memory_context_surface_summary_hides_raw_details_by_default() -> None:
