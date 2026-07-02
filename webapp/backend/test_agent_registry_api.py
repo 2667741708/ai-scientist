@@ -211,6 +211,7 @@ def test_agent_trace_contract_audit_reports_metadata_coverage_without_raw_payloa
     load_studio_app(monkeypatch, tempdir.name)
 
     with tempdir:
+        from open_coscientist.agents import agent_trace_contract_audit as exported_audit
         from open_coscientist.agents.registry import agent_trace_contract_audit, get_trace_contract_payload
 
         ready_trace = [
@@ -231,8 +232,11 @@ def test_agent_trace_contract_audit_reports_metadata_coverage_without_raw_payloa
         ]
 
         ready = agent_trace_contract_audit(ready_trace)
+        exported_ready = exported_audit(ready_trace)
 
         assert ready["status"] == "partial"
+        assert exported_ready["status"] == ready["status"]
+        assert exported_ready["phase_order"] == ready["phase_order"]
         assert ready["trace_count"] == 2
         assert ready["phase_order"] == ["supervisor", "ranking"]
         assert ready["counts"] == {
