@@ -13,6 +13,86 @@ HYPOTHESIS_ORIGIN_LABELS = {
 }
 
 
+RUN_STATUS_LABELS = {
+    "queued": "Queued",
+    "pending": "Pending",
+    "running": "Running",
+    "complete": "Complete",
+    "completed": "Complete",
+    "error": "Error",
+    "failed": "Error",
+    "cancelled": "Cancelled",
+    "stale": "Needs recovery",
+}
+
+
+def run_surface_summary(
+    run: Any,
+    *,
+    work_item_snapshot: Optional[Mapping[str, Any]] = None,
+    memory_summary: Optional[Mapping[str, Any]] = None,
+    recovery_policy: Optional[Mapping[str, Any]] = None,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = _as_mapping(run)
+    request = _as_mapping(source.get("request"))
+    metrics = _as_mapping(source.get("metrics"))
+    work_snapshot = _as_mapping(work_item_snapshot)
+    memory = _as_mapping(memory_summary)
+    recovery = _as_mapping(recovery_policy)
+    status = str(source.get("status") or "unknown").strip() or "unknown"
+    work_item = _first_work_item(work_snapshot)
+    phase = str(
+        _first_value(work_item, ("phase",))
+        or _first_value(metrics, ("current_phase", "phase"))
+        or source.get("current_phase")
+        or ""
+    ).strip()
+    mode_boundary = _run_mode_boundary(request=request, metrics=metrics, memory_summary=memory)
+    recoverable = _run_recoverable(status=status, work_item=work_item, recovery_policy=recovery)
+    hypothesis_count = _list_length(source.get("hypotheses"))
+    if hypothesis_count == 0:
+        hypothesis_count = _safe_int(metrics.get("hypothesis_count")) or 0
+
+    summary = {
+        "status": status,
+        "status_label": RUN_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        "phase": phase or None,
+        "phase_label": _phase_label(phase),
+        "mode_boundary": mode_boundary,
+        "recoverable": recoverable,
+        "next_actions": _run_next_actions(status=status, recoverable=recoverable, mode_boundary=mode_boundary),
+        "counts": {
+            "hypotheses": hypothesis_count,
+            "starting_hypotheses": _list_length(request.get("starting_hypotheses")),
+            "user_feedback": _list_length(request.get("user_feedback")),
+        },
+        "queue": _run_queue_summary(work_snapshot, work_item),
+        "memory": _run_memory_summary_for_surface(memory),
+        "recovery": _run_recovery_summary(recovery),
+        "created_at": source.get("created_at"),
+        "updated_at": source.get("updated_at"),
+        "visibility_boundary": (
+            "Run surface summaries expose task state, mode boundary, queue counts, memory counts, "
+            "and recovery guidance by default; raw request JSON, run IDs, work item IDs, checkpoint "
+            "refs, and provider diagnostics require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "run_id": source.get("run_id"),
+            "parent_run_id": request.get("parent_run_id"),
+            "work_item_ids": [
+                item.get("work_item_id")
+                for item in (work_snapshot.get("items") if isinstance(work_snapshot.get("items"), list) else [])
+                if isinstance(item, Mapping) and item.get("work_item_id")
+            ],
+            "checkpoint_id": _as_mapping(recovery.get("latest_checkpoint")).get("checkpoint_id")
+            or recovery.get("checkpoint_id"),
+        }
+    return summary
+
+
 def hypothesis_surface_summary(
     hypothesis: Any,
     *,
@@ -208,3 +288,125 @@ def _list_length(value: Any) -> int:
 def _citation_count(source: Mapping[str, Any]) -> int:
     citations = _first_value(source, ("citation_map", "citations", "evidence_links"))
     return _list_length(citations)
+
+
+def _first_work_item(work_snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    items = work_snapshot.get("items")
+    if isinstance(items, list) and items:
+        first = items[0]
+        if isinstance(first, Mapping):
+            return first
+    return {}
+
+
+def _run_mode_boundary(
+    *,
+    request: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    memory_summary: Mapping[str, Any],
+) -> Dict[str, Any]:
+    demo_mode = bool(request.get("demo_mode"))
+    literature_review = bool(request.get("literature_review"))
+    evidence_boundary = _as_mapping(memory_summary.get("evidence_boundary"))
+    evidence_status = str(
+        evidence_boundary.get("status")
+        or _as_mapping(metrics.get("evidence_boundary")).get("status")
+        or "absent"
+    )
+    if demo_mode:
+        mode = "demo_only"
+        label = "Demo simulation"
+        scientific_claim_level = "not_scientific_evidence"
+    elif literature_review or evidence_status in {"parsed_fulltext", "experimental_data"}:
+        mode = "literature_grounded"
+        label = "Literature-grounded"
+        scientific_claim_level = "source_backed_limited_by_evidence"
+    else:
+        mode = "live_model"
+        label = "Live model"
+        scientific_claim_level = "model_without_literature_grounding"
+    return {
+        "mode": mode,
+        "label": label,
+        "evidence_status": evidence_status,
+        "scientific_claim_level": scientific_claim_level,
+    }
+
+
+def _run_recoverable(
+    *,
+    status: str,
+    work_item: Mapping[str, Any],
+    recovery_policy: Mapping[str, Any],
+) -> bool:
+    if recovery_policy:
+        return bool(recovery_policy.get("can_resume") or recovery_policy.get("should_retry"))
+    work_status = str(work_item.get("status") or "")
+    if work_status in {"queued", "leased", "running", "retrying", "blocked"}:
+        return True
+    return status in {"queued", "pending", "running", "stale"}
+
+
+def _run_next_actions(
+    *,
+    status: str,
+    recoverable: bool,
+    mode_boundary: Mapping[str, Any],
+) -> list[str]:
+    if status in {"complete", "completed"}:
+        actions = ["inspect_hypotheses", "inspect_evidence", "design_experiment"]
+        if mode_boundary.get("mode") == "demo_only":
+            actions.append("rerun_live_or_grounded")
+        return actions
+    if status in {"queued", "pending"}:
+        return ["monitor_queue", "check_worker_status"]
+    if status == "running":
+        return ["monitor_progress", "view_process_summary"]
+    if status in {"error", "failed", "stale"}:
+        return ["resume_or_retry" if recoverable else "start_new_run", "inspect_failure_summary"]
+    if status == "cancelled":
+        return ["start_new_run"]
+    return ["inspect_run"]
+
+
+def _run_queue_summary(work_snapshot: Mapping[str, Any], work_item: Mapping[str, Any]) -> Dict[str, Any]:
+    counts = _as_mapping(work_snapshot.get("counts"))
+    return {
+        "active_work_item_count": _safe_int(counts.get("active")) or 0,
+        "queued_count": _safe_int(counts.get("queued")) or 0,
+        "retrying_count": _safe_int(counts.get("retrying")) or 0,
+        "running_count": _safe_int(counts.get("running")) or 0,
+        "current_work_status": work_item.get("status"),
+        "current_work_label": work_item.get("status_label"),
+        "current_work_next_action": work_item.get("next_action"),
+    }
+
+
+def _run_memory_summary_for_surface(memory: Mapping[str, Any]) -> Dict[str, Any]:
+    counts = _as_mapping(memory.get("counts"))
+    execution_memory = _as_mapping(memory.get("execution_memory"))
+    evidence_boundary = _as_mapping(memory.get("evidence_boundary"))
+    return {
+        "memory_scope": memory.get("memory_scope"),
+        "memory_sources": list(memory.get("memory_sources") or []),
+        "feedback_count": _safe_int(counts.get("user_feedback")) or 0,
+        "prior_hypothesis_count": _safe_int(counts.get("prior_hypotheses")) or 0,
+        "evidence_source_count": _safe_int(counts.get("evidence_sources")) or 0,
+        "execution_memory_status": execution_memory.get("status"),
+        "evidence_status": evidence_boundary.get("status"),
+    }
+
+
+def _run_recovery_summary(recovery: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "recovery_mode": recovery.get("recovery_mode"),
+        "can_resume": bool(recovery.get("can_resume")),
+        "should_retry": bool(recovery.get("should_retry")),
+        "next_action": recovery.get("next_action"),
+    }
+
+
+def _phase_label(phase: str) -> Optional[str]:
+    if not phase:
+        return None
+    return phase.replace("_", " ").title()
