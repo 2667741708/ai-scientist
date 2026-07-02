@@ -345,6 +345,7 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
             "parent_run",
             "prior_hypotheses",
             "chat_feedback",
+            "execution_memory",
         ]
         assert memory["evidence_boundary"]["status"] == "absent"
         assert memory["evidence_boundary"]["evidence_count"] == 0
@@ -355,16 +356,19 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
             "parent_run",
             "prior_hypotheses",
             "chat_feedback",
+            "execution_memory",
         ]
         assert memory["injection_policy"]["prompt_sections"] == [
             "parent_run_summary",
             "prior_hypothesis_summaries",
             "feedback_type_and_target_summary",
+            "execution_memory_summary",
         ]
         assert memory["injection_policy"]["counts"] == {
             "related_runs": 0,
             "prior_hypotheses": 1,
             "feedback_items": 2,
+            "execution_memory": 1,
             "evidence_summaries": 0,
             "known_gaps": 0,
         }
@@ -582,6 +586,16 @@ def test_memory_context_prompt_packet_is_summary_only() -> None:
             feedback_type="critique",
             text="SECRET FEEDBACK TEXT should not be injected.",
         )
+        store.persist_checkpoint_metadata(
+            checkpoint_id="checkpoint_prompt_secret",
+            run_id="run_prompt_packet",
+            thread_id="run_prompt_packet",
+            phase="review",
+            status="saved",
+            checkpoint_backend="metadata_only",
+            checkpoint_ref="SECRET CHECKPOINT REF should not be injected.",
+            state_summary={"secret": "SECRET CHECKPOINT STATE should not be injected."},
+        )
         store.ingest(
             title="Prompt packet evidence",
             content="Prompt packet evidence should use parsed fulltext summary snippets.",
@@ -600,7 +614,7 @@ def test_memory_context_prompt_packet_is_summary_only() -> None:
         assert packet["memory_scope"] == "project"
         assert packet["target_prompts"] == ["supervisor", "generate", "review", "ranking"]
         assert packet["raw_injection_allowed"] is False
-        assert packet["section_count"] >= 4
+        assert packet["section_count"] >= 5
         sections = {section["section"]: section for section in packet["sections"]}
         assert sections["parent_run_summary"]["items"][0]["research_goal"] == "Prompt packet memory policy"
         assert sections["prior_hypothesis_summaries"]["items"][0] == {
@@ -613,10 +627,22 @@ def test_memory_context_prompt_packet_is_summary_only() -> None:
             "target_type": "hypothesis",
             "source": "user",
         }
+        assert sections["execution_memory_summary"]["items"][0] == {
+            "status": "limited",
+            "checkpoint_available": True,
+            "resume_supported": False,
+            "can_resume": False,
+            "should_retry": True,
+            "recovery_action": "retry",
+            "next_actions": ["retry_from_durable_queue", "inspect_checkpoint_metadata"],
+            "resume_mode": "metadata_only_retry",
+            "phase": "review",
+        }
         assert sections["evidence_boundary_and_snippet_summaries"]["items"][0]["source_reliability"] == "parsed_fulltext"
         assert "feedback_text" in packet["excluded_raw_fields"]
         assert "SECRET" not in str(packet)
         assert "hyp_prompt_secret" not in str(packet)
+        assert "checkpoint_prompt_secret" not in str(packet)
         assert "raw feedback text" in packet["boundary"]
 
 
