@@ -7,6 +7,7 @@ from surface_models import (
     hypothesis_surface_collection,
     hypothesis_surface_summary,
     ranking_surface_summary,
+    report_surface_summary,
     runtime_readiness_surface_summary,
     run_confirmation_surface_summary,
     run_surface_summary,
@@ -512,6 +513,99 @@ def test_experiment_design_surface_summary_reports_absent_plan() -> None:
     assert "observable_variables" in summary["missing_sections"]
     assert summary["plan_summary"] == ""
     assert summary["next_actions"] == ["draft_experiment_plan", "select_hypothesis"]
+
+
+def test_report_surface_summary_composes_auditable_output_without_raw_payload() -> None:
+    report = {
+        "run_id": "run-report-secret",
+        "report_id": "report-secret",
+        "request": {"research_goal": "Audit retrieval-grounded hypothesis generation", "demo_mode": False, "literature_review": True},
+        "findings": ["Retrieval-grounded candidates show clearer evidence boundaries."],
+        "limitations": ["Pilot-scale evidence only."],
+        "citation_provenance_qa": {"status": "passed", "summary": "All displayed citations have source metadata."},
+        "raw_tool_result": {"debug": "provider-secret"},
+    }
+    hypotheses = [
+        {
+            "id": "hyp-report-secret",
+            "title": "Retrieval audit protocol",
+            "explanation": "A protocol that forces claims through evidence and experiment gates.",
+            "elo_rating": 1532,
+            "support_level": "fulltext",
+            "experiment_plan": "Run a 50-claim pilot against a flat baseline.",
+            "observable_variables": ["claim support precision"],
+            "controls": ["flat baseline"],
+            "metrics": ["support precision"],
+            "failure_conditions": ["Fails if support precision stays below 0.70."],
+            "alternative_explanations": ["Reviewer wording preference."],
+            "required_data": ["parsed fulltext corpus"],
+            "minimal_validation_path": "Run a 50-claim pilot.",
+        }
+    ]
+    evidence = [
+        {
+            "paper_id": "paper-report-secret",
+            "chunk_id": "chunk-report-secret",
+            "title": "Fulltext benchmark",
+            "source_reliability": "parsed_fulltext",
+            "support_level": "experimental_data",
+            "experiment_data_summary": "Benchmark includes citation support precision.",
+        }
+    ]
+
+    summary = report_surface_summary(report, hypotheses=hypotheses, evidence_items=evidence)
+
+    assert summary["status"] == "ready"
+    assert summary["title"] == "Audit retrieval-grounded hypothesis generation"
+    assert summary["findings"] == ["Retrieval-grounded candidates show clearer evidence boundaries."]
+    assert summary["hypotheses"]["hypothesis_count"] == 1
+    assert summary["evidence"]["boundary"]["status"] == "parsed_fulltext"
+    assert summary["experiment"]["status"] == "ready"
+    assert summary["experiment"]["failure_conditions"] == ["Fails if support precision stays below 0.70."]
+    assert summary["limitations"] == ["Pilot-scale evidence only."]
+    assert summary["citation_qa"]["status"] == "passed"
+    assert summary["next_actions"] == ["review_limitations", "copy_report", "export_report"]
+    assert "internal_refs" not in summary
+    assert "run-report-secret" not in str(summary)
+    assert "report-secret" not in str(summary)
+    assert "hyp-report-secret" not in str(summary)
+    assert "paper-report-secret" not in str(summary)
+    assert "chunk-report-secret" not in str(summary)
+    assert "provider-secret" not in str(summary)
+
+    expert_summary = report_surface_summary(
+        report,
+        hypotheses=hypotheses,
+        evidence_items=evidence,
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["run_id"] == "run-report-secret"
+    assert expert_summary["internal_refs"]["report_id"] == "report-secret"
+    assert expert_summary["internal_refs"]["hypothesis_ids"] == ["hyp-report-secret"]
+    assert expert_summary["internal_refs"]["raw_source"]["raw_tool_result"]["debug"] == "provider-secret"
+
+
+def test_report_surface_summary_flags_citation_or_evidence_conflicts() -> None:
+    summary = report_surface_summary(
+        {
+            "findings": ["A candidate claim may not survive citation QA."],
+            "citation_provenance_qa": {"status": "citation_mismatch", "summary": "Claim and citation do not align."},
+            "experiment_plan": "Compare against baseline.",
+        },
+        evidence_items=[
+            {
+                "title": "Counter evidence",
+                "source_reliability": "parsed_fulltext",
+                "support_level": "contradicted",
+                "snippet": "A replication found no effect.",
+            }
+        ],
+    )
+
+    assert summary["status"] == "needs_review"
+    assert summary["citation_qa"]["status"] == "needs_review"
+    assert any("contradicts" in item for item in summary["limitations"])
+    assert "resolve_evidence_conflicts" in summary["next_actions"]
 
 
 def test_ranking_surface_summary_exposes_elo_audit_without_raw_payload() -> None:
