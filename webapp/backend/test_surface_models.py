@@ -5,8 +5,92 @@ from surface_models import (
     evidence_surface_summary,
     hypothesis_surface_collection,
     hypothesis_surface_summary,
+    run_confirmation_surface_summary,
     run_surface_summary,
 )
+
+
+def test_run_confirmation_surface_summary_counts_feedback_and_hides_raw_request() -> None:
+    request = {
+        "research_goal": "Study whether retrieval-grounded hypothesis generation improves review quality",
+        "demo_mode": False,
+        "literature_review": True,
+        "preferences": "Prefer falsifiable mechanisms with simple validation.",
+        "attributes": ["soundness", "novelty"],
+        "constraints": ["Use parsed fulltext evidence first."],
+        "starting_hypotheses": [
+            "SECRET STARTING HYPOTHESIS one should be previewed only briefly.",
+            "Second candidate hypothesis.",
+        ],
+        "user_feedback": [
+            {
+                "feedback_id": "feedback-secret",
+                "target_type": "hypothesis",
+                "feedback_type": "critique",
+                "text": "SECRET FEEDBACK TEXT should not be displayed by default.",
+            }
+        ],
+        "parent_run_id": "parent-secret",
+        "library_id": "library-secret",
+        "memory_scope": "project",
+        "refinement_mode": "continue_from_run",
+    }
+    memory_summary = {
+        "memory_scope": "project",
+        "memory_sources": ["parent_run", "chat_feedback", "knowledge_base"],
+        "counts": {"user_feedback": 1, "prior_hypotheses": 2, "evidence_sources": 3},
+        "execution_memory": {"status": "limited"},
+        "evidence_boundary": {"status": "parsed_fulltext"},
+    }
+
+    summary = run_confirmation_surface_summary(
+        request,
+        parent_run_summary={"run_id": "parent-secret", "research_goal": "Parent goal", "hypothesis_count": 4},
+        memory_summary=memory_summary,
+    )
+
+    assert summary["status"] == "pending"
+    assert summary["is_continuation"] is True
+    assert summary["mode_boundary"]["mode"] == "literature_grounded"
+    assert summary["counts"] == {
+        "starting_hypotheses": 2,
+        "constraints": 1,
+        "attributes": 2,
+        "user_feedback": 1,
+    }
+    assert len(summary["starting_hypothesis_previews"]) == 2
+    assert summary["constraint_previews"] == ["Use parsed fulltext evidence first."]
+    assert summary["feedback_summary"]["feedback_types"] == {"critique": 1}
+    assert summary["feedback_summary"]["target_types"] == {"hypothesis": 1}
+    assert summary["feedback_summary"]["applies_to"] == "next_run_or_continuation"
+    assert summary["parent_run"]["research_goal"] == "Parent goal"
+    assert summary["parent_run"]["hypothesis_count"] == 4
+    assert summary["memory"]["feedback_count"] == 1
+    assert summary["next_actions"] == ["confirm_continuation", "edit_request", "cancel"]
+    assert "internal_refs" not in summary
+    assert "parent-secret" not in str(summary)
+    assert "library-secret" not in str(summary)
+    assert "feedback-secret" not in str(summary)
+    assert "SECRET FEEDBACK TEXT" not in str(summary)
+
+    expert_summary = run_confirmation_surface_summary(
+        request,
+        parent_run_summary={"run_id": "parent-secret", "research_goal": "Parent goal", "hypothesis_count": 4},
+        memory_summary=memory_summary,
+        include_internal_refs=True,
+    )
+    assert expert_summary["internal_refs"]["parent_run_id"] == "parent-secret"
+    assert expert_summary["internal_refs"]["library_id"] == "library-secret"
+    assert expert_summary["internal_refs"]["memory_scope"] == "project"
+    assert expert_summary["internal_refs"]["request_preview"]["user_feedback"][0]["feedback_id"] == "feedback-secret"
+
+
+def test_run_confirmation_surface_summary_marks_short_goal_invalid() -> None:
+    summary = run_confirmation_surface_summary({"research_goal": "short", "demo_mode": True})
+
+    assert summary["status"] == "invalid"
+    assert summary["blocking_issues"] == ["research_goal_too_short"]
+    assert summary["next_actions"] == ["edit_research_goal", "cancel"]
 
 
 def test_run_surface_summary_hides_internal_refs_and_reports_queue_state() -> None:
