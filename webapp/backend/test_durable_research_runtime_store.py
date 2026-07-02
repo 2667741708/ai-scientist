@@ -4,6 +4,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from knowledge_base import DEFAULT_LIBRARY_ID, KnowledgeBaseStore
 
 
@@ -463,6 +465,84 @@ def test_checkpoint_status_summary_reports_resume_boundary() -> None:
         assert ready["resume_config_fields"] == ["thread_id", "checkpoint_id", "checkpoint_ns"]
         assert ready["latest_checkpoint"]["checkpoint_id"] == "checkpoint_ready"
         assert ready["latest_checkpoint"]["checkpoint_ref"] == "checkpoint-ready-ref"
+
+
+def test_persist_checkpoint_metadata_record_stores_safe_state_summary() -> None:
+    from open_coscientist.checkpointing import build_checkpoint_metadata_record
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        record = build_checkpoint_metadata_record(
+            run_id="run_checkpoint_record",
+            phase="review",
+            status="saved",
+            checkpoint_ref="checkpoint-record-ref",
+            state_summary={
+                "research_goal": "SECRET RESEARCH GOAL should not be stored in checkpoint state summary.",
+                "hypotheses": [{"text": "SECRET HYPOTHESIS"}],
+                "messages": [{"content": "SECRET MESSAGE"}],
+                "memory_context": {"raw": "SECRET MEMORY"},
+                "starting_hypotheses": ["SECRET STARTING HYPOTHESIS"],
+                "current_iteration": 1,
+                "progress_callback": lambda *_args: None,
+                "tool_registry": object(),
+            },
+            checkpoint_tuple_summary={
+                "checkpoint_id": "checkpoint_record",
+                "checkpoint_ns": "execution-memory",
+                "channel_keys": ["hypotheses", "messages", "research_goal"],
+                "pending_writes_count": 1,
+            },
+        )
+
+        persisted = store.persist_checkpoint_metadata_record(record)
+
+        assert persisted["checkpoint_id"] == "checkpoint_record"
+        assert persisted["run_id"] == "run_checkpoint_record"
+        assert persisted["thread_id"] == "run_checkpoint_record"
+        assert persisted["phase"] == "review"
+        assert persisted["status"] == "saved"
+        assert persisted["checkpoint_backend"] == "langgraph_sqlite"
+        assert persisted["checkpoint_ref"] == "checkpoint-record-ref"
+        assert persisted["state_summary"]["state_keys"] == [
+            "current_iteration",
+            "hypotheses",
+            "memory_context",
+            "messages",
+            "progress_callback",
+            "research_goal",
+            "starting_hypotheses",
+            "tool_registry",
+        ]
+        assert persisted["state_summary"]["hypothesis_count"] == 1
+        assert persisted["state_summary"]["message_count"] == 1
+        assert persisted["state_summary"]["has_memory_context"] is True
+        assert persisted["state_summary"]["has_starting_hypotheses"] is True
+        assert persisted["state_summary"]["omitted_runtime_only_keys"] == [
+            "progress_callback",
+            "tool_registry",
+        ]
+        assert "SECRET" not in str(persisted["state_summary"])
+
+        status = store.checkpoint_status_summary("run_checkpoint_record")
+        assert status["status"] == "ready"
+        assert status["latest_checkpoint"]["checkpoint_id"] == "checkpoint_record"
+        assert status["latest_checkpoint"]["state_summary"]["hypothesis_count"] == 1
+
+
+def test_persist_checkpoint_metadata_record_requires_thread_id_run_id_match() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+
+        with pytest.raises(ValueError, match="thread_id to match run_id"):
+            store.persist_checkpoint_metadata_record(
+                {
+                    "run_id": "run-one",
+                    "thread_id": "run-two",
+                    "checkpoint_backend": "sqlite_metadata",
+                    "status": "saved",
+                }
+            )
 
 
 def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
