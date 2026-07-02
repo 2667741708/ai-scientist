@@ -4833,6 +4833,28 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
     traces: List[AgentTrace] = []
     messages = serialize_value(result.get("messages", []))
 
+    disabled_literature_trace = (
+        agent_trace_from_registry(
+            agent="Literature Grounding",
+            role="Live workflow phase",
+            event_id="trace-live-literature-disabled",
+            phase="literature_review",
+            status="complete",
+            synthetic=False,
+            output=(
+                "Literature review was disabled for this run. Hypothesis generation may use "
+                "model priors, user-provided context, and retrieved memory summaries, but this "
+                "trace is not evidence that an external literature grounding phase executed."
+            ),
+            tool_calls=[],
+            token_usage={},
+            confidence=1.0,
+            degradation_reason="literature_review_disabled_latent_knowledge_boundary",
+        )
+        if not record.request.literature_review
+        else None
+    )
+
     if isinstance(messages, list):
         for index, message in enumerate(messages):
             if not isinstance(message, dict):
@@ -4866,6 +4888,8 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
             )
 
     if traces:
+        if disabled_literature_trace and not any(trace.phase == "literature_review" for trace in traces):
+            traces.append(disabled_literature_trace)
         return traces
 
     for index, event in enumerate(record.timeline):
@@ -4887,6 +4911,9 @@ def build_live_agent_trace(record: RunRecord, result: Dict[str, Any]) -> List[Ag
                 confidence=1.0 if status != "error" else 0.0,
             )
         )
+
+    if disabled_literature_trace and not any(trace.phase == "literature_review" for trace in traces):
+        traces.append(disabled_literature_trace)
 
     return traces or [
         agent_trace_from_registry(
