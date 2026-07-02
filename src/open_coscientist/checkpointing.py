@@ -215,6 +215,62 @@ def execution_resume_readiness(
     }
 
 
+def execution_resume_readiness_surface_summary(
+    readiness: Mapping[str, Any] | None,
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = dict(readiness or {})
+    status = _first_nonempty_text(source.get("status")) or "not_available"
+    recovery_mode = _first_nonempty_text(source.get("recovery_mode")) or "not_available"
+    next_actions = [
+        str(item).strip()
+        for item in source.get("next_actions", [])
+        if str(item).strip()
+    ]
+    summary = {
+        "status": status,
+        "label": _resume_readiness_label(status),
+        "recovery_mode": recovery_mode,
+        "recovery_action": _resume_readiness_action(status, recovery_mode),
+        "checkpoint_available": bool(source.get("checkpoint_available")),
+        "can_resume": bool(source.get("can_resume")),
+        "should_retry": bool(source.get("should_retry")),
+        "work_item_status": _first_nonempty_text(source.get("work_item_status")) or None,
+        "checkpoint_phase": _first_nonempty_text(source.get("checkpoint_phase")) or None,
+        "checkpoint_status": _first_nonempty_text(source.get("checkpoint_status")) or None,
+        "next_actions": next_actions or _resume_readiness_next_actions(status),
+        "safe_default_fields": [
+            "status",
+            "label",
+            "recovery_mode",
+            "recovery_action",
+            "checkpoint_available",
+            "can_resume",
+            "should_retry",
+            "work_item_status",
+            "checkpoint_phase",
+            "checkpoint_status",
+            "next_actions",
+        ],
+        "visibility_boundary": (
+            "Execution resume readiness summaries expose recovery state, checkpoint availability, "
+            "phase/status, retry/resume guidance, and next actions by default; run IDs, thread IDs, "
+            "checkpoint IDs, resume configs, raw checkpoint channels, worker leases, and provider "
+            "payloads require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "run_id": source.get("run_id"),
+            "thread_id": source.get("thread_id"),
+            "thread_id_matches_run_id": source.get("thread_id_matches_run_id"),
+            "checkpoint_backend": source.get("checkpoint_backend"),
+            "resume_config": source.get("resume_config"),
+        }
+    return summary
+
+
 def build_checkpoint_metadata_record(
     *,
     run_id: str,
@@ -411,6 +467,32 @@ def _resume_readiness_next_actions(status: str) -> list[str]:
         "waiting_for_worker": ["monitor_queue", "check_worker_status"],
         "not_recoverable": ["start_new_run", "inspect_failure_summary"],
     }.get(status, ["inspect_execution_memory"])
+
+
+def _resume_readiness_label(status: str) -> str:
+    return {
+        "ready_to_resume": "Run can resume from a checkpoint.",
+        "metadata_guided_retry": "Run can retry with checkpoint metadata guidance.",
+        "queue_retry_without_checkpoint": "Run can retry through the durable queue.",
+        "waiting_for_worker": "Run is waiting for a worker.",
+        "needs_attention": "Run recovery needs attention.",
+        "not_recoverable": "Run cannot be safely resumed.",
+        "not_available": "Run recovery status is not available.",
+    }.get(status, "Inspect run recovery status.")
+
+
+def _resume_readiness_action(status: str, recovery_mode: str) -> str:
+    if status == "ready_to_resume" or recovery_mode == "resume_from_checkpoint":
+        return "resume"
+    if status in {"metadata_guided_retry", "queue_retry_without_checkpoint"}:
+        return "retry"
+    if status == "waiting_for_worker":
+        return "wait"
+    if status == "needs_attention" or recovery_mode == "checkpoint_thread_mismatch":
+        return "inspect"
+    if status == "not_recoverable":
+        return "start_new_run"
+    return "inspect"
 
 
 def _first_nonempty_text(*values: Any) -> str:
