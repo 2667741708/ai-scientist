@@ -32,7 +32,7 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
     load_studio_app(monkeypatch, tempdir.name)
 
     with tempdir:
-        from open_coscientist.agents import get_agent_registry_payload
+        from open_coscientist.agents import get_agent_registry_payload, get_phase_status_payload
 
         payload = get_agent_registry_payload(public=True)
         assert payload["registry_version"] == "paper_level_v1"
@@ -70,6 +70,23 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
         assert literature["configurable"] is True
         assert literature["tool_policy"]["direct_tool_calls"] is True
         assert "latent_knowledge" in literature["degradation_when_disabled"]
+
+        status_payload = get_phase_status_payload(disabled_phases=["literature_review", "supervisor"])
+        statuses = {item["phase"]: item for item in status_payload["phase_statuses"]}
+        assert statuses["literature_review"]["enabled"] is False
+        assert "latent_knowledge" in statuses["literature_review"]["degradation_reason"]
+        assert statuses["supervisor"]["enabled"] is True
+        assert statuses["supervisor"]["degradation_reason"] is None
+        assert status_payload["degradation_count"] == 1
+        assert status_payload["degraded_phases"][0]["phase"] == "literature_review"
+        assert status_payload["invalid_disabled_phases"] == [
+            {
+                "phase": "supervisor",
+                "label": "Research planning",
+                "reason": "required_phase_cannot_be_disabled",
+            }
+        ]
+        assert "required phases remain enabled" in status_payload["boundary"]
 
 
 def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
