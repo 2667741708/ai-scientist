@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+def test_supervisor_context_constraints_summarize_memory_without_raw_refs() -> None:
+    from open_coscientist.nodes.supervisor import build_supervisor_context_constraints
+
+    constraints = build_supervisor_context_constraints(
+        ["Prioritize falsifiable experiments."],
+        {
+            "parent_run": {
+                "run_id": "raw-parent-run-id",
+                "summary": "Parent run favored evidence-linked hypotheses.",
+            },
+            "prior_hypotheses": [
+                {
+                    "hypothesis_id": "raw-hyp-id",
+                    "text": "Prior hypothesis links parsed fulltext to ranking robustness.",
+                    "support_level": "limited",
+                }
+            ],
+            "user_feedback": [
+                {
+                    "feedback_id": "raw-feedback-id",
+                    "target_ref": {"hypothesis_id": "raw-hyp-id"},
+                    "feedback_type": "prefer",
+                    "text": "Prefer hypotheses with explicit negative controls.",
+                }
+            ],
+            "evidence_summaries": [
+                {
+                    "checkpoint_id": "raw-checkpoint-id",
+                    "source_path": "D:/private/raw.pdf",
+                    "title": "Parsed fulltext evidence summary",
+                    "source_reliability": "parsed_fulltext",
+                    "support_level": "limited",
+                }
+            ],
+        },
+        [
+            {
+                "target_ref": {"hypothesis_id": "raw-current-hyp-id"},
+                "feedback_type": "constraint",
+                "text": "Use feedback only for next-run planning.",
+            }
+        ],
+    )
+
+    joined = "\n".join(constraints)
+    assert constraints[0] == "Prioritize falsifiable experiments."
+    assert "[memory_parent_run]" in joined
+    assert "[memory_prior_hypothesis]" in joined
+    assert "[memory_user_feedback]" in joined
+    assert "[memory_evidence]" in joined
+    assert "[memory_usage_policy]" in joined
+    assert "[user_feedback]" in joined
+    assert "Parent run favored evidence-linked hypotheses" in joined
+    assert "Prior hypothesis links parsed fulltext" in joined
+    assert "Prefer hypotheses with explicit negative controls" in joined
+    assert "Parsed fulltext evidence summary" in joined
+    assert "raw-parent-run-id" not in joined
+    assert "raw-hyp-id" not in joined
+    assert "raw-feedback-id" not in joined
+    assert "raw-checkpoint-id" not in joined
+    assert "D:/private/raw.pdf" not in joined
+    assert "target_ref" not in joined
