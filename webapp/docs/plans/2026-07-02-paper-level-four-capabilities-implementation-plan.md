@@ -2191,6 +2191,95 @@ AdminPage 可以展示内部诊断，但 HomePage、Workspace 默认状态只使
 上下文记忆：用户看到 parent run、反馈数量、证据来源和 memory scope；只有专家展开才看到 exact refs 或 checkpoint metadata。
 ```
 
+### 8.17 页面功能出现时机与交互规格
+
+前端功能不应按“后端能力已经实现”直接挂到页面上，而应按研究者的当前阶段逐步出现。默认路径只显示能推动任务前进的信息；审计、专家、调试信息只在用户表达相应意图后出现。
+
+功能出现节奏：
+
+| 用户阶段 | 用户意图 | 页面响应 | 默认出现的组件 | 继续隐藏的内容 |
+| --- | --- | --- | --- | --- |
+| 尚未开始 | 想提出一个研究目标 | 研究主页和 Workspace 都提供同一个 `ResearchGoalComposer` 入口 | 目标输入、可验证性提示、模式边界、主按钮 | provider diagnostics、agent list、queue status |
+| 输入目标后 | 想确认系统理解是否正确 | chat 侧生成 `RunConfirmationCard` | research_goal、starting hypotheses 数量、constraints/preferences 摘要、live/demo/literature 边界 | raw RunRequest、intent router debug、prompt |
+| 用户提供假设 | 想让系统一起评审排序 | 确认卡明确二选一：核验证据或纳入候选池 | 用户候选假设列表摘要、编辑/删除、纳入候选池 action | 直接启动 run、raw extracted JSON |
+| 用户给反馈 | 想影响下一轮结果 | `FeedbackComposer` 标注“用于下一轮/继续迭代” | feedback target、反馈摘要、保存状态、继续 run action | 伪装成立即改写当前 running output |
+| 运行被确认 | 想知道任务有没有开始 | `RunProgressStrip` 替换确认卡的主状态 | queued、running、retrying、complete、error、当前 phase 摘要 | lease_owner、worker pid、checkpoint key |
+| 运行中 | 想检查是否在做正确的研究步骤 | Workspace 中间保留当前结果/进度，右侧 inspector 提供折叠过程 | phase summary、timeline 摘要、可取消/稍后查看 | 完整 agent trace、tool result JSON |
+| 运行完成 | 想比较候选方向 | 默认落到 Hypotheses 视图或结果 tab | hypothesis cards、rank/Elo、origin、support level、下一步实验 action | full review rubric、raw tournament matchup JSON |
+| 检查证据 | 想知道为什么支持或不支持 | 用户点击 `参考文献` 打开 `EvidenceDrawer` | source title、support level、source reliability、matched snippet summary | chunk id、artifact path、full citation map |
+| 检查过程 | 想审计系统怎么推理 | 用户点击 `查看过程与证据` 再看 tabs | phase list、agent role、output summary、tool count | prompt text、token detail、raw provider payload |
+| 继续迭代 | 想基于历史 run 修订 | Workspace confirmation 显示 parent run 和 memory summary | parent run 摘要、feedback 数量、使用的 evidence/library scope | raw chat history、exact checkpoint refs |
+| 实验设计 | 想把假设变成可验证方案 | Experiments 页面以 selected hypothesis 为中心 | 变量、对照、指标、失败条件、最小验证路径 | 模型 prompt、内部评分细节 |
+| 报告整理 | 想输出可审计结论 | Reports 页面强调 findings + limitations | evidence boundary、citation QA、experiment plan、export | raw backend payload、tool result JSON |
+| 系统异常 | 想知道如何恢复 | 普通页面显示任务化恢复，Admin 显示专家诊断 | 重试、稍后查看、联系管理员、limited fallback | stack trace、endpoint、env var、request_id |
+
+页面交互规格：
+
+| 页面 | 首屏布局目标 | 最先出现的功能 | 用户主动展开后出现 | 关键可用性要求 |
+| --- | --- | --- | --- | --- |
+| 研究主页 | 让用户立即开始或回到一个研究任务 | 最近项目、目标输入、证据准备摘要、一个主按钮 | 最近产出、运行准备摘要 | 不做 marketing hero；主按钮必须在首屏可见。 |
+| Workspace | 让用户用自然语言监督 run | 左侧 chat/control，中间结果/进度，右侧上下文 inspector | memory、agent process、ranking、evidence tabs | 确认卡不能被结果列表挤走；移动端用 tabs/bottom sheet。 |
+| Papers / 资料库 | 让用户准备和判断证据质量 | library selector、上传/解析/search、parse jobs、paper list | parsed chunks、media、BibTeX 来源、provenance | PDF 阅读、解析、翻译是不同操作；不要把阅读当成入库。 |
+| Hypotheses | 让用户比较候选假设并选下一步 | hypothesis list、selected detail、origin/support/rank | review rubric、Elo matchup、memory refs、agent trace | 卡片默认只放可扫描摘要；详情必须能回到列表。 |
+| Experiments | 让用户构造可证伪验证 | selected hypothesis、实验设计 canvas、evidence/risk side panel | alternative explanations、data requirements、risk notes | 必须显示失败条件和替代解释，避免乐观方案独占页面。 |
+| Reports | 让用户形成可审计输出 | outline、draft/preview、evidence boundary、export | citation QA、source map、limitations audit | 报告必须保留 demo/live/literature-grounded 标记。 |
+| Runtime / Admin | 让管理员判断运行准备度 | service readiness、queue counts、worker state、恢复动作 | endpoints、env、lease/checkpoint diagnostics | 默认不从普通导航暴露给研究者。 |
+
+桌面端布局原则：
+
+```text
+Workspace:
+  left 320-380px: chat, confirmation, feedback, composer
+  center flex: active run, hypotheses, selected result
+  right 320-420px: collapsible evidence/memory/process inspector
+
+Hypotheses:
+  left 300-360px: ranked list and filters
+  center min 560px: selected hypothesis and next actions
+  right 320-420px: contextual drawer or inspector
+
+Papers:
+  left 260-320px: library selector and readiness filters
+  center flex: paper/search/parse work surface
+  right 360-440px: selected evidence drawer when opened
+```
+
+移动端布局原则：
+
+```text
+Workspace:
+  top: project status and mode boundary
+  tabs: 对话 / 结果 / 证据
+  bottom: sticky composer only on 对话 tab
+  details: bottom sheet with Escape/close/focus return
+
+Hypotheses:
+  default: ranked cards
+  tap card: detail view
+  detail tabs: 概览 / 证据 / 评审 / 排名 / 实验
+
+Papers:
+  default: selected library + primary ingest actions
+  paper/evidence detail: bottom sheet
+  dense tables: card list with filter drawer
+```
+
+设计功能验收样例：
+
+```text
+用户输入“研究目标：...；我的假设是 A、B；请一起评审排序”
+-> Workspace 显示确认卡
+-> 确认卡展示用户假设数量、可编辑摘要、模式边界
+-> 用户点击“纳入候选池并生成”
+-> 页面显示 queued/running，而不是 raw work item
+-> run 完成后进入 Hypotheses
+-> 用户假设卡带 user seeded origin badge
+-> 用户点击参考文献才打开 EvidenceDrawer
+-> 用户点击“用于下一轮”反馈后，confirmation 显示 parent run 和 feedback summary
+```
+
+此小节是前端实现的产品约束：新增按钮、抽屉、卡片或状态条前，必须能说明它服务的是哪个用户阶段；如果只能说明它对应某个后端表、endpoint 或 agent phase，就应移到专家详情或暂不加入默认页面。
+
 ## 9. 测试矩阵
 
 ### 9.1 Backend unit tests
