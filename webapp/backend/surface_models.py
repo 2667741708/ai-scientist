@@ -3036,12 +3036,38 @@ def _agent_process_next_actions(*, status: str, counts: Mapping[str, int]) -> li
 
 
 def _run_recovery_summary(recovery: Mapping[str, Any]) -> Dict[str, Any]:
+    recovery_mode = recovery.get("recovery_mode")
+    recovery_action = recovery.get("recovery_action") or _run_recovery_action(str(recovery_mode or ""))
     return {
-        "recovery_mode": recovery.get("recovery_mode"),
+        "recovery_mode": recovery_mode,
+        "label": recovery.get("label") or _run_recovery_label(str(recovery_mode or "")),
+        "recovery_action": recovery_action,
         "can_resume": bool(recovery.get("can_resume")),
         "should_retry": bool(recovery.get("should_retry")),
         "next_action": recovery.get("next_action"),
     }
+
+
+def _run_recovery_label(recovery_mode: str) -> str:
+    return {
+        "resume_from_checkpoint": "Run can resume from a checkpoint.",
+        "metadata_guided_retry": "Run can retry with checkpoint metadata guidance.",
+        "queue_retry_without_checkpoint": "Run can retry through the durable queue.",
+        "checkpoint_thread_mismatch": "Run recovery needs attention.",
+        "not_recoverable": "Run cannot be safely resumed.",
+    }.get(recovery_mode, "Inspect run recovery state.")
+
+
+def _run_recovery_action(recovery_mode: str) -> str:
+    if recovery_mode == "resume_from_checkpoint":
+        return "resume"
+    if recovery_mode in {"metadata_guided_retry", "queue_retry_without_checkpoint"}:
+        return "retry"
+    if recovery_mode == "checkpoint_thread_mismatch":
+        return "inspect"
+    if recovery_mode == "not_recoverable":
+        return "start_new_run"
+    return "inspect"
 
 
 def _phase_label(phase: str) -> Optional[str]:
