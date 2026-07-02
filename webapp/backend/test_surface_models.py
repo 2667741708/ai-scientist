@@ -5,6 +5,7 @@ from surface_models import (
     evidence_surface_summary,
     hypothesis_surface_collection,
     hypothesis_surface_summary,
+    ranking_surface_summary,
     runtime_readiness_surface_summary,
     run_confirmation_surface_summary,
     run_surface_summary,
@@ -442,3 +443,78 @@ def test_hypothesis_surface_collection_counts_model_evolved_and_tool_origins() -
     assert collection["items"][2]["origin_label"] == "tool grounded"
     assert "inspect_review" in collection["items"][2]["next_actions"]
     assert "citation_map" not in str(collection)
+
+
+def test_ranking_surface_summary_exposes_elo_audit_without_raw_payload() -> None:
+    matchups = [
+        {
+            "matchup_id": "matchup-secret",
+            "winner_id": "hyp-a-secret",
+            "loser_id": "hyp-b-secret",
+            "winner_label": "Hypothesis A",
+            "loser_label": "Hypothesis B",
+            "confidence": 0.76,
+            "before_elo": {"hyp-a-secret": 1500, "hyp-b-secret": 1500},
+            "after_elo": {"hyp-a-secret": 1532, "hyp-b-secret": 1468},
+            "elo_delta": {"hyp-a-secret": 32, "hyp-b-secret": -32},
+            "reasoning": "Hypothesis A has stronger parsed-fulltext support and a clearer falsification path.",
+            "comparison_mode": "single_turn",
+            "raw_provider_response": {"debug": "provider-secret"},
+        }
+    ]
+    hypotheses = [
+        {
+            "id": "hyp-b-secret",
+            "title": "Second candidate",
+            "explanation": "A weaker but plausible candidate.",
+            "elo_rating": 1468,
+            "support_level": "limited",
+        },
+        {
+            "id": "hyp-a-secret",
+            "title": "Top candidate",
+            "explanation": "Best current candidate by pairwise tournament.",
+            "elo_rating": 1532,
+            "support_level": "fulltext",
+        },
+    ]
+
+    summary = ranking_surface_summary(matchups, hypotheses=hypotheses)
+
+    assert summary["status"] == "ready"
+    assert summary["ranking_method"] == "pairwise_tournament_elo"
+    assert summary["matchup_count"] == 1
+    assert summary["confidence"] == {"available": True, "average": 0.76, "minimum": 0.76}
+    assert summary["next_actions"] == [
+        "inspect_top_ranked_hypotheses",
+        "inspect_matchup_details",
+        "design_experiment",
+    ]
+    assert summary["ranked_hypotheses"][0]["title"] == "Top candidate"
+    matchup = summary["items"][0]
+    assert matchup["winner"] == "Hypothesis A"
+    assert matchup["loser"] == "Hypothesis B"
+    assert matchup["confidence"] == 0.76
+    assert matchup["winner_elo"] == {"before": 1500.0, "after": 1532.0, "delta": 32.0}
+    assert matchup["loser_elo"] == {"before": 1500.0, "after": 1468.0, "delta": -32.0}
+    assert "parsed-fulltext support" in matchup["reasoning_summary"]
+    assert "internal_refs" not in summary
+    assert "matchup-secret" not in str(summary)
+    assert "hyp-a-secret" not in str(summary)
+    assert "provider-secret" not in str(summary)
+
+    expert_summary = ranking_surface_summary(matchups, hypotheses=hypotheses, include_internal_refs=True)
+    assert expert_summary["internal_refs"]["matchup_ids"] == ["matchup-secret"]
+    assert expert_summary["internal_refs"]["hypothesis_ids"] == ["hyp-b-secret", "hyp-a-secret"]
+    assert expert_summary["internal_refs"]["raw_matchups"][0]["raw_provider_response"]["debug"] == "provider-secret"
+
+
+def test_ranking_surface_summary_reports_absent_tournament() -> None:
+    summary = ranking_surface_summary([])
+
+    assert summary["status"] == "absent"
+    assert summary["ranking_method"] == "not_available"
+    assert summary["matchup_count"] == 0
+    assert summary["items"] == []
+    assert summary["confidence"] == {"available": False, "average": None, "minimum": None}
+    assert summary["next_actions"] == ["run_ranking_phase", "inspect_review_scores"]
