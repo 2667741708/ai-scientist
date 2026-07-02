@@ -229,6 +229,7 @@ def test_active_work_item_snapshot_hides_internal_refs_by_default() -> None:
         assert snapshot["items"][0]["phase"] == "ranking"
         assert snapshot["items"][0]["agent_role"] == "ranking_agent"
         assert snapshot["items"][0]["attempts"]["remaining"] == 2
+        assert snapshot["items"][0]["recovery_action"] == "retry"
         assert snapshot["items"][0]["error_summary"].endswith("...")
         assert "work_item_id" not in snapshot["items"][0]
         assert "run_id" not in snapshot["items"][0]
