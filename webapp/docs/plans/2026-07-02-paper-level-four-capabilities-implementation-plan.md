@@ -2135,6 +2135,62 @@ test_mode_boundary_bar_distinguishes_demo_live_literature_grounded
 
 可用性验收必须同时覆盖桌面和移动。桌面重点验证三栏层级、详情折叠和主操作可见；移动重点验证 composer、主要结果、抽屉关闭、触摸目标和文本不溢出。
 
+### 8.16 当前前端实现落点与渐进改造
+
+本计划不要求重新发明前端路由。现有 `webapp/src/app/router.tsx` 已经把主要研究路径拆成 `home`、`workspace`、`data`、`projects/:projectId/*`、`outputs`、`admin`，后续应沿着这些真实入口渐进增强，而不是另建一个“论文能力展示页”。
+
+当前路由到目标页面的映射：
+
+| 目标页面 | 当前路由/文件 | 近期应该承接的设计能力 | 不建议做法 |
+| --- | --- | --- | --- |
+| 研究主页 / Projects | `/home` -> `webapp/src/pages/home/HomePage.tsx`；`/projects` -> `webapp/src/pages/projects/ProjectsPage.tsx` | 一个研究目标入口、最近项目、证据准备提醒、运行准备摘要 | 把首页改成宣传 hero 或后台指标墙 |
+| Workspace / 研究流程 | `/workspace`、`/workspace/:projectId` -> `webapp/src/pages/workspace/WorkspacePage.tsx` | 自然语言控制、确认卡、starting hypotheses、反馈进入下一轮、run progress、memory summary | 要求用户理解 `RunRequest`、worker queue 或 agent graph 后才能启动 |
+| Papers / 资料库 | `/data` -> `webapp/src/pages/data/DataPage.tsx`；项目内 `/projects/:projectId/papers` 当前由 `ProjectDetailPage` 分支承接 | PDF/网页证据入库、parse progress、source reliability、support level、证据准备度 | 在普通视图默认展示 local path、chunk id、raw MCP payload |
+| Hypotheses / 假设 | `/projects/:projectId/hypotheses` -> `ProjectDetailPage` + `webapp/src/features/hypotheses/HypothesisWorkspace.tsx` | origin badge、Elo/rank、support level、review 摘要、feedback composer、evidence drawer | 默认铺开完整 review rubric、raw tournament JSON、agent trace |
+| Evidence drawer / 证据详情 | `webapp/src/features/evidence/ReferenceDrawer.tsx` | matched evidence、source reliability、support level、PDF parse action、citation provenance | 把未解析 abstract/metadata 证据伪装成 parsed fulltext |
+| Experiments / 实验 | `/projects/:projectId/experiments` -> `ProjectDetailPage` + `webapp/src/features/experiments/ExperimentsPanel.tsx` | 变量、对照、指标、失败条件、替代解释、最小验证路径 | 只显示一段乐观实验建议，不显示失败条件 |
+| Reports / 报告 | `/projects/:projectId/reports` -> `ProjectDetailPage` + `webapp/src/features/reports/ReportsPanel.tsx`；`/outputs` -> `webapp/src/pages/outputs/OutputsPage.tsx` | findings、evidence、experiment plan、limitations、mode boundary、citation QA | 把 demo 输出包装成真实科学发现 |
+| Runtime / Admin | `/admin` -> `webapp/src/pages/admin/AdminPage.tsx`；`/tools` 中 admin-only 运行工具 | worker/model/literature/PDF parser readiness、手动 tick、diagnostics | 让普通研究者默认看到 endpoint、env var、lease owner、stack trace |
+| Project AI chat | `/project-chat` -> `webapp/src/pages/project-chat/ProjectKnowledgePage.tsx`；全局 drawer -> `ResearchChatDrawer` | 围绕当前 run/hypothesis 的追问、报告草稿、实验/反证分析 | 与 Workspace 主启动路径抢入口或绕过确认卡 |
+
+渐进改造顺序：
+
+```text
+1. Workspace 先成型：ResearchCommandCenter + RunComposer + HypothesisWorkspace 保持主工作台，两栏/三栏布局中先放自然语言确认卡、run progress 和结果检查入口。
+2. Hypotheses 再增强：在 HypothesisWorkspace 里补 origin/support/memory/feedback 的轻量摘要，EvidenceDrawer 承接证据细节，agent trace 仍放在过程详情。
+3. Papers 补证据准备闭环：DataPage 作为全局资料入口，ProjectDetailPage 的 papers 分支作为项目内 evidence readiness 摘要，不重复做两个完整资料库。
+4. Experiments 和 Reports 做自然下一步：从 SelectedHypothesisPanel 进入实验设计和报告整理，保持“建议/待验证/证据边界”的文案。
+5. Admin 最后承接内部运行能力：worker status、checkpoint、queue tick、provider diagnostics 只在 admin 或专家展开中出现。
+```
+
+组件落地优先级：
+
+```text
+第一优先级：RunConfirmationCard、RunProgressStrip、ModeBoundaryBar、HypothesisCard、EvidenceDrawer。
+第二优先级：MemoryContextDisclosure、FeedbackComposer、SelectedHypothesisPanel、ExperimentDesignCanvas。
+第三优先级：AgentProcessDisclosure、RuntimeReadinessPanel、ReportAssembler、CitationQA。
+```
+
+布局落地规则：
+
+```text
+Workspace 桌面端可继续使用可调 composer 宽度，但默认应让“对话启动”和“假设审查”同时可见。
+Workspace 移动端不能直接压缩三栏；应把对话、结果、证据/过程变成 tabs 或 bottom sheet。
+ProjectDetailPage 是项目二级页面容器，不应在每个分支重复创建新的顶部导航和状态语言。
+HypothesisWorkspace 是候选假设比较的核心，不应把报告、实验和证据所有细节都塞进卡片默认态。
+ReferenceDrawer 是证据细节入口，应优先显示支撑强度和来源可靠性，再显示引用、chunk、media、parse artifacts。
+AdminPage 可以展示内部诊断，但 HomePage、Workspace 默认状态只使用任务语言。
+```
+
+设计功能出现的验收口径：
+
+```text
+自然语言界面：用户从 Home 或 Workspace 输入目标与自己的假设后，能看到确认卡，而不是跳到设置页。
+异步任务框架：用户看到 queued/running/retrying/complete/error 和恢复动作，而不是 lease_owner 或 worker pid。
+专业化智能体：用户看到研究步骤、评审角色和输出摘要；只有展开过程详情才看到 agent_id、prompt/template、tool calls。
+上下文记忆：用户看到 parent run、反馈数量、证据来源和 memory scope；只有专家展开才看到 exact refs 或 checkpoint metadata。
+```
+
 ## 9. 测试矩阵
 
 ### 9.1 Backend unit tests
