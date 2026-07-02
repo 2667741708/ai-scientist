@@ -87,6 +87,48 @@ def test_execution_memory_status_reports_sqlite_saver_boundary() -> None:
         assert "metadata-only" in status["boundary"]
 
 
+def test_execution_recovery_policy_summarizes_resume_and_retry_modes() -> None:
+    from open_coscientist.checkpointing import execution_recovery_policy
+
+    ready = execution_recovery_policy(
+        {
+            "status": "ready",
+            "checkpoint_available": True,
+            "resume_supported": True,
+            "resume_config_fields": ["thread_id", "checkpoint_id", "checkpoint_ns"],
+        },
+        work_item_status="running",
+    )
+    assert ready["recovery_mode"] == "resume_from_checkpoint"
+    assert ready["can_resume"] is True
+    assert ready["should_retry"] is False
+    assert ready["resume_config_fields"] == ["thread_id", "checkpoint_id", "checkpoint_ns"]
+    assert "channel values" in ready["boundary"]
+
+    limited = execution_recovery_policy(
+        {
+            "status": "limited",
+            "checkpoint_available": True,
+            "resume_supported": False,
+        },
+        work_item_status="retrying",
+    )
+    assert limited["recovery_mode"] == "metadata_guided_retry"
+    assert limited["can_resume"] is False
+    assert limited["should_retry"] is True
+    assert limited["work_item_recoverable"] is True
+
+    queued_without_checkpoint = execution_recovery_policy(None, work_item_status="queued")
+    assert queued_without_checkpoint["recovery_mode"] == "queue_retry_without_checkpoint"
+    assert queued_without_checkpoint["should_retry"] is True
+    assert queued_without_checkpoint["resume_config_fields"] == ["thread_id"]
+
+    failed_without_checkpoint = execution_recovery_policy(None, work_item_status="error")
+    assert failed_without_checkpoint["recovery_mode"] == "not_recoverable"
+    assert failed_without_checkpoint["should_retry"] is False
+    assert failed_without_checkpoint["work_item_recoverable"] is False
+
+
 def test_sanitize_workflow_state_removes_runtime_only_values() -> None:
     from open_coscientist.checkpointing import sanitize_workflow_state_for_checkpoint
 
