@@ -541,6 +541,73 @@ def test_memory_context_surface_summary_reports_missing_injection_policy() -> No
         }
 
 
+def test_memory_context_prompt_packet_is_summary_only() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        store.record_research_run(
+            {
+                "run_id": "run_prompt_packet",
+                "status": "complete",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {"research_goal": "Prompt packet memory policy"},
+                "metrics": {"summary": "SECRET METRICS SUMMARY should not be copied verbatim."},
+                "hypotheses": [
+                    {
+                        "id": "hyp_prompt_secret",
+                        "text": "SECRET HYPOTHESIS FULL TEXT should not be injected.",
+                        "explanation": "Mechanism summary can be safely shortened.",
+                        "support_level": "limited",
+                        "elo_rating": 1010,
+                    }
+                ],
+            }
+        )
+        store.store_feedback_item(
+            run_id="run_prompt_packet",
+            target_type="hypothesis",
+            target_ref={"hypothesis_id": "hyp_prompt_secret"},
+            feedback_type="critique",
+            text="SECRET FEEDBACK TEXT should not be injected.",
+        )
+        store.ingest(
+            title="Prompt packet evidence",
+            content="Prompt packet evidence should use parsed fulltext summary snippets.",
+            source="local_pdf",
+            source_reliability="parsed_fulltext",
+        )
+
+        memory = store.build_memory_context(
+            research_goal="Prompt packet evidence parsed fulltext summary",
+            parent_run_id="run_prompt_packet",
+            memory_scope="project",
+        )
+        packet = store.memory_context_prompt_packet(memory)
+
+        assert packet["mode"] == "summary_only"
+        assert packet["memory_scope"] == "project"
+        assert packet["target_prompts"] == ["supervisor", "generate", "review", "ranking"]
+        assert packet["raw_injection_allowed"] is False
+        assert packet["section_count"] >= 4
+        sections = {section["section"]: section for section in packet["sections"]}
+        assert sections["parent_run_summary"]["items"][0]["research_goal"] == "Prompt packet memory policy"
+        assert sections["prior_hypothesis_summaries"]["items"][0] == {
+            "support_level": "limited",
+            "elo_rating": 1010,
+            "summary": "Mechanism summary can be safely shortened.",
+        }
+        assert sections["feedback_type_and_target_summary"]["items"][0] == {
+            "feedback_type": "critique",
+            "target_type": "hypothesis",
+            "source": "user",
+        }
+        assert sections["evidence_boundary_and_snippet_summaries"]["items"][0]["source_reliability"] == "parsed_fulltext"
+        assert "feedback_text" in packet["excluded_raw_fields"]
+        assert "SECRET" not in str(packet)
+        assert "hyp_prompt_secret" not in str(packet)
+        assert "raw feedback text" in packet["boundary"]
+
+
 def test_checkpoint_status_summary_reports_resume_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
