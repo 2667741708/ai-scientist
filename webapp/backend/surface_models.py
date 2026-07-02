@@ -2726,6 +2726,7 @@ def _prompt_packet_section_label(section_id: str) -> str:
         "related_run_summaries": "Related run summaries",
         "prior_hypothesis_summaries": "Prior hypothesis summaries",
         "feedback_type_and_target_summary": "Feedback type and target summary",
+        "execution_memory_summary": "Execution memory summary",
         "evidence_boundary_and_snippet_summaries": "Evidence boundary summaries",
         "memory_limitations": "Memory limitations",
     }
