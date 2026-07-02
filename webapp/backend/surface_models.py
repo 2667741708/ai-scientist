@@ -279,6 +279,90 @@ def run_surface_summary(
     return summary
 
 
+def memory_surface_summary(
+    memory_context: Any,
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    envelope = _as_mapping(memory_context)
+    source = _as_mapping(envelope.get("memory")) or envelope
+    parent_run = _as_mapping(source.get("parent_run"))
+    related_runs = _record_items(source.get("related_runs"))
+    prior_hypotheses = _record_items(source.get("prior_hypotheses"))
+    user_feedback = _record_items(source.get("user_feedback"))
+    evidence_summaries = _record_items(source.get("evidence_summaries") or source.get("evidence_items"))
+    execution_memory = _as_mapping(source.get("execution_memory"))
+    evidence_collection = evidence_surface_collection(evidence_summaries)
+    evidence_scope = _memory_evidence_scope(source=source, evidence_collection=evidence_collection)
+    known_gaps = _surface_text_items(source.get("known_gaps"), max_items=5, max_length=180)
+    counts = {
+        "parent_run": 1 if parent_run else 0,
+        "related_runs": len(related_runs),
+        "prior_hypotheses": len(prior_hypotheses),
+        "user_feedback": len(user_feedback),
+        "evidence_sources": len(evidence_summaries),
+        "known_gaps": len(known_gaps),
+    }
+    status = _memory_surface_status(
+        counts=counts,
+        evidence_status=str(evidence_scope.get("status") or "absent"),
+        execution_status=str(execution_memory.get("status") or ""),
+    )
+    summary = {
+        "status": status,
+        "memory_scope": source.get("memory_scope") or "project",
+        "memory_sources": list(source.get("memory_sources") or source.get("source_types") or []),
+        "parent_run": _memory_parent_run_surface_summary(parent_run),
+        "counts": counts,
+        "feedback_summary": _feedback_surface_summary(user_feedback),
+        "history_summary": _memory_history_summary(
+            parent_run=parent_run,
+            counts=counts,
+            evidence_scope=evidence_scope,
+        ),
+        "evidence_scope": evidence_scope,
+        "execution_memory": _memory_execution_surface_summary(execution_memory),
+        "known_gap_summaries": known_gaps[:3],
+        "next_actions": _memory_next_actions(status=status, evidence_status=str(evidence_scope.get("status") or "")),
+        "visibility_boundary": (
+            "Memory surface summaries expose parent-run context, counts, evidence scope, execution-memory "
+            "status, and next actions by default; raw chat messages, exact feedback text, checkpoint refs, "
+            "retrieval diagnostics, internal IDs, and raw memory JSON require expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "parent_run_id": _first_value(parent_run, ("run_id", "id")),
+            "related_run_ids": [
+                _first_value(item, ("run_id", "id"))
+                for item in related_runs
+                if _first_value(item, ("run_id", "id"))
+            ],
+            "feedback_ids": [
+                _first_value(item, ("feedback_id", "id"))
+                for item in user_feedback
+                if _first_value(item, ("feedback_id", "id"))
+            ],
+            "hypothesis_ids": [
+                _first_value(item, ("hypothesis_id", "id"))
+                for item in prior_hypotheses
+                if _first_value(item, ("hypothesis_id", "id"))
+            ],
+            "evidence_refs": [
+                {
+                    "paper_id": _first_value(item, ("paper_id", "source_id")),
+                    "chunk_id": _first_value(item, ("chunk_id", "evidence_chunk_id")),
+                    "library_id": _first_value(item, ("library_id",)),
+                }
+                for item in evidence_summaries[:10]
+            ],
+            "checkpoint_id": _memory_checkpoint_value(execution_memory, "checkpoint_id"),
+            "checkpoint_ref": _memory_checkpoint_value(execution_memory, "checkpoint_ref"),
+            "raw_memory_context": dict(source),
+        }
+    return summary
+
+
 def hypothesis_surface_summary(
     hypothesis: Any,
     *,
@@ -1762,6 +1846,127 @@ def _run_memory_summary_for_surface(memory: Mapping[str, Any]) -> Dict[str, Any]
         "execution_memory_status": execution_memory.get("status"),
         "evidence_status": evidence_boundary.get("status"),
     }
+
+
+def _memory_parent_run_surface_summary(parent_run: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    if not parent_run:
+        return None
+    hypothesis_count = _safe_int(
+        _first_value(parent_run, ("hypothesis_count", "hypotheses_count", "prior_hypothesis_count"))
+    )
+    if hypothesis_count is None:
+        hypothesis_count = _list_length(parent_run.get("hypotheses"))
+    return {
+        "research_goal": _compact_text(
+            _first_value(parent_run, ("research_goal", "goal", "summary")),
+            max_length=260,
+        ),
+        "status": parent_run.get("status"),
+        "hypothesis_count": hypothesis_count or 0,
+        "updated_at": parent_run.get("updated_at"),
+    }
+
+
+def _memory_evidence_scope(
+    *,
+    source: Mapping[str, Any],
+    evidence_collection: Mapping[str, Any],
+) -> Dict[str, Any]:
+    raw_boundary = _as_mapping(source.get("evidence_boundary"))
+    reliability_counts = _as_mapping(evidence_collection.get("source_reliability_counts"))
+    support_counts = _as_mapping(evidence_collection.get("support_level_counts"))
+    evidence_items = _record_items(source.get("evidence_summaries") or source.get("evidence_items"))
+    library_ids = {
+        str(item.get("library_id"))
+        for item in evidence_items
+        if isinstance(item, Mapping) and item.get("library_id")
+    }
+    return {
+        "status": raw_boundary.get("status") or _as_mapping(evidence_collection.get("boundary")).get("status") or "absent",
+        "evidence_count": _safe_int(raw_boundary.get("evidence_count")) or evidence_collection.get("evidence_count") or 0,
+        "parsed_fulltext_count": _safe_int(raw_boundary.get("parsed_fulltext_count"))
+        or _safe_int(reliability_counts.get("parsed_fulltext"))
+        or 0,
+        "experimental_data_count": _safe_int(raw_boundary.get("experimental_data_count"))
+        or _safe_int(support_counts.get("experimental_data"))
+        or 0,
+        "library_count": len(library_ids),
+        "source_reliability_counts": dict(reliability_counts),
+        "support_level_counts": dict(support_counts),
+        "boundary_summary": _compact_text(
+            raw_boundary.get("boundary") or _as_mapping(evidence_collection.get("boundary")).get("summary"),
+            max_length=220,
+        ),
+    }
+
+
+def _memory_execution_surface_summary(execution_memory: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": execution_memory.get("status") or "not_available",
+        "phase": execution_memory.get("phase"),
+        "resume_supported": bool(execution_memory.get("resume_supported")),
+        "checkpoint_backend": execution_memory.get("checkpoint_backend"),
+        "resume_mode": execution_memory.get("resume_mode"),
+    }
+
+
+def _memory_surface_status(
+    *,
+    counts: Mapping[str, int],
+    evidence_status: str,
+    execution_status: str,
+) -> str:
+    total_context = sum(int(counts.get(key, 0)) for key in ("related_runs", "prior_hypotheses", "user_feedback", "evidence_sources"))
+    total_context += int(counts.get("parent_run", 0))
+    if total_context == 0:
+        return "empty"
+    if evidence_status == "contradicted":
+        return "needs_review"
+    if evidence_status in {"absent", "limited"} or execution_status in {"limited", "not_available"}:
+        return "limited"
+    return "ready"
+
+
+def _memory_history_summary(
+    *,
+    parent_run: Mapping[str, Any],
+    counts: Mapping[str, int],
+    evidence_scope: Mapping[str, Any],
+) -> list[str]:
+    items: list[str] = []
+    parent_goal = _compact_text(_first_value(parent_run, ("research_goal", "goal", "summary")), max_length=180)
+    if parent_goal:
+        items.append(f"Parent run context: {parent_goal}")
+    if int(counts.get("prior_hypotheses", 0)) > 0:
+        items.append(f"{counts.get('prior_hypotheses')} prior hypothesis summary item(s) are available.")
+    if int(counts.get("user_feedback", 0)) > 0:
+        items.append(f"{counts.get('user_feedback')} user feedback item(s) will guide the next run or continuation.")
+    evidence_count = int(evidence_scope.get("evidence_count") or 0)
+    if evidence_count > 0:
+        items.append(f"{evidence_count} evidence summary item(s) matched the selected memory scope.")
+    if int(counts.get("known_gaps", 0)) > 0:
+        items.append(f"{counts.get('known_gaps')} known memory limitation(s) apply.")
+    return items[:5]
+
+
+def _memory_next_actions(*, status: str, evidence_status: str) -> list[str]:
+    if status == "empty":
+        return ["select_parent_run", "add_feedback", "parse_evidence"]
+    if status == "needs_review":
+        return ["inspect_memory_evidence", "revise_memory_scope", "continue_with_caution"]
+    actions = ["review_context"]
+    if evidence_status in {"absent", "limited"}:
+        actions.append("add_or_parse_evidence")
+    actions.append("continue_run")
+    return actions
+
+
+def _memory_checkpoint_value(execution_memory: Mapping[str, Any], key: str) -> Any:
+    value = execution_memory.get(key)
+    if value:
+        return value
+    latest = _as_mapping(execution_memory.get("latest_checkpoint"))
+    return latest.get(key)
 
 
 def _run_recovery_summary(recovery: Mapping[str, Any]) -> Dict[str, Any]:
