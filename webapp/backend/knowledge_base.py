@@ -2668,6 +2668,11 @@ class KnowledgeBaseStore:
 
         feedback_run_id = parent_run_id if parent_run_id else None
         feedback_items = self.list_feedback_items(run_id=feedback_run_id, limit=20) if feedback_run_id else []
+        execution_memory = (
+            self.checkpoint_status_summary(parent_run_id)
+            if parent_run_id
+            else self.checkpoint_status_summary("")
+        )
         if normalized_scope == "current_run":
             evidence_summaries = []
             known_gaps = ["current_run scope does not retrieve project, library, or global evidence memory."]
@@ -2692,6 +2697,7 @@ class KnowledgeBaseStore:
             "related_runs": related_runs,
             "prior_hypotheses": prior_hypotheses,
             "user_feedback": feedback_items,
+            "execution_memory": execution_memory,
             "evidence_summaries": evidence_summaries,
             "memory_sources": memory_sources,
             "evidence_boundary": self._evidence_memory_boundary(evidence_summaries),
