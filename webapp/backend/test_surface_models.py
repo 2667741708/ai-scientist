@@ -7,6 +7,7 @@ from surface_models import (
     experiment_design_surface_summary,
     hypothesis_surface_collection,
     hypothesis_surface_summary,
+    memory_surface_summary,
     ranking_surface_summary,
     research_goal_readiness_surface_summary,
     report_surface_summary,
@@ -385,6 +386,165 @@ def test_run_surface_summary_distinguishes_complete_grounded_and_error_modes() -
     assert failed["mode_boundary"]["mode"] == "live_model"
     assert failed["recoverable"] is False
     assert failed["next_actions"] == ["start_new_run", "inspect_failure_summary"]
+
+
+def test_memory_surface_summary_hides_raw_context_by_default() -> None:
+    memory_context = {
+        "memory_scope": "project",
+        "memory_sources": ["parent_run", "prior_hypotheses", "chat_feedback", "knowledge_base"],
+        "parent_run": {
+            "run_id": "parent-secret",
+            "research_goal": "Evaluate retrieval-grounded hypothesis generation",
+            "status": "complete",
+            "hypothesis_count": 3,
+            "updated_at": 2.0,
+        },
+        "related_runs": [{"run_id": "related-secret", "research_goal": "Related hidden run"}],
+        "prior_hypotheses": [
+            {
+                "hypothesis_id": "hyp-secret",
+                "text": "SECRET HYPOTHESIS TEXT should stay behind expert disclosure.",
+            }
+        ],
+        "user_feedback": [
+            {
+                "feedback_id": "feedback-secret",
+                "feedback_type": "critique",
+                "target_type": "hypothesis",
+                "text": "SECRET FEEDBACK TEXT should not appear by default.",
+            }
+        ],
+        "evidence_summaries": [
+            {
+                "paper_id": "paper-secret",
+                "chunk_id": "chunk-secret",
+                "library_id": "library-secret",
+                "title": "Parsed fulltext support",
+                "source_reliability": "parsed_fulltext",
+                "support_level": "experimental_data",
+                "matched_snippet": "SECRET FULLTEXT MATCH should not appear in memory summary.",
+            }
+        ],
+        "execution_memory": {
+            "status": "ready",
+            "phase": "review",
+            "resume_supported": True,
+            "checkpoint_backend": "langgraph_sqlite",
+            "resume_mode": "thread_resume",
+            "latest_checkpoint": {
+                "checkpoint_id": "checkpoint-secret",
+                "checkpoint_ref": "checkpoint-secret-ref",
+            },
+        },
+        "known_gaps": ["Need replication evidence before treating this as validated."],
+    }
+
+    summary = memory_surface_summary(memory_context)
+
+    assert summary["status"] == "ready"
+    assert summary["memory_scope"] == "project"
+    assert summary["memory_sources"] == ["parent_run", "prior_hypotheses", "chat_feedback", "knowledge_base"]
+    assert summary["parent_run"] == {
+        "research_goal": "Evaluate retrieval-grounded hypothesis generation",
+        "status": "complete",
+        "hypothesis_count": 3,
+        "updated_at": 2.0,
+    }
+    assert summary["counts"] == {
+        "parent_run": 1,
+        "related_runs": 1,
+        "prior_hypotheses": 1,
+        "user_feedback": 1,
+        "evidence_sources": 1,
+        "known_gaps": 1,
+    }
+    assert summary["feedback_summary"]["feedback_types"] == {"critique": 1}
+    assert summary["feedback_summary"]["target_types"] == {"hypothesis": 1}
+    assert summary["evidence_scope"]["status"] == "parsed_fulltext"
+    assert summary["evidence_scope"]["evidence_count"] == 1
+    assert summary["evidence_scope"]["parsed_fulltext_count"] == 1
+    assert summary["evidence_scope"]["experimental_data_count"] == 1
+    assert summary["evidence_scope"]["library_count"] == 1
+    assert summary["execution_memory"] == {
+        "status": "ready",
+        "phase": "review",
+        "resume_supported": True,
+        "checkpoint_backend": "langgraph_sqlite",
+        "resume_mode": "thread_resume",
+    }
+    assert summary["known_gap_summaries"] == ["Need replication evidence before treating this as validated."]
+    assert summary["next_actions"] == ["review_context", "continue_run"]
+    assert "internal_refs" not in summary
+    assert "SECRET" not in str(summary)
+    assert "parent-secret" not in str(summary)
+    assert "related-secret" not in str(summary)
+    assert "hyp-secret" not in str(summary)
+    assert "feedback-secret" not in str(summary)
+    assert "paper-secret" not in str(summary)
+    assert "chunk-secret" not in str(summary)
+    assert "checkpoint-secret" not in str(summary)
+
+    expert_summary = memory_surface_summary(memory_context, include_internal_refs=True)
+
+    assert expert_summary["internal_refs"]["parent_run_id"] == "parent-secret"
+    assert expert_summary["internal_refs"]["related_run_ids"] == ["related-secret"]
+    assert expert_summary["internal_refs"]["feedback_ids"] == ["feedback-secret"]
+    assert expert_summary["internal_refs"]["hypothesis_ids"] == ["hyp-secret"]
+    assert expert_summary["internal_refs"]["evidence_refs"] == [
+        {"paper_id": "paper-secret", "chunk_id": "chunk-secret", "library_id": "library-secret"}
+    ]
+    assert expert_summary["internal_refs"]["checkpoint_id"] == "checkpoint-secret"
+    assert expert_summary["internal_refs"]["checkpoint_ref"] == "checkpoint-secret-ref"
+    assert expert_summary["internal_refs"]["raw_memory_context"]["user_feedback"][0]["text"].startswith("SECRET")
+
+
+def test_memory_surface_summary_reports_empty_limited_and_conflicted_states() -> None:
+    empty = memory_surface_summary({})
+
+    assert empty["status"] == "empty"
+    assert empty["parent_run"] is None
+    assert empty["next_actions"] == ["select_parent_run", "add_feedback", "parse_evidence"]
+
+    limited = memory_surface_summary(
+        {
+            "parent_run": {
+                "run_id": "parent-limited-secret",
+                "research_goal": "Continue sparse prior run",
+            },
+            "execution_memory": {"status": "limited"},
+            "evidence_boundary": {"status": "absent"},
+        }
+    )
+
+    assert limited["status"] == "limited"
+    assert limited["counts"]["parent_run"] == 1
+    assert limited["evidence_scope"]["status"] == "absent"
+    assert limited["next_actions"] == ["review_context", "add_or_parse_evidence", "continue_run"]
+    assert "parent-limited-secret" not in str(limited)
+
+    conflicted = memory_surface_summary(
+        {
+            "evidence_summaries": [
+                {
+                    "paper_id": "paper-conflict-secret",
+                    "chunk_id": "chunk-conflict-secret",
+                    "title": "Counter evidence",
+                    "source_reliability": "parsed_fulltext",
+                    "support_level": "contradicted",
+                }
+            ]
+        }
+    )
+
+    assert conflicted["status"] == "needs_review"
+    assert conflicted["evidence_scope"]["status"] == "contradicted"
+    assert conflicted["next_actions"] == [
+        "inspect_memory_evidence",
+        "revise_memory_scope",
+        "continue_with_caution",
+    ]
+    assert "paper-conflict-secret" not in str(conflicted)
+    assert "chunk-conflict-secret" not in str(conflicted)
 
 
 def test_evidence_surface_summary_hides_internal_refs_by_default() -> None:
