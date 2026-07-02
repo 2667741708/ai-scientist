@@ -71,6 +71,8 @@ def test_run_lifecycle_persists_checkpoint_metadata(monkeypatch) -> None:
         assert api_payload["run_id"] == run_id
         assert api_payload["count"] >= 3
         assert api_payload["summary"]["status"] == "metadata_only"
+        assert api_payload["summary"]["thread_id"] == run_id
+        assert api_payload["summary"]["latest_checkpoint_id"] == latest["checkpoint_id"]
         assert api_payload["summary"]["latest_status"] == "complete"
         assert api_payload["summary"]["has_langgraph_summary"] is False
         assert "metadata index only" in api_payload["boundary"]
@@ -135,6 +137,8 @@ def test_checkpoint_metadata_helper_persists_langgraph_summary(monkeypatch) -> N
         assert api_payload["summary"]["status"] == "ready"
         assert api_payload["summary"]["has_langgraph_summary"] is True
         assert api_payload["summary"]["checkpoint_backend"] == "langgraph_sqlite"
+        assert api_payload["summary"]["thread_id"] == "run-langgraph-summary"
+        assert api_payload["summary"]["latest_checkpoint_id"] == "run-langgraph-summary:langgraph:checkpoint-123"
         assert "LangGraph checkpoint summaries" in api_payload["boundary"]
         assert "raw channel values are not exposed" in api_payload["boundary"]
 
@@ -165,5 +169,7 @@ def test_checkpoint_endpoint_reports_not_available_without_metadata(monkeypatch)
         assert payload["checkpoints"] == []
         assert payload["summary"]["status"] == "not_available"
         assert payload["summary"]["checkpoint_count"] == 0
+        assert payload["summary"]["thread_id"] == "run-no-checkpoints"
+        assert payload["summary"]["latest_checkpoint_id"] is None
         assert payload["summary"]["latest_status"] is None
         assert payload["summary"]["resume_boundary"] == "No checkpoint metadata is available for this run."
