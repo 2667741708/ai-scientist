@@ -2474,27 +2474,37 @@ class KnowledgeBaseStore:
             ).fetchone()
         return self._feedback_from_row(row) if row else None
 
-    def list_feedback_items(self, *, run_id: Optional[str] = None, limit: int = 50) -> list[Dict[str, Any]]:
+    def list_feedback_items(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        target_type: Optional[str] = None,
+        feedback_type: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[Dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if target_type:
+            clauses.append("target_type = ?")
+            params.append(target_type)
+        if feedback_type:
+            clauses.append("feedback_type = ?")
+            params.append(feedback_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(limit, 200)))
         with self._connection() as connection:
-            if run_id:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM research_feedback
-                    WHERE run_id = ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                    """,
-                    (run_id, max(1, min(limit, 200))),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM research_feedback
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                    """,
-                    (max(1, min(limit, 200)),),
-                ).fetchall()
+            rows = connection.execute(
+                f"""
+                SELECT * FROM research_feedback
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
         return [self._feedback_from_row(row) for row in rows]
 
     def persist_checkpoint_metadata(
