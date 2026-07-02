@@ -363,6 +363,118 @@ def memory_surface_summary(
     return summary
 
 
+def workspace_surface_summary(
+    workspace_state: Any,
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    source = _as_mapping(workspace_state)
+    request = _as_mapping(_first_value(source, ("request", "run_request", "request_preview")))
+    run = _as_mapping(source.get("run"))
+    parent_run = _as_mapping(source.get("parent_run"))
+    memory_context = _first_value(source, ("memory", "memory_context"))
+    library = _first_value(source, ("library", "evidence_library"))
+    papers = source.get("papers")
+    parse_runs = source.get("parse_runs")
+    worker_status = _as_mapping(source.get("worker_status"))
+    execution_memory = _as_mapping(source.get("execution_memory"))
+    service_statuses = _as_mapping(source.get("service_statuses"))
+
+    goal = research_goal_readiness_surface_summary(request)
+    confirmation = (
+        run_confirmation_surface_summary(
+            request,
+            parent_run_summary=parent_run,
+            memory_summary=memory_context if isinstance(memory_context, Mapping) else None,
+        )
+        if request
+        else None
+    )
+    run_summary = run_surface_summary(
+        run,
+        work_item_snapshot=_as_mapping(source.get("work_item_snapshot")),
+        memory_summary=memory_context if isinstance(memory_context, Mapping) else None,
+        recovery_policy=_as_mapping(source.get("recovery_policy")),
+    ) if run else None
+    memory = memory_surface_summary(memory_context) if memory_context is not None else None
+    evidence_library = (
+        evidence_library_surface_summary(library, papers=papers, parse_runs=parse_runs)
+        if library is not None or papers is not None or parse_runs is not None
+        else None
+    )
+    runtime = (
+        runtime_readiness_surface_summary(
+            worker_status=worker_status,
+            execution_memory=execution_memory,
+            service_statuses=service_statuses,
+        )
+        if worker_status or execution_memory or service_statuses
+        else None
+    )
+    primary_surface = _workspace_primary_surface(
+        goal_summary=goal,
+        confirmation_summary=confirmation,
+        run_summary=run_summary,
+    )
+    summary = {
+        "status": _workspace_status(
+            primary_surface=primary_surface,
+            run_summary=run_summary,
+            goal_summary=goal,
+            runtime_summary=runtime,
+        ),
+        "primary_surface": primary_surface,
+        "layout": {
+            "shell": "three_panel_research_workspace",
+            "left": "project_navigation",
+            "center": primary_surface["surface"],
+            "right": "collapsible_inspector",
+        },
+        "surfaces": {
+            "goal": goal,
+            "confirmation": confirmation,
+            "run": run_summary,
+            "memory": memory,
+            "evidence_library": evidence_library,
+            "runtime": runtime,
+        },
+        "inspectors": _workspace_inspectors(
+            memory_summary=memory,
+            evidence_library_summary=evidence_library,
+            runtime_summary=runtime,
+            agent_trace_available=bool(source.get("agent_trace") or source.get("agent_trace_summary")),
+        ),
+        "next_actions": primary_surface["next_actions"],
+        "hidden_by_default": [
+            "raw_run_request",
+            "raw_memory_context",
+            "agent_trace_payload",
+            "worker_lease_details",
+            "checkpoint_refs",
+            "provider_diagnostics",
+            "internal_ids",
+        ],
+        "visibility_boundary": (
+            "Workspace summaries choose the task surface, layout regions, inspectors, and next actions "
+            "for the researcher; raw requests, work items, memory JSON, trace payloads, checkpoint refs, "
+            "provider diagnostics, and internal IDs require expert/debug disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "run_id": run.get("run_id"),
+            "parent_run_id": request.get("parent_run_id") or parent_run.get("run_id"),
+            "library_id": _as_mapping(library).get("library_id") if library is not None else None,
+            "work_item_ids": [
+                _first_value(item, ("work_item_id", "id"))
+                for item in _record_items(_as_mapping(source.get("work_item_snapshot")).get("items"))
+                if _first_value(item, ("work_item_id", "id"))
+            ],
+            "raw_workspace_state": dict(source),
+        }
+    return summary
+
+
 def hypothesis_surface_summary(
     hypothesis: Any,
     *,
@@ -1967,6 +2079,109 @@ def _memory_checkpoint_value(execution_memory: Mapping[str, Any], key: str) -> A
         return value
     latest = _as_mapping(execution_memory.get("latest_checkpoint"))
     return latest.get(key)
+
+
+def _workspace_primary_surface(
+    *,
+    goal_summary: Mapping[str, Any],
+    confirmation_summary: Optional[Mapping[str, Any]],
+    run_summary: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    if run_summary:
+        run_status = str(run_summary.get("status") or "")
+        if run_status in {"complete", "completed"}:
+            surface = "active_result_canvas"
+            title = "Inspect research results"
+        elif run_status in {"queued", "pending", "running", "retrying"}:
+            surface = "run_progress"
+            title = "Monitor research run"
+        elif run_status in {"error", "failed", "stale"}:
+            surface = "recovery_panel"
+            title = "Recover research run"
+        else:
+            surface = "run_summary"
+            title = "Review research run"
+        return {
+            "surface": surface,
+            "title": title,
+            "status": run_summary.get("status"),
+            "next_actions": list(run_summary.get("next_actions") or ["inspect_run"]),
+        }
+    if confirmation_summary and confirmation_summary.get("status") == "pending":
+        return {
+            "surface": "run_confirmation_card",
+            "title": "Confirm research task",
+            "status": "pending_confirmation",
+            "next_actions": list(confirmation_summary.get("next_actions") or ["confirm_start_run", "edit_request"]),
+        }
+    goal_status = str(goal_summary.get("status") or "empty")
+    return {
+        "surface": "research_goal_composer",
+        "title": "Define research goal",
+        "status": goal_status,
+        "next_actions": list(goal_summary.get("next_actions") or ["write_research_goal"]),
+    }
+
+
+def _workspace_status(
+    *,
+    primary_surface: Mapping[str, Any],
+    run_summary: Optional[Mapping[str, Any]],
+    goal_summary: Mapping[str, Any],
+    runtime_summary: Optional[Mapping[str, Any]],
+) -> str:
+    runtime_status = str(_as_mapping(runtime_summary).get("status") or "")
+    if runtime_status in {"offline", "permission_denied"}:
+        return "needs_attention"
+    if run_summary:
+        run_status = str(run_summary.get("status") or "")
+        if run_status in {"error", "failed", "stale"}:
+            return "needs_attention"
+        if run_status in {"queued", "pending", "running", "retrying"}:
+            return "in_progress"
+        if run_status in {"complete", "completed"}:
+            return "results_ready"
+    if primary_surface.get("surface") == "run_confirmation_card":
+        return "ready_to_start"
+    if goal_summary.get("status") in {"empty", "needs_refinement"}:
+        return "needs_goal"
+    return "ready_to_start"
+
+
+def _workspace_inspectors(
+    *,
+    memory_summary: Optional[Mapping[str, Any]],
+    evidence_library_summary: Optional[Mapping[str, Any]],
+    runtime_summary: Optional[Mapping[str, Any]],
+    agent_trace_available: bool,
+) -> list[Dict[str, Any]]:
+    inspectors = [
+        {
+            "id": "memory",
+            "label": "History context",
+            "available": bool(memory_summary and memory_summary.get("status") != "empty"),
+            "default_state": "collapsed",
+        },
+        {
+            "id": "evidence",
+            "label": "Evidence readiness",
+            "available": bool(evidence_library_summary and evidence_library_summary.get("status") != "empty"),
+            "default_state": "collapsed",
+        },
+        {
+            "id": "process",
+            "label": "Process and evidence",
+            "available": agent_trace_available,
+            "default_state": "collapsed",
+        },
+        {
+            "id": "runtime",
+            "label": "Runtime readiness",
+            "available": bool(runtime_summary),
+            "default_state": "collapsed",
+        },
+    ]
+    return inspectors
 
 
 def _run_recovery_summary(recovery: Mapping[str, Any]) -> Dict[str, Any]:
