@@ -1128,6 +1128,12 @@ def _extract_research_goal(text: str) -> Optional[str]:
         match = re.search(pattern, text, re.IGNORECASE | re.S)
         if match:
             goal = match.group("goal").strip(" ：:\n\t")
+            goal = re.split(
+                r"[；;\n]+(?:我的假设|初始假设|偏好|约束|限制|请|一起|starting hypothes|preferences?|constraints?)",
+                goal,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip(" ：:\n\t")
             if len(goal) >= 8:
                 return goal[:1200]
     if len(text.strip()) >= 18 and _contains_any(text, ["研究", "hypothesis", "假设", "机制", "experiment", "实验"]):
@@ -1135,11 +1141,55 @@ def _extract_research_goal(text: str) -> Optional[str]:
     return None
 
 
+def _split_user_clauses(text: str) -> list[str]:
+    return [part.strip(" \n\t；;。.") for part in re.split(r"[；;\n]+", text) if part.strip(" \n\t；;。.")]
+
+
+def _extract_starting_hypotheses(text: str) -> list[str]:
+    hypotheses: list[str] = []
+    for clause in _split_user_clauses(text):
+        if "研究目标" in clause or "research goal" in clause.lower():
+            continue
+        if not _contains_any(clause, ["我的假设", "初始假设", "starting hypothesis", "starting hypotheses", "hypothesis is"]):
+            continue
+        cleaned = re.sub(
+            r"^(?:我的)?(?:初始)?假设(?:是|为)?\s*[:：]?\s*",
+            "",
+            clause,
+            flags=re.I,
+        ).strip(" ：:")
+        cleaned = re.sub(r"^starting hypothes(?:is|es)\s*(?:is|are)?\s*[:：]?\s*", "", cleaned, flags=re.I)
+        if len(cleaned) >= 8:
+            hypotheses.append(cleaned[:1200])
+    return hypotheses[:20]
+
+
+def _extract_labeled_list(text: str, labels: tuple[str, ...], *, max_items: int = 20) -> list[str]:
+    results: list[str] = []
+    for clause in _split_user_clauses(text):
+        lowered = clause.lower()
+        matched_label = next((label for label in labels if label.lower() in lowered), None)
+        if not matched_label:
+            continue
+        cleaned = re.sub(
+            r"^(?:偏好|约束|限制|constraints?|preferences?)\s*[:：]?\s*",
+            "",
+            clause,
+            flags=re.I,
+        ).strip(" ：:")
+        if len(cleaned) >= 2:
+            results.append(cleaned[:800])
+    return results[:max_items]
+
+
 def _looks_like_hypothesis_verification_request(text: str) -> bool:
     lowered = text.lower()
     if len(text.strip()) < 12:
         return False
-    if _contains_any(text, ["研究目标", "research goal"]) and _contains_any(text, ["生成", "候选假设", "start", "run"]):
+    if _contains_any(text, ["研究目标", "research goal"]) and _contains_any(
+        text,
+        ["生成", "候选假设", "评审", "排序", "一起", "纳入", "启动", "开始", "start", "run", "rank", "review"],
+    ):
         return False
     has_hypothesis = _contains_any(
         text,
@@ -1346,10 +1396,18 @@ def _route_research_chat_intent(message: str) -> Dict[str, Any]:
         }
     research_goal = _extract_research_goal(text)
     if research_goal and _contains_any(text, ["研究目标", "我想研究", "开始", "启动", "运行", "生成", "候选假设", "research goal", "run", "workflow"]):
+        starting_hypotheses = _extract_starting_hypotheses(text)
+        constraints = _extract_labeled_list(text, ("约束", "限制", "constraint", "constraints"), max_items=40)
+        preferences = _extract_labeled_list(text, ("偏好", "preference", "preferences"), max_items=1)
         return {
             "intent": "start_research_run",
             "confidence": 0.9,
-            "extractedInputs": {"research_goal": research_goal},
+            "extractedInputs": {
+                "research_goal": research_goal,
+                "starting_hypotheses": starting_hypotheses,
+                "constraints": constraints,
+                "preferences": preferences[0] if preferences else None,
+            },
             "missingInputs": [],
             "userFacingReason": "用户通过对话提供 research goal 并请求启动研究流程。",
         }
@@ -6129,6 +6187,18 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
 
     if intent == "start_research_run":
         research_goal = str(inputs["research_goal"]).strip()
+        starting_hypotheses = [
+            str(item).strip()
+            for item in (inputs.get("starting_hypotheses") if isinstance(inputs.get("starting_hypotheses"), list) else [])
+            if str(item).strip()
+        ][:20]
+        constraints = [
+            str(item).strip()
+            for item in (inputs.get("constraints") if isinstance(inputs.get("constraints"), list) else [])
+            if str(item).strip()
+        ][:40]
+        preferences = str(inputs.get("preferences") or "").strip() or None
+        parent_run_id = request.context.run_id if _contains_any(request.message, ["继续", "基于当前", "基于上次", "continue", "revise"]) else None
         normalized_min_references = min(request.context.min_references, request.context.max_references)
         normalized_max_references = max(request.context.min_references, request.context.max_references)
         action_id = f"action_{uuid.uuid4().hex[:12]}"
@@ -6139,7 +6209,13 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
             title="启动 Live model research workflow",
             summary="我可以用这个 research goal 启动真实模型研究流程，生成、评审、排序并演化候选假设。若启用 literature-grounded workflow，会先使用本地知识库和 MCP 文献源做证据准备；执行前需要确认，因为会消耗模型/文献服务资源。",
             input_summary=research_goal[:240],
-            operation_summary=["检查模型、本地知识库和文献服务", "执行 safety gate", "启动多阶段研究 workflow", "生成候选假设、review、Elo ranking 和 timeline"],
+            operation_summary=[
+                "检查模型、本地知识库和文献服务",
+                "执行 safety gate",
+                "启动多阶段研究 workflow",
+                f"纳入 {len(starting_hypotheses)} 条用户候选假设" if starting_hypotheses else "由模型生成候选假设",
+                "生成 review、Elo ranking 和 timeline",
+            ],
             risk_summary="将调用真实模型；如果启用 literature-grounded workflow，还会检查 MCP 文献服务。没有文献证据的输出会标记为 limited/ungrounded。",
             expected_result_summary=["research run", "hypotheses", "reviews", "tournament matchups", "agent trace"],
             approval_scope="research.start_live_run",
@@ -6153,6 +6229,14 @@ async def research_chat_turn(request: ResearchChatTurnRequest) -> Dict[str, Any]
                 "iterations": request.context.iterations,
                 "min_references": normalized_min_references,
                 "max_references": normalized_max_references,
+                "preferences": preferences,
+                "constraints": constraints,
+                "starting_hypotheses": starting_hypotheses,
+                "starting_hypotheses_count": len(starting_hypotheses),
+                "parent_run_id": parent_run_id,
+                "refinement_mode": "continue_from_run" if parent_run_id else "new_run",
+                "memory_scope": "project",
+                "library_id": request.context.library_id,
             },
         )
 
@@ -6471,6 +6555,25 @@ async def confirm_research_chat_action(
                     iterations=bounded_int(preview.get("iterations"), 0, 0, 3),
                     min_references=normalized_min_references,
                     max_references=normalized_max_references,
+                    preferences=str(preview.get("preferences") or "") or None,
+                    constraints=[
+                        str(item).strip()
+                        for item in (preview.get("constraints") if isinstance(preview.get("constraints"), list) else [])
+                        if str(item).strip()
+                    ],
+                    starting_hypotheses=[
+                        str(item).strip()
+                        for item in (
+                            preview.get("starting_hypotheses")
+                            if isinstance(preview.get("starting_hypotheses"), list)
+                            else []
+                        )
+                        if str(item).strip()
+                    ],
+                    parent_run_id=str(preview.get("parent_run_id") or "") or None,
+                    refinement_mode=str(preview.get("refinement_mode") or "new_run"),
+                    memory_scope=str(preview.get("memory_scope") or "project"),
+                    library_id=str(preview.get("library_id") or "") or None,
                 )
             )
             run_id = payload["run_id"]
