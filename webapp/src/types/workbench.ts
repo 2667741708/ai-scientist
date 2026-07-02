@@ -177,6 +177,26 @@ export type RunRecord = {
   error?: string;
 };
 
+export type CheckpointMetadata = {
+  checkpoint_id: string;
+  run_id: string;
+  thread_id: string;
+  phase?: string | null;
+  status: string;
+  checkpoint_backend: string;
+  checkpoint_ref?: string | null;
+  state_summary: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+};
+
+export type RunCheckpointsResponse = {
+  run_id: string;
+  checkpoints: CheckpointMetadata[];
+  count: number;
+  boundary: string;
+};
+
 export type Health = {
   status: string;
   api_endpoint?: string;
