@@ -377,6 +377,8 @@ class HypothesisGenerator:
             "constraints": opts.get("constraints"),
             "starting_hypotheses": user_inputs.get("starting_hypotheses"),
             "literature": user_inputs.get("literature"),
+            "memory_context": opts.get("memory_context"),
+            "user_feedback": opts.get("user_feedback"),
         }
 
         return initial_state, start_time, run_id
