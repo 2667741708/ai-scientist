@@ -262,6 +262,50 @@ def test_research_feedback_checkpoints_and_memory_context() -> None:
         assert memory["memory_boundary"] == "Summaries only; raw records are not injected."
 
 
+def test_checkpoint_status_summary_reports_resume_boundary() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+
+        missing = store.checkpoint_status_summary("run_missing")
+        assert missing["status"] == "not_available"
+        assert missing["checkpoint_available"] is False
+        assert missing["resume_supported"] is False
+
+        store.persist_checkpoint_metadata(
+            checkpoint_id="checkpoint_limited",
+            run_id="run_checkpoint",
+            thread_id="run_checkpoint",
+            phase="review",
+            status="saved",
+            checkpoint_backend="metadata_only",
+            state_summary={"completed_phase": "review"},
+        )
+        limited = store.checkpoint_status_summary("run_checkpoint")
+        assert limited["status"] == "limited"
+        assert limited["resume_mode"] == "metadata_only_retry"
+        assert limited["resume_config_fields"] == ["thread_id"]
+        assert limited["latest_checkpoint"]["state_summary"]["completed_phase"] == "review"
+        assert "full LangGraph state resume remains limited" in limited["boundary"]
+
+        store.persist_checkpoint_metadata(
+            checkpoint_id="checkpoint_ready",
+            run_id="run_checkpoint",
+            thread_id="run_checkpoint",
+            phase="ranking",
+            status="saved",
+            checkpoint_backend="langgraph_sqlite",
+            checkpoint_ref="checkpoint-ready-ref",
+            state_summary={"completed_phase": "ranking"},
+        )
+        ready = store.checkpoint_status_summary("run_checkpoint")
+        assert ready["status"] == "ready"
+        assert ready["resume_supported"] is True
+        assert ready["resume_mode"] == "langgraph_thread_resume"
+        assert ready["resume_config_fields"] == ["thread_id", "checkpoint_id", "checkpoint_ns"]
+        assert ready["latest_checkpoint"]["checkpoint_id"] == "checkpoint_ready"
+        assert ready["latest_checkpoint"]["checkpoint_ref"] == "checkpoint-ready-ref"
+
+
 def test_current_run_memory_scope_does_not_retrieve_project_evidence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
