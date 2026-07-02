@@ -1347,6 +1347,28 @@ def _contains_any(text: str, terms: List[str]) -> bool:
     lowered = text.lower()
     return any(term.lower() in lowered for term in terms)
 
+def _looks_like_start_research_run_request(text: str) -> bool:
+    if not _extract_research_goal(text):
+        return False
+    return _contains_any(
+        text,
+        [
+            "生成",
+            "候选假设",
+            "评审",
+            "排序",
+            "一起",
+            "纳入",
+            "启动",
+            "开始",
+            "start",
+            "run",
+            "rank",
+            "review",
+            "workflow",
+        ],
+    )
+
 
 def _looks_like_concept_question(text: str) -> bool:
     return _contains_any(
@@ -2831,6 +2853,10 @@ def _research_chat_literal_refs(message: str) -> Dict[str, Any]:
         "managed_ssh": managed_ssh,
         "arbitrary_ssh": arbitrary_ssh,
         "conditional_tool_boundary": _looks_like_conditional_tool_boundary(message),
+        "starting_hypotheses": _extract_starting_hypotheses(message),
+        "constraints": _extract_labeled_list(message, ("约束", "限制", "constraint", "constraints"), max_items=40),
+        "attributes": _extract_labeled_list(message, ("评价维度", "属性", "attribute", "attributes"), max_items=20),
+        "preferences": (_extract_labeled_list(message, ("偏好", "preference", "preferences"), max_items=1) or [None])[0],
     }
     return {key: value for key, value in refs.items() if value not in (None, [], {})}
 
@@ -3013,12 +3039,20 @@ def _normalize_planner_inputs(intent: str, inputs: Dict[str, Any], literal_refs:
         normalized["command"] = str(normalized.get("command") or managed.get("command") or "").strip()
         normalized["workdir"] = normalized.get("workdir") or managed.get("workdir")
     if intent == "start_research_run":
-        normalized["research_goal"] = str(normalized.get("research_goal") or literal_refs.get("research_goal") or "").strip()
+        literal_research_goal = literal_refs.get("research_goal")
+        if literal_research_goal and _looks_like_start_research_run_request(message):
+            normalized["research_goal"] = str(literal_research_goal or "").strip()
+        else:
+            normalized["research_goal"] = str(normalized.get("research_goal") or literal_research_goal or "").strip()
         for key in ("starting_hypotheses", "constraints", "attributes"):
             value = normalized.get(key)
-            normalized[key] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
+            literal_value = literal_refs.get(key)
+            source_value = value if isinstance(value, list) and value else literal_value
+            normalized[key] = [str(item).strip() for item in source_value if str(item).strip()] if isinstance(source_value, list) else []
         if normalized.get("preferences") is not None:
             normalized["preferences"] = str(normalized.get("preferences") or "").strip()
+        elif literal_refs.get("preferences"):
+            normalized["preferences"] = str(literal_refs.get("preferences") or "").strip()
     if intent in {"inspect_hypothesis", "explain_ranking", "design_experiment"} and normalized.get("hypothesis_index") is None:
         normalized["hypothesis_index"] = literal_refs.get("hypothesis_index")
     if intent in {"check_hypothesis_grounding", "verify_evidence_with_literature"}:
@@ -3040,6 +3074,29 @@ def _validate_planner_route(
     capabilities_by_intent = _research_chat_capabilities_by_intent()
     capabilities_by_id = _research_chat_capabilities_by_id()
     intent = str(raw_plan.get("intent") or "ask_project_ai").strip()
+    if _looks_like_start_research_run_request(message) and intent in {
+        "ask_project_ai",
+        "discover_capabilities",
+        "search_knowledge_evidence",
+        "check_hypothesis_grounding",
+        "verify_evidence_with_literature",
+        "clarify",
+    }:
+        intent = "start_research_run"
+        raw_plan = {
+            **raw_plan,
+            "intent": intent,
+            "capability_id": "research.start_run",
+            "inputs": {
+                "research_goal": literal_refs.get("research_goal"),
+                "starting_hypotheses": literal_refs.get("starting_hypotheses") or [],
+                "preferences": literal_refs.get("preferences"),
+                "constraints": literal_refs.get("constraints") or [],
+                "attributes": literal_refs.get("attributes") or [],
+            },
+            "executionMode": "approval_required",
+            "answerStrategy": "用户提供了明确研究目标并请求评审/排序，应生成启动确认卡。",
+        }
     capability_id = raw_plan.get("capability_id")
     capability = capabilities_by_intent.get(intent)
     if capability_id:
