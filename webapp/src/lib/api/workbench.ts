@@ -1,4 +1,5 @@
 import type {
+  AgentRegistryResponse,
   BackgroundJob,
   BackgroundJobsResponse,
   BrowserScreenshotRequest,
@@ -64,6 +65,12 @@ export async function fetchHealth() {
   const response = await fetch(`${getApiBase()}/api/health`);
   if (!response.ok) throw new Error(`health_failed_${response.status}`);
   return (await response.json()) as Health;
+}
+
+export async function fetchAgentRegistry() {
+  const response = await fetch(`${getApiBase()}/api/agents/registry`);
+  if (!response.ok) throw new Error(`agent_registry_failed_${response.status}`);
+  return (await response.json()) as AgentRegistryResponse;
 }
 
 export async function startLiteratureService() {
