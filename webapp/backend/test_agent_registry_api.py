@@ -109,7 +109,10 @@ def test_agent_trace_entries_include_registry_metadata(monkeypatch) -> None:
             },
         )
 
-        assert len(live_trace) == 1
-        assert live_trace[0].agent_id == "hypothesis_review_agent"
-        assert live_trace[0].prompt_template == "prompts/review.md"
-        assert live_trace[0].synthetic is False
+        by_live_phase = {trace.phase: trace for trace in live_trace}
+        assert by_live_phase["review"].agent_id == "hypothesis_review_agent"
+        assert by_live_phase["review"].prompt_template == "prompts/review.md"
+        assert by_live_phase["review"].synthetic is False
+        assert by_live_phase["literature_review"].agent_id == "literature_grounding_agent"
+        assert by_live_phase["literature_review"].degradation_reason == "literature_review_disabled_latent_knowledge_boundary"
+        assert "not evidence" in by_live_phase["literature_review"].output
