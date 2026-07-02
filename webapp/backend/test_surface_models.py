@@ -6,6 +6,7 @@ from surface_models import (
     evidence_surface_collection,
     evidence_surface_summary,
     experiment_design_surface_summary,
+    feedback_surface_summary,
     hypothesis_surface_collection,
     hypothesis_surface_summary,
     memory_surface_summary,
@@ -561,6 +562,72 @@ def test_memory_surface_summary_reports_empty_limited_and_conflicted_states() ->
     ]
     assert "paper-conflict-secret" not in str(conflicted)
     assert "chunk-conflict-secret" not in str(conflicted)
+
+
+def test_feedback_surface_summary_hides_raw_feedback_by_default() -> None:
+    feedback = [
+        {
+            "feedback_id": "feedback-secret-1",
+            "run_id": "run-secret",
+            "target_type": "hypothesis",
+            "target_ref": {"hypothesis_id": "hyp-secret", "local_path": "D:/secret/raw.json"},
+            "feedback_type": "critique",
+            "text": "SECRET FEEDBACK TEXT should not appear by default.",
+            "user_id": "user-secret",
+        },
+        {
+            "feedback_id": "feedback-secret-2",
+            "run_id": "run-secret",
+            "target_type": "run",
+            "target_ref": {"run_id": "run-secret"},
+            "feedback_type": "prefer",
+            "text": "SECRET PREFERENCE TEXT should not appear by default.",
+        },
+    ]
+
+    summary = feedback_surface_summary(feedback)
+
+    assert summary["status"] == "available"
+    assert summary["count"] == 2
+    assert summary["feedback_types"] == {"critique": 1, "prefer": 1}
+    assert summary["target_types"] == {"hypothesis": 1, "run": 1}
+    assert summary["applies_to"] == "next_run_or_continuation"
+    assert "next run or continuation" in summary["application_boundary"]
+    assert summary["target_summary"] == [
+        {"target_type": "hypothesis", "feedback_type": "critique", "count": 1},
+        {"target_type": "run", "feedback_type": "prefer", "count": 1},
+    ]
+    assert summary["next_actions"] == [
+        "review_feedback_summary",
+        "apply_to_next_run_or_continuation",
+        "continue_or_revise_hypotheses",
+    ]
+    assert "internal_refs" not in summary
+    assert "feedback-secret" not in str(summary)
+    assert "run-secret" not in str(summary)
+    assert "hyp-secret" not in str(summary)
+    assert "D:/secret" not in str(summary)
+    assert "SECRET" not in str(summary)
+
+    expert_summary = feedback_surface_summary(feedback, include_internal_refs=True)
+
+    assert expert_summary["internal_refs"]["feedback_ids"] == ["feedback-secret-1", "feedback-secret-2"]
+    assert expert_summary["internal_refs"]["run_ids"] == ["run-secret", "run-secret"]
+    assert expert_summary["internal_refs"]["target_refs"][0]["hypothesis_id"] == "hyp-secret"
+    assert expert_summary["internal_refs"]["raw_feedback"][0]["text"].startswith("SECRET")
+
+
+def test_feedback_surface_summary_reports_empty_state() -> None:
+    summary = feedback_surface_summary([])
+
+    assert summary["status"] == "empty"
+    assert summary["count"] == 0
+    assert summary["feedback_types"] == {}
+    assert summary["target_types"] == {}
+    assert summary["applies_to"] is None
+    assert summary["target_summary"] == []
+    assert summary["next_actions"] == ["add_feedback", "select_hypothesis_or_run"]
+    assert "No feedback has been recorded" in summary["application_boundary"]
 
 
 def test_workspace_surface_summary_chooses_confirmation_layout_without_raw_details() -> None:
