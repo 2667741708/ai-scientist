@@ -4639,6 +4639,28 @@ def memory_context_user_summary(memory_context: Dict[str, Any]) -> Dict[str, Any
     }
 
 
+def include_current_run_feedback_in_memory(
+    memory_context: Dict[str, Any],
+    *,
+    run_id: str,
+    parent_run_id: Optional[str],
+) -> None:
+    if not parent_run_id or parent_run_id == run_id:
+        return
+    existing_ids = {
+        str(item.get("feedback_id"))
+        for item in memory_context.get("user_feedback", [])
+        if isinstance(item, dict) and item.get("feedback_id")
+    }
+    current_feedback = [
+        item
+        for item in knowledge_base.list_feedback_items(run_id=run_id, limit=20)
+        if str(item.get("feedback_id")) not in existing_ids
+    ]
+    if current_feedback:
+        memory_context.setdefault("user_feedback", []).extend(current_feedback)
+
+
 def persist_run_record(record: RunRecord) -> None:
     try:
         knowledge_base.record_research_run(run_record_payload(record))
@@ -10072,6 +10094,7 @@ async def get_run_memory(run_id: str) -> Dict[str, Any]:
         library_id=record.request.library_id,
         memory_scope=record.request.memory_scope,
     )
+    include_current_run_feedback_in_memory(memory, run_id=run_id, parent_run_id=record.request.parent_run_id)
     return {"run_id": run_id, "summary": memory_context_user_summary(memory), "memory": memory}
 
 
