@@ -76,6 +76,10 @@ export type WorkerStatusResponse = WorkerStatus & {
   boundary?: string;
 };
 
+export type RunCheckpointsSummaryResponse = RunCheckpointsResponse & {
+  summary: Record<string, unknown>;
+};
+
 export async function fetchHealth() {
   const response = await fetch(`${getApiBase()}/api/health`);
   if (!response.ok) throw new Error(`health_failed_${response.status}`);
@@ -147,7 +151,7 @@ export async function fetchRunCheckpoints(runId: string, limit = 20) {
   const params = new URLSearchParams({ limit: String(limit) });
   const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/checkpoints?${params.toString()}`);
   if (!response.ok) throw new Error(`run_checkpoints_failed_${response.status}`);
-  return (await response.json()) as RunCheckpointsResponse;
+  return (await response.json()) as RunCheckpointsSummaryResponse;
 }
 
 export async function fetchWorkerStatus() {
