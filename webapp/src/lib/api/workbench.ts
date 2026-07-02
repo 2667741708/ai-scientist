@@ -39,6 +39,7 @@ import type {
   ResearchScheduleTickResponse,
   ResearchSkillsResponse,
   ResearchTasksResponse,
+  RunCheckpointsResponse,
   RunRecord,
   RunRequest,
   SessionSearchResponse,
@@ -126,6 +127,13 @@ export async function fetchRunMemory(runId: string) {
   const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/memory`);
   if (!response.ok) throw new Error(`run_memory_failed_${response.status}`);
   return (await response.json()) as { run_id: string; memory: Record<string, unknown> };
+}
+
+export async function fetchRunCheckpoints(runId: string, limit = 20) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/checkpoints?${params.toString()}`);
+  if (!response.ok) throw new Error(`run_checkpoints_failed_${response.status}`);
+  return (await response.json()) as RunCheckpointsResponse;
 }
 
 export async function fetchWorkerStatus() {
