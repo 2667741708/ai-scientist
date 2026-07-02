@@ -122,3 +122,12 @@ def test_checkpoint_metadata_helper_persists_langgraph_summary(monkeypatch) -> N
         assert checkpoint["state_summary"]["channel_keys"] == ["hypotheses", "metrics"]
         assert "channel_values" not in checkpoint["state_summary"]
         assert "raw channel values are not exposed" in checkpoint["state_summary"]["boundary"]
+
+        studio.persist_run_record(record)
+        with TestClient(studio.app) as client:
+            api_response = client.get("/api/runs/run-langgraph-summary/checkpoints")
+        assert api_response.status_code == 200, api_response.text
+        api_payload = api_response.json()
+        assert api_payload["count"] == 1
+        assert "LangGraph checkpoint summaries" in api_payload["boundary"]
+        assert "raw channel values are not exposed" in api_payload["boundary"]
