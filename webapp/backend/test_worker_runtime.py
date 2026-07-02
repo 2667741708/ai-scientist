@@ -91,6 +91,8 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         assert status["active_work_item_count"] == 1
         assert status["user_facing_status"]["state"] == "worker_disabled"
         assert status["user_facing_status"]["next_actions"] == ["enable_worker_or_manual_tick", "monitor_queue"]
+        assert status["user_facing_status"]["recovery_action_counts"]["wait"] == 1
+        assert status["user_facing_status"]["recovery_action_counts"]["retry"] == 0
         assert "owner" not in status["user_facing_status"]["safe_default_fields"]
         assert "worker-test" not in str(status["user_facing_status"])
         assert status["queue_status_counts"]["queued"] == 1
@@ -103,6 +105,7 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         assert runtime_status["queued_count"] == 1
         assert runtime_status["active_work_item_count"] == 1
         assert runtime_status["user_facing_status"]["state"] == "worker_disabled"
+        assert runtime_status["user_facing_status"]["recovery_action_counts"]["wait"] == 1
         assert runtime_status["queue_status_counts"]["queued"] == 1
         assert runtime_status["active_work_item_snapshot"]["counts"]["active"] == 1
         assert store.get_work_item(item["work_item_id"])["status"] == "queued"
@@ -353,6 +356,8 @@ async def test_worker_user_facing_status_hides_worker_internals() -> None:
         assert user_status["state"] == "worker_disabled"
         assert user_status["counts"]["queued_count"] == 1
         assert user_status["counts"]["active_work_item_count"] == 1
+        assert user_status["recovery_action_counts"]["wait"] == 1
+        assert "recovery_action_counts" in user_status["safe_default_fields"]
         assert user_status["expert_fields"] == [
             "owner",
             "lease_seconds",
