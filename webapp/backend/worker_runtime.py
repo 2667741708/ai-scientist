@@ -65,7 +65,8 @@ class ResearchWorkerRuntime:
                 task = asyncio.create_task(self._execute_work_item(item))
                 self._running_tasks.add(task)
                 task.add_done_callback(self._running_tasks.discard)
-        queue_status_counts = self._queue_status_counts()
+        active_work_item_snapshot = self._active_work_item_snapshot()
+        queue_status_counts = dict(active_work_item_snapshot.get("counts") or self._queue_status_counts())
         queue_count_summary = self._queue_count_summary(queue_status_counts)
         return {
             "enabled": self.enabled,
@@ -77,13 +78,15 @@ class ResearchWorkerRuntime:
             "leased_count": len(leased),
             "running_count": len(self._running_tasks),
             "queue_status_counts": queue_status_counts,
+            "active_work_item_snapshot": active_work_item_snapshot,
             **queue_count_summary,
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
 
     def status(self) -> Dict[str, Any]:
-        queue_status_counts = self._queue_status_counts()
+        active_work_item_snapshot = self._active_work_item_snapshot()
+        queue_status_counts = dict(active_work_item_snapshot.get("counts") or self._queue_status_counts())
         return {
             "enabled": self.enabled,
             "owner": self.owner,
@@ -92,10 +95,29 @@ class ResearchWorkerRuntime:
             "poll_seconds": self.poll_seconds,
             "running_count": len([task for task in self._running_tasks if not task.done()]),
             "queue_status_counts": queue_status_counts,
+            "active_work_item_snapshot": active_work_item_snapshot,
             **self._queue_count_summary(queue_status_counts),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
         }
+
+    def _active_work_item_snapshot(self) -> Dict[str, Any]:
+        snapshotter = getattr(self.store, "active_work_item_snapshot", None)
+        if not callable(snapshotter):
+            return {
+                "counts": self._queue_status_counts(),
+                "items": [],
+                "visibility_boundary": "Store does not expose active work item snapshots.",
+            }
+        try:
+            return dict(snapshotter(limit=max(1, min(50, int(self.concurrency or 1) * 10))))
+        except Exception as exc:  # pragma: no cover - defensive status reporting
+            self._last_error = str(exc)
+            return {
+                "counts": self._queue_status_counts(),
+                "items": [],
+                "visibility_boundary": "Active work item snapshot unavailable.",
+            }
 
     def _queue_status_counts(self) -> Dict[str, int]:
         counter = getattr(self.store, "work_item_status_counts", None)
