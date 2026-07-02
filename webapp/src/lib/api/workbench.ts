@@ -62,6 +62,20 @@ import { parseApiError } from "../formatters/workbench";
 import { authHeaders } from "./auth";
 import { getApiBase } from "./client";
 
+export type RunMemorySummaryResponse = {
+  run_id: string;
+  summary: Record<string, unknown>;
+  memory: Record<string, unknown>;
+};
+
+export type WorkerStatusResponse = WorkerStatus & {
+  auto_start_enabled?: boolean;
+  queue_health?: string;
+  active_work_items?: Array<Record<string, unknown>>;
+  active_work_item_count?: number;
+  boundary?: string;
+};
+
 export async function fetchHealth() {
   const response = await fetch(`${getApiBase()}/api/health`);
   if (!response.ok) throw new Error(`health_failed_${response.status}`);
@@ -126,7 +140,7 @@ export async function listRunFeedback(runId: string, limit = 50) {
 export async function fetchRunMemory(runId: string) {
   const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/memory`);
   if (!response.ok) throw new Error(`run_memory_failed_${response.status}`);
-  return (await response.json()) as { run_id: string; memory: Record<string, unknown> };
+  return (await response.json()) as RunMemorySummaryResponse;
 }
 
 export async function fetchRunCheckpoints(runId: string, limit = 20) {
@@ -139,11 +153,11 @@ export async function fetchRunCheckpoints(runId: string, limit = 20) {
 export async function fetchWorkerStatus() {
   const response = await fetch(`${getApiBase()}/api/worker/status`);
   if (!response.ok) throw new Error(`worker_status_failed_${response.status}`);
-  return (await response.json()) as WorkerStatus;
+  return (await response.json()) as WorkerStatusResponse;
 }
 
 export async function tickWorker() {
-  return postJson<WorkerStatus>("/api/worker/tick", {});
+  return postJson<WorkerStatusResponse>("/api/worker/tick", {});
 }
 
 function coerceRunSummaryToRecord(summary: Partial<RunRecord> & { run_id: string }): RunRecord {
