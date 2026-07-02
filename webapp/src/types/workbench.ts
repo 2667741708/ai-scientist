@@ -264,6 +264,10 @@ export type SummaryItem = {
   tone?: "neutral" | "ok" | "warning" | "error";
 };
 
+export type RecoveryAction = "wait" | "retry" | "unblock" | "escalate" | "inspect" | "none";
+
+export type RecoveryActionCounts = Record<RecoveryAction, number>;
+
 export type TournamentItemViewModel = {
   id: string;
   label: string;
@@ -729,6 +733,22 @@ export type WorkspaceViewModel = {
   tournamentItems: TournamentItemViewModel[];
 };
 
+export type RunSurfaceModel = {
+  statusLabel: string;
+  phaseLabel: string;
+  modeBoundary: string;
+  nextAction: string;
+  recoverable: boolean;
+  recoveryAction: RecoveryAction;
+  statusTone: StatusBadgeItem["tone"];
+  queueLabel: string;
+  recoveryActionCounts: RecoveryActionCounts;
+  memorySummaryLabel: string;
+  safeDefaultFields: string[];
+  expertFields: string[];
+  hiddenRawRefs: true;
+};
+
 export type ToolWorkflowApproval = {
   confirmed: boolean;
   scope: string;
@@ -1055,6 +1075,24 @@ export type WorkItem = {
   updated_at: number;
 };
 
+export type WorkerUserFacingStatus = {
+  status_label?: string;
+  running_count?: number;
+  queued_count?: number;
+  leased_count?: number;
+  retrying_count?: number;
+  blocked_count?: number;
+  complete_count?: number;
+  error_count?: number;
+  cancelled_count?: number;
+  active_work_item_count?: number;
+  recovery_action?: RecoveryAction | string;
+  recovery_action_counts?: Partial<RecoveryActionCounts> & Record<string, number>;
+  next_action?: string;
+  safe_default_fields?: string[];
+  boundary?: string;
+};
+
 export type WorkerStatus = {
   enabled: boolean;
   auto_start_enabled?: boolean;
@@ -1074,6 +1112,7 @@ export type WorkerStatus = {
   recovered_count?: number;
   last_tick_at?: number | null;
   last_error?: string | null;
+  user_facing_status?: WorkerUserFacingStatus;
 };
 
 export type ToolResultResponse = {
