@@ -495,6 +495,10 @@ def test_memory_context_surface_summary_hides_raw_details_by_default() -> None:
         assert summary["feedback_types"] == {"critique": 1}
         assert summary["execution_memory"]["status"] == "limited"
         assert summary["execution_memory"]["phase"] == "review"
+        assert summary["execution_memory"]["can_resume"] is False
+        assert summary["execution_memory"]["should_retry"] is True
+        assert summary["execution_memory"]["recovery_action"] == "retry"
+        assert summary["execution_memory"]["next_actions"] == ["retry_from_durable_queue", "inspect_checkpoint_metadata"]
         assert "checkpoint_id" not in summary["execution_memory"]
         assert summary["evidence_boundary"]["status"] == "parsed_fulltext"
         assert summary["injection_policy"]["status"] == "summary_only"
