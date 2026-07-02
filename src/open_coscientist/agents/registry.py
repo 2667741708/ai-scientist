@@ -18,6 +18,15 @@ class AgentSpec(TypedDict):
     degradation_when_disabled: str
 
 
+class PhaseStatus(TypedDict):
+    phase: str
+    label: str
+    agent_id: str
+    enabled: bool
+    configurable: bool
+    degradation_reason: Optional[str]
+
+
 BASE_OBSERVABILITY_FIELDS = [
     "phase",
     "agent_id",
@@ -224,6 +233,53 @@ def get_agent_spec(agent_id: str) -> Optional[AgentSpec]:
         if spec["agent_id"] == agent_id:
             return deepcopy(spec)
     return None
+
+
+def get_phase_status_payload(*, disabled_phases: Optional[List[str]] = None) -> Dict[str, Any]:
+    disabled = {str(phase) for phase in (disabled_phases or [])}
+    specs_by_phase = {spec["phase"]: spec for spec in AGENT_REGISTRY}
+    invalid_disabled_phases: list[Dict[str, str]] = []
+    phase_statuses: list[PhaseStatus] = []
+
+    for phase in PHASE_ORDER:
+        spec = specs_by_phase[phase]
+        requested_disabled = phase in disabled
+        enabled = not requested_disabled or not spec["configurable"]
+        degradation_reason = spec["degradation_when_disabled"] if requested_disabled and spec["configurable"] else None
+        if requested_disabled and not spec["configurable"]:
+            invalid_disabled_phases.append(
+                {
+                    "phase": phase,
+                    "label": PHASE_LABELS.get(phase, phase),
+                    "reason": "required_phase_cannot_be_disabled",
+                }
+            )
+        phase_statuses.append(
+            {
+                "phase": phase,
+                "label": PHASE_LABELS.get(phase, phase),
+                "agent_id": spec["agent_id"],
+                "enabled": enabled,
+                "configurable": spec["configurable"],
+                "degradation_reason": degradation_reason,
+            }
+        )
+
+    degraded_phases = [
+        status
+        for status in phase_statuses
+        if not status["enabled"] and status["degradation_reason"]
+    ]
+    return {
+        "phase_statuses": phase_statuses,
+        "degraded_phases": degraded_phases,
+        "degradation_count": len(degraded_phases),
+        "invalid_disabled_phases": invalid_disabled_phases,
+        "boundary": (
+            "Disabled configurable phases must be shown as capability degradation; "
+            "required phases remain enabled."
+        ),
+    }
 
 
 def get_agent_registry_payload(*, public: bool = True) -> Dict[str, Any]:
