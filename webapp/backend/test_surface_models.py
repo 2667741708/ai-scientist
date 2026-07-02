@@ -555,6 +555,34 @@ def test_memory_surface_summary_hides_raw_context_by_default() -> None:
                 "checkpoint_ref": "checkpoint-secret-ref",
             },
         },
+        "injection_policy": {
+            "mode": "summary_only",
+            "memory_scope": "project",
+            "memory_sources": ["parent_run", "chat_feedback", "knowledge_base"],
+            "prompt_sections": [
+                "parent_run_summary",
+                "feedback_type_and_target_summary",
+                "evidence_boundary_and_snippet_summaries",
+            ],
+            "target_prompts": ["supervisor", "generate", "review", "ranking"],
+            "counts": {
+                "prior_hypotheses": 1,
+                "feedback_items": 1,
+                "evidence_summaries": 1,
+            },
+            "evidence_status": "experimental_data",
+            "raw_injection_allowed": False,
+            "excluded_raw_fields": [
+                "chat_message_bodies",
+                "feedback_text",
+                "hypothesis_full_text",
+                "checkpoint_state",
+                "tool_result_json",
+                "provider_payloads",
+                "full_pdf_chunks",
+            ],
+            "boundary": "SECRET RAW POLICY DETAIL should be truncated and safe.",
+        },
         "known_gaps": ["Need replication evidence before treating this as validated."],
     }
 
@@ -591,6 +619,36 @@ def test_memory_surface_summary_hides_raw_context_by_default() -> None:
         "checkpoint_backend": "langgraph_sqlite",
         "resume_mode": "thread_resume",
     }
+    assert summary["injection_policy"] == {
+        "status": "summary_only",
+        "mode": "summary_only",
+        "memory_scope": "project",
+        "memory_sources": ["parent_run", "chat_feedback", "knowledge_base"],
+        "prompt_sections": [
+            "parent_run_summary",
+            "feedback_type_and_target_summary",
+            "evidence_boundary_and_snippet_summaries",
+        ],
+        "target_prompts": ["supervisor", "generate", "review", "ranking"],
+        "counts": {
+            "prior_hypotheses": 1,
+            "feedback_items": 1,
+            "evidence_summaries": 1,
+        },
+        "evidence_status": "experimental_data",
+        "raw_injection_allowed": False,
+        "excluded_raw_field_count": 7,
+        "excluded_raw_fields": [
+            "chat_message_bodies",
+            "feedback_text",
+            "hypothesis_full_text",
+            "checkpoint_state",
+            "tool_result_json",
+            "provider_payloads",
+            "full_pdf_chunks",
+        ],
+        "boundary_summary": "Memory injection uses summary-only guidance; raw memory payloads require expert disclosure.",
+    }
     assert summary["known_gap_summaries"] == ["Need replication evidence before treating this as validated."]
     assert summary["next_actions"] == ["review_context", "continue_run"]
     assert "internal_refs" not in summary
@@ -602,6 +660,7 @@ def test_memory_surface_summary_hides_raw_context_by_default() -> None:
     assert "paper-secret" not in str(summary)
     assert "chunk-secret" not in str(summary)
     assert "checkpoint-secret" not in str(summary)
+    assert "raw_memory_context" not in str(summary)
 
     expert_summary = memory_surface_summary(memory_context, include_internal_refs=True)
 
@@ -614,6 +673,7 @@ def test_memory_surface_summary_hides_raw_context_by_default() -> None:
     ]
     assert expert_summary["internal_refs"]["checkpoint_id"] == "checkpoint-secret"
     assert expert_summary["internal_refs"]["checkpoint_ref"] == "checkpoint-secret-ref"
+    assert expert_summary["internal_refs"]["raw_injection_policy"]["mode"] == "summary_only"
     assert expert_summary["internal_refs"]["raw_memory_context"]["user_feedback"][0]["text"].startswith("SECRET")
 
 
