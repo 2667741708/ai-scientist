@@ -10250,7 +10250,7 @@ async def tick_worker_once() -> Dict[str, Any]:
     global worker_runtime
     if worker_runtime is None:
         worker_runtime = build_worker_runtime()
-    result = await worker_runtime.tick()
+    result = await worker_runtime.tick(force=True)
     queue_snapshot = worker_queue_snapshot()
     return {
         **result,
