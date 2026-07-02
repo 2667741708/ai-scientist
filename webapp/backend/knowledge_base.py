@@ -2855,6 +2855,11 @@ class KnowledgeBaseStore:
             if isinstance(memory_context.get("known_gaps"), list)
             else []
         )
+        injection_policy = (
+            memory_context.get("injection_policy")
+            if isinstance(memory_context.get("injection_policy"), dict)
+            else {}
+        )
         summary = {
             "memory_scope": memory_context.get("memory_scope") or "project",
             "memory_sources": list(memory_context.get("memory_sources") or []),
@@ -2877,10 +2882,12 @@ class KnowledgeBaseStore:
                 "parsed_fulltext_count": int(evidence_boundary.get("parsed_fulltext_count") or 0),
                 "experimental_data_count": int(evidence_boundary.get("experimental_data_count") or 0),
             },
+            "injection_policy": self._memory_surface_injection_policy(injection_policy),
             "known_gap_summaries": [self._safe_work_item_text(str(item), max_length=160) for item in known_gaps[:3]],
             "visibility_boundary": (
-                "Memory surface summaries expose counts and boundaries by default; raw feedback text, "
-                "hypothesis text, checkpoint refs, and retrieval diagnostics require explicit expert disclosure."
+                "Memory surface summaries expose counts, boundaries, and summary-only injection policy by default; "
+                "raw feedback text, hypothesis text, checkpoint refs, retrieval diagnostics, and raw policy payloads "
+                "require explicit expert disclosure."
             ),
         }
         if include_internal_refs:
@@ -2904,6 +2911,7 @@ class KnowledgeBaseStore:
                     for item in evidence_summaries
                     if isinstance(item, dict)
                 ][:10],
+                "raw_injection_policy": dict(injection_policy),
             }
         return summary
 
@@ -3075,6 +3083,56 @@ class KnowledgeBaseStore:
             summary["checkpoint_backend"] = latest_checkpoint.get("checkpoint_backend")
             summary["checkpoint_ref"] = latest_checkpoint.get("checkpoint_ref")
         return summary
+
+    def _memory_surface_injection_policy(self, policy: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(policy, dict) or not policy:
+            return {
+                "status": "not_declared",
+                "mode": "unknown",
+                "raw_injection_allowed": False,
+                "prompt_sections": [],
+                "target_prompts": [],
+                "excluded_raw_field_count": 0,
+                "boundary_summary": "No memory injection policy was declared for this context.",
+            }
+        raw_allowed = bool(policy.get("raw_injection_allowed"))
+        prompt_sections = [
+            self._safe_work_item_text(str(item), max_length=80)
+            for item in (policy.get("prompt_sections") if isinstance(policy.get("prompt_sections"), list) else [])
+            if item
+        ][:8]
+        target_prompts = [
+            self._safe_work_item_text(str(item), max_length=40)
+            for item in (policy.get("target_prompts") if isinstance(policy.get("target_prompts"), list) else [])
+            if item
+        ][:8]
+        excluded_raw_fields = [
+            self._safe_work_item_text(str(item), max_length=80)
+            for item in (policy.get("excluded_raw_fields") if isinstance(policy.get("excluded_raw_fields"), list) else [])
+            if item
+        ]
+        return {
+            "status": "raw_allowed" if raw_allowed else "summary_only",
+            "mode": self._safe_work_item_text(str(policy.get("mode") or "summary_only"), max_length=80),
+            "memory_scope": policy.get("memory_scope"),
+            "memory_sources": [
+                self._safe_work_item_text(str(item), max_length=60)
+                for item in (policy.get("memory_sources") if isinstance(policy.get("memory_sources"), list) else [])
+                if item
+            ][:8],
+            "prompt_sections": prompt_sections,
+            "target_prompts": target_prompts,
+            "counts": dict(policy.get("counts") if isinstance(policy.get("counts"), dict) else {}),
+            "evidence_status": policy.get("evidence_status"),
+            "raw_injection_allowed": raw_allowed,
+            "excluded_raw_field_count": len(excluded_raw_fields),
+            "excluded_raw_fields": excluded_raw_fields[:8],
+            "boundary_summary": (
+                "Raw memory injection is enabled; inspect expert policy before running."
+                if raw_allowed
+                else "Memory injection uses summary-only guidance; raw memory payloads require expert disclosure."
+            ),
+        }
 
     @staticmethod
     def _feedback_type_counts(feedback_items: list[Dict[str, Any]]) -> Dict[str, int]:
