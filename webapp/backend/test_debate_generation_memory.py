@@ -38,6 +38,13 @@ def test_debate_generation_guidance_includes_memory_without_raw_refs() -> None:
                     "text": "Prefer hypotheses with explicit counter-evidence checks.",
                 }
             ],
+            "evidence_boundary": {
+                "status": "limited",
+                "evidence_count": 2,
+                "parsed_fulltext_count": 0,
+                "experimental_data_count": 0,
+                "raw_debug_ref": "raw-debate-boundary-ref",
+            },
         },
         [
             {
@@ -55,14 +62,18 @@ def test_debate_generation_guidance_includes_memory_without_raw_refs() -> None:
     assert "[user_starting_hypothesis]" in joined
     assert "[memory_prior_hypothesis]" in joined
     assert "[memory_user_feedback]" in joined
+    assert "[memory_evidence_boundary]" in joined
     assert "[user_feedback]" in joined
     assert "[memory_generation_policy]" in joined
     assert "User seed hypothesis should guide debate generation" in joined
     assert "Prior hypothesis links parsed evidence" in joined
     assert "Prefer hypotheses with explicit counter-evidence checks" in joined
     assert "Generate candidates that can fail" in joined
+    assert "status=limited" in joined
+    assert "evidence_count=2" in joined
     assert "raw-prior-hyp-id" not in joined
     assert "raw-memory-feedback-id" not in joined
     assert "raw-current-feedback-id" not in joined
     assert "raw-current-hyp-id" not in joined
+    assert "raw-debate-boundary-ref" not in joined
     assert "target_ref" not in joined
