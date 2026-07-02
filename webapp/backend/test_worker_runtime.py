@@ -91,10 +91,15 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         assert status["active_work_item_count"] == 1
         assert status["queue_status_counts"]["queued"] == 1
         assert status["queue_status_counts"]["active"] == 1
+        assert status["active_work_item_snapshot"]["counts"]["queued"] == 1
+        assert status["active_work_item_snapshot"]["items"][0]["workflow_name"] == "workflow.test"
+        assert "work_item_id" not in status["active_work_item_snapshot"]["items"][0]
+        assert "arguments" not in status["active_work_item_snapshot"]["items"][0]
         runtime_status = runtime.status()
         assert runtime_status["queued_count"] == 1
         assert runtime_status["active_work_item_count"] == 1
         assert runtime_status["queue_status_counts"]["queued"] == 1
+        assert runtime_status["active_work_item_snapshot"]["counts"]["active"] == 1
         assert store.get_work_item(item["work_item_id"])["status"] == "queued"
 
 
