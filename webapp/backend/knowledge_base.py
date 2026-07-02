@@ -3287,6 +3287,10 @@ class KnowledgeBaseStore:
             "status": execution_memory.get("status") or "not_available",
             "checkpoint_available": bool(execution_memory.get("checkpoint_available")),
             "resume_supported": bool(execution_memory.get("resume_supported")),
+            "can_resume": bool(execution_memory.get("can_resume")),
+            "should_retry": bool(execution_memory.get("should_retry")),
+            "recovery_action": execution_memory.get("recovery_action") or "none",
+            "next_actions": list(execution_memory.get("next_actions") or []),
             "resume_mode": execution_memory.get("resume_mode"),
             "phase": latest_checkpoint.get("phase"),
         }
