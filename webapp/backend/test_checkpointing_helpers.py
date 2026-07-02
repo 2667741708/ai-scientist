@@ -4,6 +4,7 @@ import asyncio
 import sys
 import tempfile
 from pathlib import Path
+from typing import TypedDict
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -89,3 +90,51 @@ def test_open_sqlite_checkpointer_creates_async_saver() -> None:
         db_path = Path(tmp) / "checkpoints.sqlite"
         asyncio.run(run_probe(db_path))
         assert db_path.exists()
+
+
+def test_langgraph_checkpoint_summary_hides_raw_channel_values() -> None:
+    from langgraph.graph import END, START, StateGraph
+
+    from open_coscientist.checkpointing import (
+        open_sqlite_checkpointer,
+        summarize_langgraph_checkpoint_tuple,
+    )
+
+    class ProbeState(TypedDict):
+        value: str
+
+    def add_suffix(state: ProbeState) -> ProbeState:
+        return {"value": f"{state['value']}-complete"}
+
+    async def run_probe(db_path: Path) -> None:
+        async with open_sqlite_checkpointer(db_path) as saver:
+            workflow = StateGraph(ProbeState)
+            workflow.add_node("add_suffix", add_suffix)
+            workflow.add_edge(START, "add_suffix")
+            workflow.add_edge("add_suffix", END)
+            graph = workflow.compile(checkpointer=saver)
+
+            await graph.ainvoke(
+                {"value": "raw-secret-state"},
+                config={"configurable": {"thread_id": "run-checkpoint-summary"}},
+            )
+
+            checkpoint_tuple = None
+            async for candidate in saver.alist(
+                {"configurable": {"thread_id": "run-checkpoint-summary"}}
+            ):
+                checkpoint_tuple = candidate
+                break
+
+            assert checkpoint_tuple is not None
+            summary = summarize_langgraph_checkpoint_tuple(checkpoint_tuple)
+            assert summary["thread_id"] == "run-checkpoint-summary"
+            assert summary["checkpoint_id"]
+            assert summary["metadata"]["step"] is not None
+            assert "value" in summary["channel_keys"]
+            assert "channel_values" not in summary
+            assert "raw-secret-state" not in repr(summary)
+            assert "raw channel values are not exposed" in summary["boundary"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(run_probe(Path(tmp) / "checkpoints.sqlite"))
