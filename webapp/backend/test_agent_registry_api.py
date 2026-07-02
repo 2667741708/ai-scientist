@@ -38,6 +38,20 @@ def test_agent_registry_module_describes_specialized_agents(monkeypatch) -> None
         assert payload["registry_version"] == "paper_level_v1"
         assert payload["count"] == 9
         assert set(payload["phases"]) == EXPECTED_PHASES
+        assert payload["phase_order"] == [
+            "supervisor",
+            "literature_review",
+            "generate",
+            "reflection",
+            "review",
+            "ranking",
+            "meta_review",
+            "evolve",
+            "proximity",
+        ]
+        assert payload["phase_labels"]["ranking"] == "Tournament ranking"
+        assert "literature_review" in payload["configurable_phases"]
+        assert "review" in payload["required_phases"]
         assert set(payload["phase_index"]) == EXPECTED_PHASES
         assert payload["phase_index"]["review"]["agent_id"] == "hypothesis_review_agent"
         assert payload["phase_index"]["review"]["prompt_template"] == "prompts/review.md"
@@ -69,6 +83,10 @@ def test_agent_registry_endpoint_returns_auditable_payload(monkeypatch) -> None:
         payload = response.json()
         assert payload["count"] == 9
         assert set(payload["phases"]) == EXPECTED_PHASES
+        assert payload["phase_order"][0] == "supervisor"
+        assert payload["phase_labels"]["literature_review"] == "Literature grounding"
+        assert "proximity" in payload["configurable_phases"]
+        assert "supervisor" in payload["required_phases"]
         assert payload["phase_index"]["ranking"]["agent_id"] == "ranking_agent"
         assert payload["phase_index"]["ranking"]["prompt_template"] == "prompts/ranking.md"
         assert payload["phase_index"]["literature_review"]["configurable"] is True
