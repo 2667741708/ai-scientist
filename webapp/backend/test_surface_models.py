@@ -639,6 +639,10 @@ def test_memory_surface_summary_hides_raw_context_by_default() -> None:
         "status": "ready",
         "phase": "review",
         "resume_supported": True,
+        "can_resume": True,
+        "should_retry": False,
+        "recovery_action": "resume",
+        "next_actions": ["resume_langgraph_thread", "monitor_progress"],
         "checkpoint_backend": "langgraph_sqlite",
         "resume_mode": "thread_resume",
     }
