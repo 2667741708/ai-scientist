@@ -2424,6 +2424,70 @@ test_runtime_readiness_model_is_admin_only
 
 这层 ViewModel 是前端“顺手好用”的保护层：后端可以继续变复杂，但普通研究者看到的仍然是研究目标、证据质量、候选假设、可证伪实验、报告产出和下一步操作。
 
+### 8.19 页面级实施规格卡
+
+本计划后续进入前端实现时，每个页面改动都必须先产出一张轻量规格卡，回答 `frontend-design` skill 的 9 个闸门问题：用户是谁、页面完成什么任务、信息层级、主要操作路径、桌面布局、移动布局、空/加载/错误状态、组件清单和可用性风险。规格卡可以写在 PR 描述、issue 或同目录设计说明中，但实现必须能对应到实际路由、组件和 ViewModel。
+
+规格卡不是让页面变复杂，而是防止论文级能力以系统内部名词直接暴露给普通研究者。页面默认只呈现用户当前要判断的内容；queue、checkpoint、agent trace、memory retrieval、provider readiness 等实现细节必须经过任务语言翻译后再出现。
+
+首批页面规格建议：
+
+| 页面/路由 | 用户是谁 | 页面任务 | 首屏信息层级 | 主操作路径 | 桌面布局 | 移动布局 | 必备状态 | 组件清单 | 主要风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Home / Projects | 准备开始或继续研究的研究者 | 创建或恢复一个研究任务 | 当前项目/最近项目、研究目标输入、证据准备提示、一个主按钮 | 输入目标 -> 补充可验证性提示 -> 进入确认卡或 Workspace | 顶部项目摘要，中心 `ResearchGoalComposer`，下方最近任务和证据 readiness | 单列，目标输入置顶，最近任务折叠为列表 | empty、loading recent projects、service limited、offline | `ModeBoundaryBar`、`ResearchGoalComposer`、recent project list、readiness hint | 做成宣传页或仪表盘，导致用户不知道下一步 |
+| Workspace | 正在监督 run 的研究者 | 用自然语言启动、确认、追踪、反馈和继续 run | 目标/模式边界、确认卡或运行状态、当前结果、可展开证据/过程 | 输入目标/假设 -> 确认 live/demo/evidence 边界 -> queued/running -> 检查结果 -> 写反馈/继续迭代 | 左侧 320-380px chat/control，中间结果画布，右侧 320-420px inspector | Tabs：对话/结果/证据；composer sticky；详情用 bottom sheet | confirming、queued、running、retrying、complete、error、cancelled | `ResearchCommandCenter`、`RunConfirmationCard`、`RunProgressStrip`、`FeedbackComposer`、`InspectorDrawer` | 把 worker、run_id、raw request、prompt debug 放进默认路径 |
+| Papers / Data | 准备证据的研究者 | 解析 PDF/网页、管理 library、判断证据质量 | library 选择、上传/解析/search、parse job 状态、paper list | 选择 library -> 上传/输入路径/搜索 -> 解析入库 -> 查看 evidence snippets | 左侧 library/filter，中间 ingest 与列表，右侧 evidence drawer | 单列 ingest actions；列表卡片化；详情 bottom sheet | empty library、parsing、parse partial、parse failed、network limited | `LibrarySelector`、`PdfIngestForm`、`ParseJobList`、`PaperList`、`EvidenceDrawer` | 把 PDF 阅读、PDF 解析、证据入库混成一个不清晰动作 |
+| Hypotheses | 比较候选方向的研究者 | 评估、排序、筛选、选择下一步实验 | run/mode/evidence boundary、ranked list、selected detail、next action | 选择候选 -> 查看摘要/来源/证据 -> 展开评审或排名 -> 送入实验设计 | 左侧 ranked list，中间 selected hypothesis，右侧 evidence/review/ranking tabs | 默认 ranked cards；点卡进入详情；详情 tabs：概览/证据/评审/排名/实验 | no hypotheses、ranking pending、limited evidence、review missing | `HypothesisCard`、`HypothesisDetailPanel`、`RankingSummary`、`ReviewTabs`、`EvidenceDrawer` | 卡片塞满评审原文、matchup JSON 和 agent trace，降低比较效率 |
+| Experiments | 想验证候选假设的研究者 | 把假设转成可证伪实验方案 | selected hypothesis、变量/对照/指标、失败条件、证据缺口 | 选择假设 -> 生成/编辑实验设计 -> 检查替代解释 -> 写入报告 | 中心 experiment canvas，右侧 evidence/risk panel，底部 export actions | 单列 wizard 或 tabs；风险/证据放 bottom sheet | no selected hypothesis、drafting、insufficient evidence、saved | `ExperimentCanvas`、variables/control form、failure criteria block、risk panel | 只给乐观实验方案，不展示失败条件和替代解释 |
+| Reports / Outputs | 整理成果的研究者 | 输出可审计 finding、limitations 和引用边界 | findings outline、evidence boundary、experiment plan、export | 选择 run/hypothesis -> 生成报告骨架 -> 检查 citation QA -> 导出 | 左侧 outline，中间 draft/preview，右侧 evidence and limitation QA | Outline 变 section tabs；citation QA 折叠 | empty report、generating、citation limited、export failed | `ReportOutline`、`FindingDraft`、`CitationQA`、`ExportActions` | demo/live/literature-grounded 边界丢失，报告像真实发现 |
+| Runtime / Admin | 管理员或高级用户 | 判断 worker、queue、checkpoint、provider readiness | readiness summary、queue counts、recovery action、diagnostic disclosure | 查看状态 -> 触发 tick/重试 -> 展开诊断 -> 复制给维护者 | 状态摘要 + queue table + worker controls + diagnostics drawer | 只保留摘要和关键恢复动作，复杂表格改为详情页 | worker disabled、lease expired、retrying、provider offline | `RuntimeReadinessPanel`、`QueueStatusTable`、`WorkerControls`、`DiagnosticsDrawer` | 普通用户路径暴露 stack trace、env var、provider key 状态或内部路径 |
+
+页面规格卡还必须明确“设计功能什么时候出现”。一个功能只有在它能回答用户当前问题时才进入默认页面：
+
+| 功能 | 默认出现条件 | 默认呈现方式 | 展开后呈现 | 不应出现的位置 |
+| --- | --- | --- | --- | --- |
+| starting hypotheses | 用户在自然语言输入中提供候选假设，或 continuation 使用 parent run | 确认卡显示数量、摘要、编辑/删除和“纳入候选池” | raw extraction confidence、来源句子 | Home 的静态指标区 |
+| user feedback | 用户针对 run/hypothesis/review 明确输入反馈 | Feedback composer 标注“影响下一轮/继续迭代” | feedback target、type、存储状态 | running output 上伪装成立即可逆控制 |
+| durable queue | run 已确认但尚未完成 | `RunProgressStrip` 显示 queued/running/retrying 和恢复动作 | work item status、attempt count、lease expiry | 普通 Home 首屏或 hypothesis card 内 |
+| execution memory | run 可恢复、继续或失败恢复 | 任务化文案：可恢复/等待重试/需要人工处理 | checkpoint metadata、resume policy | 报告正文或普通结果摘要 |
+| research memory | continuation 或 parent run 被选中 | parent run 摘要、feedback 数量、使用的 library/evidence scope | memory snippets、retrieval diagnostics | 未开始状态的默认首屏 |
+| evidence memory | hypothesis 有证据链接或用户打开证据 | support level、source reliability、matched snippet summary | chunk、media、citation map、artifact refs | 未展开的 compact card |
+| agent trace | run 有可审计过程且用户点击过程入口 | phase list、agent role、output summary、tool count | prompt/template、token usage、tool args/results | 顶级导航作为独立普通页面 |
+| ranking/tournament | hypotheses 已进入 review/ranking | rank、Elo、win/loss 摘要、why this ranked high/low | matchup table、before/after Elo、reasoning | 没有完成 ranking 的空状态 |
+| runtime diagnostics | 用户进入 Admin 或错误需要恢复 | service readiness、worker enabled、recovery action | endpoint、env、stack、raw payload | 普通 researcher 页面默认状态 |
+
+每个页面还要显式覆盖状态设计，避免只实现 happy path：
+
+```text
+Home:
+  empty project -> 引导输入第一个 research goal。
+  service limited -> 说明可用模式，并提供 demo/live/evidence-grounded 边界。
+
+Workspace:
+  confirmation pending -> 允许编辑目标、假设、约束和模式。
+  queued/running -> 稳定高度进度条，不挤压 composer。
+  retrying/recoverable -> 给出任务化恢复文案，不暴露 lease_owner。
+  error -> 给出下一步：重试、保存反馈、进入 Admin 诊断。
+
+Papers:
+  parse partial -> 正文入库成功但 BibTeX/metadata 不完整时标记 limited。
+  parse failed -> 显示可修复原因，不展示 Python stack trace。
+
+Hypotheses:
+  evidence limited -> 卡片和详情都必须保留 limited/ungrounded 标记。
+  ranking missing -> 禁用 Elo 解释入口，并说明 ranking 尚未完成。
+
+Experiments:
+  no selected hypothesis -> 从 ranked hypotheses 选择，而不是空白画布。
+  insufficient evidence -> 先要求补证据或把实验标成 exploratory。
+
+Reports:
+  demo mode -> export 前保持 demo-only boundary。
+  citation gaps -> citation QA 必须先于最终导出提醒用户。
+```
+
+响应式验收必须和页面规格卡绑定：桌面截图至少覆盖 Home、Workspace、Papers、Hypotheses；移动截图至少覆盖 Workspace tabs、Hypotheses detail、EvidenceDrawer bottom sheet。验收不以“页面能渲染”为终点，而要确认主操作路径可见、文本不溢出、详情可关闭、焦点能返回、普通页面不暴露 raw JSON 或内部路径。
+
 ## 9. 测试矩阵
 
 ### 9.1 Backend unit tests
