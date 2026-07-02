@@ -200,6 +200,49 @@ def test_work_item_status_counts_can_scope_worker_progress() -> None:
         assert store.get_work_item(leased["work_item_id"])["status"] == "leased"
 
 
+def test_active_work_item_snapshot_hides_internal_refs_by_default() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        item = store.enqueue_work_item(
+            workflow_name="workflow.open_coscientist_run",
+            run_id="run-snapshot",
+            phase="ranking",
+            agent_role="ranking_agent",
+            arguments={"provider_payload": "do-not-show"},
+            max_attempts=3,
+        )
+        store.lease_work_items(owner="worker-secret", limit=1)
+        store.fail_work_item(
+            item["work_item_id"],
+            "Previous failure\nwith internal details " + ("x" * 240),
+            retryable=True,
+        )
+
+        snapshot = store.active_work_item_snapshot(run_id="run-snapshot")
+        assert snapshot["counts"]["retrying"] == 1
+        assert snapshot["counts"]["active"] == 1
+        assert snapshot["filters"]["run_id"] is True
+        assert snapshot["items"][0]["status"] == "retrying"
+        assert snapshot["items"][0]["workflow_label"] == "Research run"
+        assert snapshot["items"][0]["phase"] == "ranking"
+        assert snapshot["items"][0]["agent_role"] == "ranking_agent"
+        assert snapshot["items"][0]["attempts"]["remaining"] == 2
+        assert snapshot["items"][0]["error_summary"].endswith("...")
+        assert "work_item_id" not in snapshot["items"][0]
+        assert "run_id" not in snapshot["items"][0]
+        assert "lease_owner" not in snapshot["items"][0]
+        assert "arguments" not in snapshot["items"][0]
+        assert "provider_payload" not in str(snapshot)
+
+        expert_snapshot = store.active_work_item_snapshot(
+            run_id="run-snapshot",
+            include_internal_refs=True,
+        )
+        assert expert_snapshot["filters"]["run_id"] == "run-snapshot"
+        assert expert_snapshot["items"][0]["work_item_id"] == item["work_item_id"]
+        assert expert_snapshot["items"][0]["run_id"] == "run-snapshot"
+
+
 def test_cancel_work_item_does_not_override_terminal_status() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))
