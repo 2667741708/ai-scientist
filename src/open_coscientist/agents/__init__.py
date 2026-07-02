@@ -7,6 +7,7 @@ from open_coscientist.agents.registry import (
     get_phase_status_payload,
     get_trace_contract_payload,
     list_agent_specs,
+    trace_phase_sort_key,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "get_phase_status_payload",
     "get_trace_contract_payload",
     "list_agent_specs",
+    "trace_phase_sort_key",
 ]
