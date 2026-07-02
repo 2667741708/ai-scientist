@@ -2813,6 +2813,31 @@ class KnowledgeBaseStore:
             "memory_boundary": "Summaries only; raw records are not injected.",
         }
 
+    def build_memory_prompt_packet(
+        self,
+        *,
+        research_goal: str,
+        parent_run_id: Optional[str] = None,
+        library_id: Optional[str] = None,
+        memory_scope: str = "project",
+        max_runs: int = 5,
+        max_hypotheses: int = 8,
+        max_evidence: int = 8,
+    ) -> Dict[str, Any]:
+        memory_context = self.build_memory_context(
+            research_goal=research_goal,
+            parent_run_id=parent_run_id,
+            library_id=library_id,
+            memory_scope=memory_scope,
+            max_runs=max_runs,
+            max_hypotheses=max_hypotheses,
+            max_evidence=max_evidence,
+        )
+        packet = self.memory_context_prompt_packet(memory_context)
+        packet["memory_context_boundary"] = memory_context.get("memory_boundary")
+        packet["memory_sources"] = list(memory_context.get("memory_sources") or [])
+        return packet
+
     def memory_context_surface_summary(
         self,
         memory_context: Dict[str, Any],
