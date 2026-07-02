@@ -71,3 +71,54 @@ def test_run_lifecycle_persists_checkpoint_metadata(monkeypatch) -> None:
         assert api_payload["run_id"] == run_id
         assert api_payload["count"] >= 3
         assert "metadata index only" in api_payload["boundary"]
+
+
+def test_checkpoint_metadata_helper_persists_langgraph_summary(monkeypatch) -> None:
+    tempdir = tempfile.TemporaryDirectory()
+    studio = load_studio_app(monkeypatch, tempdir.name)
+
+    with tempdir:
+        request = studio.RunRequest(
+            research_goal="Verify LangGraph checkpoint metadata summaries",
+            demo_mode=False,
+            literature_review=False,
+            initial_hypotheses=1,
+            iterations=0,
+            min_references=0,
+            max_references=1,
+        )
+        record = studio.RunRecord(
+            run_id="run-langgraph-summary",
+            status="complete",
+            created_at=1.0,
+            updated_at=1.0,
+            request=request,
+        )
+        summary = {
+            "thread_id": "run-langgraph-summary",
+            "checkpoint_id": "checkpoint-123",
+            "metadata": {"source": "loop", "step": 2},
+            "channel_keys": ["hypotheses", "metrics"],
+            "boundary": "LangGraph checkpoint summary only; raw channel values are not exposed.",
+        }
+
+        studio.persist_run_checkpoint_metadata(
+            record,
+            status="complete",
+            phase="langgraph",
+            checkpoint_backend="langgraph_sqlite",
+            checkpoint_ref="checkpoint-123",
+            checkpoint_id="run-langgraph-summary:langgraph:checkpoint-123",
+            state_summary=summary,
+        )
+
+        checkpoint = studio.knowledge_base.get_checkpoint_metadata(
+            "run-langgraph-summary:langgraph:checkpoint-123"
+        )
+        assert checkpoint is not None
+        assert checkpoint["checkpoint_backend"] == "langgraph_sqlite"
+        assert checkpoint["checkpoint_ref"] == "checkpoint-123"
+        assert checkpoint["phase"] == "langgraph"
+        assert checkpoint["state_summary"]["channel_keys"] == ["hypotheses", "metrics"]
+        assert "channel_values" not in checkpoint["state_summary"]
+        assert "raw channel values are not exposed" in checkpoint["state_summary"]["boundary"]
