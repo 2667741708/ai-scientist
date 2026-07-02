@@ -16,7 +16,7 @@ import {
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { MarkdownText } from "../../components/content/MarkdownText";
-import { fetchBackgroundJob, fetchRun, fetchRunMemory, fetchToolResult, fetchWorkerStatus } from "../../lib/api/workbench";
+import { fetchBackgroundJob, fetchRun, fetchRunCheckpoints, fetchRunMemory, fetchToolResult, fetchWorkerStatus } from "../../lib/api/workbench";
 import {
   cancelResearchChatAction,
   confirmResearchChatAction,
@@ -82,6 +82,16 @@ type WorkerQueueSummary = {
   blocked_count?: number;
   active_work_item_count?: number;
   boundary?: string;
+};
+
+type CheckpointReadinessSummary = {
+  status?: string;
+  checkpoint_count?: number;
+  latest_status?: string | null;
+  latest_phase?: string | null;
+  checkpoint_backend?: string | null;
+  has_langgraph_summary?: boolean;
+  resume_boundary?: string;
 };
 
 const starterPrompts = [
@@ -250,6 +260,20 @@ function formatQueueHealth(value: unknown) {
       return "后台需要处理";
     default:
       return "后台状态未知";
+  }
+}
+
+function formatCheckpointReadiness(value: unknown) {
+  const status = typeof value === "string" ? value : "not_available";
+  switch (status) {
+    case "ready":
+      return "可恢复摘要可用";
+    case "metadata_only":
+      return "仅执行元数据";
+    case "not_available":
+      return "暂无恢复元数据";
+    default:
+      return formatBackendText(status);
   }
 }
 
@@ -456,6 +480,7 @@ export function ResearchCommandCenter({
           />
         ) : null}
         {record ? <RunMemoryContextDisclosure runId={record.run_id} /> : null}
+        {record ? <RunCheckpointDisclosure runId={record.run_id} /> : null}
         {record && record.status !== "complete" ? <WorkerQueueDisclosure runStatus={record.status} /> : null}
       </div>
 
@@ -747,6 +772,79 @@ function RunMemoryContextDisclosure({ runId }: { runId: string }) {
         </div>
       ) : null}
       <p>{summary?.boundary || "只展示摘要；原始消息、记录和内部路径默认隐藏。"}</p>
+    </details>
+  );
+}
+
+function RunCheckpointDisclosure({ runId }: { runId: string }) {
+  const [summary, setSummary] = useState<CheckpointReadinessSummary | null>(null);
+  const [boundary, setBoundary] = useState("");
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    void fetchRunCheckpoints(runId, 8)
+      .then((response) => {
+        if (cancelled) return;
+        const nextSummary = (response as { summary?: CheckpointReadinessSummary }).summary ?? null;
+        setSummary(nextSummary);
+        setBoundary(typeof response.boundary === "string" ? response.boundary : "");
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  if (status === "loading") {
+    return (
+      <details className="expert-summary checkpoint-readiness-disclosure">
+        <summary>正在读取恢复状态</summary>
+        <p>这里会展示本次运行是否已有可审计的 checkpoint 摘要。</p>
+      </details>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <details className="expert-summary checkpoint-readiness-disclosure">
+        <summary>恢复状态暂不可读</summary>
+        <p>运行记录仍可查看；如果需要恢复语义，请在过程与证据详情中重新检查。</p>
+      </details>
+    );
+  }
+
+  const readiness = formatCheckpointReadiness(summary?.status);
+  return (
+    <details className="expert-summary checkpoint-readiness-disclosure">
+      <summary>恢复状态 · {readiness}</summary>
+      <dl>
+        <div>
+          <dt>状态</dt>
+          <dd>{readiness}</dd>
+        </div>
+        <div>
+          <dt>记录数量</dt>
+          <dd>{memoryCount(summary?.checkpoint_count)} 条</dd>
+        </div>
+        <div>
+          <dt>最近阶段</dt>
+          <dd>{formatBackendText(summary?.latest_phase || summary?.latest_status || "not_available")}</dd>
+        </div>
+        <div>
+          <dt>后端</dt>
+          <dd>{formatBackendText(summary?.checkpoint_backend || "not_available")}</dd>
+        </div>
+        <div>
+          <dt>LangGraph 摘要</dt>
+          <dd>{summary?.has_langgraph_summary ? "可用" : "不可用"}</dd>
+        </div>
+      </dl>
+      <p>{summary?.resume_boundary || boundary || "只展示恢复摘要；raw checkpoint state 默认隐藏。"}</p>
     </details>
   );
 }
