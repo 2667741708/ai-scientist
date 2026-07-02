@@ -197,6 +197,16 @@ export type RunCheckpointsResponse = {
   boundary: string;
 };
 
+export type ExecutionMemoryStatus = {
+  status: "limited" | "ready";
+  thread_id_required: boolean;
+  thread_id_source: "run_id";
+  checkpoint_backend: "sqlite_metadata" | "langgraph_sqlite";
+  langgraph_checkpoint_sqlite_available: boolean;
+  runtime_only_state_keys: string[];
+  boundary: string;
+};
+
 export type Health = {
   status: string;
   api_endpoint?: string;
@@ -1048,6 +1058,7 @@ export type WorkItem = {
 export type WorkerStatus = {
   enabled: boolean;
   auto_start_enabled?: boolean;
+  execution_memory?: ExecutionMemoryStatus;
   owner: string;
   concurrency: number;
   lease_seconds: number;
