@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import logging
 import random
-from typing import Any, Dict, Tuple
+from copy import deepcopy
+from typing import Any, Dict, List, Tuple
 
 from ..constants import (
     INITIAL_ELO_RATING,
@@ -25,6 +26,86 @@ logger = logging.getLogger(__name__)
 # Semaphore to limit concurrent LLM calls (avoid rate limits)
 _ranking_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 
+
+def _short_ranking_guidance(value: Any, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}..."
+
+
+_RANKING_PACKET_FIELDS = (
+    "status",
+    "support_level",
+    "summary",
+    "feedback_type",
+    "target_type",
+    "source",
+    "source_reliability",
+    "checkpoint_available",
+    "resume_supported",
+    "should_retry",
+    "recovery_action",
+    "resume_mode",
+    "phase",
+)
+
+
+def _ranking_key_area_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if str(value or "").strip():
+        return [str(value).strip()]
+    return []
+
+
+def augment_ranking_supervisor_guidance(
+    supervisor_guidance: Dict[str, Any] | None,
+    memory_prompt_packet: Any,
+) -> Dict[str, Any] | None:
+    if not isinstance(memory_prompt_packet, dict):
+        return supervisor_guidance
+    sections = memory_prompt_packet.get("sections")
+    if not isinstance(sections, list):
+        return supervisor_guidance
+
+    memory_key_areas: List[str] = []
+    for section in sections[:6]:
+        if not isinstance(section, dict):
+            continue
+        section_name = _short_ranking_guidance(section.get("section") or "memory_section", 80)
+        items = section.get("items") if isinstance(section.get("items"), list) else []
+        for item in items[:2]:
+            if not isinstance(item, dict):
+                continue
+            fields: List[str] = []
+            for key in _RANKING_PACKET_FIELDS:
+                value = item.get(key)
+                if value in (None, "", []):
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(_short_ranking_guidance(entry, 80) for entry in value[:4])
+                fields.append(f"{key}={_short_ranking_guidance(value, 160)}")
+            if fields:
+                memory_key_areas.append(
+                    f"[memory_prompt_packet] section={section_name}; "
+                    f"{'; '.join(fields[:8])}."
+                )
+
+    if not memory_key_areas:
+        return supervisor_guidance
+
+    augmented = deepcopy(supervisor_guidance) if isinstance(supervisor_guidance, dict) else {}
+    goal_analysis = dict(augmented.get("research_goal_analysis") or {})
+    key_areas = _ranking_key_area_list(goal_analysis.get("key_areas"))
+    key_areas.extend(memory_key_areas)
+    key_areas.append(
+        "[memory_prompt_packet_policy] Use summary-only memory packet fields as ranking context; "
+        "do not expose checkpoint refs, raw tool payloads, provider payloads, or internal ids."
+    )
+    goal_analysis["key_areas"] = key_areas
+    augmented["research_goal_analysis"] = goal_analysis
+    return augmented
 
 def calculate_elo_update(
     winner_elo: int, loser_elo: int, k_factor: int = ELO_K_FACTOR
@@ -243,7 +324,10 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
     logger.info(f"Running {tournament_rounds} tournament rounds")
 
     # Get supervisor guidance and tool registry from state
-    supervisor_guidance = state.get("supervisor_guidance")
+    supervisor_guidance = augment_ranking_supervisor_guidance(
+        state.get("supervisor_guidance"),
+        state.get("memory_prompt_packet"),
+    )
     tool_registry = state.get("tool_registry")
 
     # Set deterministic random seed based on research goal and iteration
