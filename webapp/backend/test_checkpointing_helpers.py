@@ -222,6 +222,122 @@ def test_execution_resume_readiness_reports_metadata_retry_and_thread_mismatch()
     assert mismatch["next_actions"] == ["inspect_checkpoint_thread_mismatch", "start_new_run_or_requeue"]
 
 
+def test_execution_resume_readiness_surface_summary_hides_resume_config_by_default() -> None:
+    from open_coscientist.checkpointing import execution_resume_readiness_surface_summary
+
+    readiness = {
+        "status": "ready_to_resume",
+        "run_id": "run-secret",
+        "thread_id": "run-secret",
+        "thread_id_matches_run_id": True,
+        "checkpoint_available": True,
+        "checkpoint_backend": "langgraph_sqlite",
+        "checkpoint_phase": "review",
+        "checkpoint_status": "saved",
+        "work_item_status": "running",
+        "recovery_mode": "resume_from_checkpoint",
+        "can_resume": True,
+        "should_retry": False,
+        "resume_config": {
+            "configurable": {
+                "thread_id": "run-secret",
+                "checkpoint_ns": "execution-memory",
+                "checkpoint_id": "checkpoint-secret",
+            }
+        },
+        "next_actions": ["resume_langgraph_thread", "monitor_progress"],
+    }
+
+    summary = execution_resume_readiness_surface_summary(readiness)
+
+    assert summary == {
+        "status": "ready_to_resume",
+        "label": "Run can resume from a checkpoint.",
+        "recovery_mode": "resume_from_checkpoint",
+        "recovery_action": "resume",
+        "checkpoint_available": True,
+        "can_resume": True,
+        "should_retry": False,
+        "work_item_status": "running",
+        "checkpoint_phase": "review",
+        "checkpoint_status": "saved",
+        "next_actions": ["resume_langgraph_thread", "monitor_progress"],
+        "safe_default_fields": [
+            "status",
+            "label",
+            "recovery_mode",
+            "recovery_action",
+            "checkpoint_available",
+            "can_resume",
+            "should_retry",
+            "work_item_status",
+            "checkpoint_phase",
+            "checkpoint_status",
+            "next_actions",
+        ],
+        "visibility_boundary": (
+            "Execution resume readiness summaries expose recovery state, checkpoint availability, "
+            "phase/status, retry/resume guidance, and next actions by default; run IDs, thread IDs, "
+            "checkpoint IDs, resume configs, raw checkpoint channels, worker leases, and provider "
+            "payloads require expert disclosure."
+        ),
+    }
+    assert "internal_refs" not in summary
+    assert "run-secret" not in str(summary)
+    assert "checkpoint-secret" not in str(summary)
+    assert "resume_config" not in str(summary)
+
+    expert_summary = execution_resume_readiness_surface_summary(
+        readiness,
+        include_internal_refs=True,
+    )
+
+    assert expert_summary["internal_refs"]["run_id"] == "run-secret"
+    assert expert_summary["internal_refs"]["thread_id"] == "run-secret"
+    assert expert_summary["internal_refs"]["checkpoint_backend"] == "langgraph_sqlite"
+    assert expert_summary["internal_refs"]["resume_config"]["configurable"]["checkpoint_id"] == "checkpoint-secret"
+
+
+def test_execution_resume_readiness_surface_summary_reports_retry_wait_and_attention_actions() -> None:
+    from open_coscientist.checkpointing import execution_resume_readiness_surface_summary
+
+    metadata_retry = execution_resume_readiness_surface_summary(
+        {
+            "status": "metadata_guided_retry",
+            "recovery_mode": "metadata_guided_retry",
+            "checkpoint_available": True,
+            "can_resume": False,
+            "should_retry": True,
+            "work_item_status": "retrying",
+        }
+    )
+    assert metadata_retry["label"] == "Run can retry with checkpoint metadata guidance."
+    assert metadata_retry["recovery_action"] == "retry"
+    assert metadata_retry["next_actions"] == ["retry_work_item", "monitor_progress"]
+
+    waiting = execution_resume_readiness_surface_summary(
+        {
+            "status": "waiting_for_worker",
+            "recovery_mode": "queue_retry_without_checkpoint",
+            "work_item_status": "queued",
+        }
+    )
+    assert waiting["label"] == "Run is waiting for a worker."
+    assert waiting["recovery_action"] == "wait"
+    assert waiting["next_actions"] == ["monitor_queue", "check_worker_status"]
+
+    mismatch = execution_resume_readiness_surface_summary(
+        {
+            "status": "needs_attention",
+            "recovery_mode": "checkpoint_thread_mismatch",
+            "next_actions": ["inspect_checkpoint_thread_mismatch", "start_new_run_or_requeue"],
+        }
+    )
+    assert mismatch["label"] == "Run recovery needs attention."
+    assert mismatch["recovery_action"] == "inspect"
+    assert mismatch["next_actions"] == ["inspect_checkpoint_thread_mismatch", "start_new_run_or_requeue"]
+
+
 def test_build_checkpoint_metadata_record_hides_raw_workflow_state() -> None:
     from open_coscientist.checkpointing import build_checkpoint_metadata_record
 
