@@ -91,6 +91,7 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         assert status["active_work_item_count"] == 1
         assert status["user_facing_status"]["state"] == "worker_disabled"
         assert status["user_facing_status"]["next_actions"] == ["enable_worker_or_manual_tick", "monitor_queue"]
+        assert status["user_facing_status"]["recovery_action"] == "wait"
         assert status["user_facing_status"]["recovery_action_counts"]["wait"] == 1
         assert status["user_facing_status"]["recovery_action_counts"]["retry"] == 0
         assert "owner" not in status["user_facing_status"]["safe_default_fields"]
@@ -105,6 +106,7 @@ async def test_worker_tick_respects_disabled_mode() -> None:
         assert runtime_status["queued_count"] == 1
         assert runtime_status["active_work_item_count"] == 1
         assert runtime_status["user_facing_status"]["state"] == "worker_disabled"
+        assert runtime_status["user_facing_status"]["recovery_action"] == "wait"
         assert runtime_status["user_facing_status"]["recovery_action_counts"]["wait"] == 1
         assert runtime_status["queue_status_counts"]["queued"] == 1
         assert runtime_status["active_work_item_snapshot"]["counts"]["active"] == 1
@@ -356,7 +358,9 @@ async def test_worker_user_facing_status_hides_worker_internals() -> None:
         assert user_status["state"] == "worker_disabled"
         assert user_status["counts"]["queued_count"] == 1
         assert user_status["counts"]["active_work_item_count"] == 1
+        assert user_status["recovery_action"] == "wait"
         assert user_status["recovery_action_counts"]["wait"] == 1
+        assert "recovery_action" in user_status["safe_default_fields"]
         assert "recovery_action_counts" in user_status["safe_default_fields"]
         assert user_status["expert_fields"] == [
             "owner",
@@ -370,6 +374,37 @@ async def test_worker_user_facing_status_hides_worker_internals() -> None:
         assert "owner-secret" not in str(user_status)
         assert "SECRET ARGUMENT" not in str(user_status)
         assert "raw errors" in user_status["visibility_boundary"]
+
+
+def test_worker_user_facing_status_selects_primary_recovery_action() -> None:
+    runtime = ResearchWorkerRuntime(
+        store=object(),
+        handlers={},
+        owner="owner-secret",
+        enabled=True,
+    )
+
+    blocked = runtime._user_facing_status(
+        {"active": 2, "queued": 0, "running": 0, "retrying": 1, "blocked": 1, "error": 0},
+        recovery_action_counts={"retry": 1, "unblock": 1, "wait": 0},
+    )
+    assert blocked["state"] == "needs_attention"
+    assert blocked["recovery_action"] == "unblock"
+    assert "owner-secret" not in str(blocked)
+
+    failed_without_active_items = runtime._user_facing_status(
+        {"active": 0, "queued": 0, "running": 0, "retrying": 0, "blocked": 0, "error": 1},
+        recovery_action_counts={},
+    )
+    assert failed_without_active_items["state"] == "needs_attention"
+    assert failed_without_active_items["recovery_action"] == "inspect"
+
+    ready = runtime._user_facing_status(
+        {"active": 0, "queued": 0, "running": 0, "retrying": 0, "blocked": 0, "error": 0},
+        recovery_action_counts={},
+    )
+    assert ready["state"] == "ready"
+    assert ready["recovery_action"] == "none"
 
 
 def test_work_item_recovery_action_maps_queue_and_checkpoint_states_without_raw_refs() -> None:
