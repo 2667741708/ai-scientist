@@ -2363,6 +2363,21 @@ class KnowledgeBaseStore:
                 ("retrying" if should_retry else "error", error, time.time(), work_item_id),
             )
 
+    def block_work_item(self, work_item_id: str, reason: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE research_work_items
+                SET status = 'blocked',
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE work_item_id = ?
+                """,
+                (reason, time.time(), work_item_id),
+            )
+
     def cancel_work_item(self, work_item_id: str, reason: str = "cancelled") -> None:
         with self._connection() as connection:
             connection.execute(
