@@ -489,6 +489,16 @@ def test_memory_context_surface_summary_hides_raw_details_by_default() -> None:
         assert summary["execution_memory"]["phase"] == "review"
         assert "checkpoint_id" not in summary["execution_memory"]
         assert summary["evidence_boundary"]["status"] == "parsed_fulltext"
+        assert summary["injection_policy"]["status"] == "summary_only"
+        assert summary["injection_policy"]["mode"] == "summary_only"
+        assert summary["injection_policy"]["memory_scope"] == "project"
+        assert "parent_run_summary" in summary["injection_policy"]["prompt_sections"]
+        assert "feedback_type_and_target_summary" in summary["injection_policy"]["prompt_sections"]
+        assert summary["injection_policy"]["raw_injection_allowed"] is False
+        assert "feedback_text" in summary["injection_policy"]["excluded_raw_fields"]
+        assert summary["injection_policy"]["boundary_summary"] == (
+            "Memory injection uses summary-only guidance; raw memory payloads require expert disclosure."
+        )
         assert "internal_refs" not in summary
         assert "SECRET" not in str(summary)
         assert feedback["feedback_id"] not in str(summary)
@@ -505,6 +515,30 @@ def test_memory_context_surface_summary_hides_raw_details_by_default() -> None:
         assert feedback["feedback_id"] in expert_summary["internal_refs"]["feedback_ids"]
         assert "hyp_secret" in expert_summary["internal_refs"]["hypothesis_ids"]
         assert expert_summary["internal_refs"]["evidence_refs"][0]["chunk_id"]
+        assert expert_summary["internal_refs"]["raw_injection_policy"]["mode"] == "summary_only"
+
+
+def test_memory_context_surface_summary_reports_missing_injection_policy() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+
+        summary = store.memory_context_surface_summary(
+            {
+                "memory_scope": "project",
+                "memory_sources": [],
+                "known_gaps": ["No memory policy available."],
+            }
+        )
+
+        assert summary["injection_policy"] == {
+            "status": "not_declared",
+            "mode": "unknown",
+            "raw_injection_allowed": False,
+            "prompt_sections": [],
+            "target_prompts": [],
+            "excluded_raw_field_count": 0,
+            "boundary_summary": "No memory injection policy was declared for this context.",
+        }
 
 
 def test_checkpoint_status_summary_reports_resume_boundary() -> None:
