@@ -441,6 +441,56 @@ def memory_surface_summary(
     return summary
 
 
+def feedback_surface_summary(
+    feedback_items: Any,
+    *,
+    include_internal_refs: bool = False,
+) -> Dict[str, Any]:
+    records = _record_items(feedback_items)
+    base = _feedback_surface_summary(records)
+    status = "empty" if not records else "available"
+    summary = {
+        "status": status,
+        "count": base["count"],
+        "feedback_types": base["feedback_types"],
+        "target_types": base["target_types"],
+        "applies_to": base["applies_to"],
+        "application_boundary": (
+            "User feedback guides the next run or continuation. It is not presented as an immediate "
+            "reversible edit to already completed hypotheses unless a durable continuation is explicitly started."
+            if records
+            else "No feedback has been recorded for a future run or continuation."
+        ),
+        "target_summary": _feedback_target_summary(records),
+        "next_actions": _feedback_next_actions(records),
+        "visibility_boundary": (
+            "Feedback summaries expose counts, feedback type distribution, target type distribution, "
+            "application boundary, and next actions by default; raw feedback text, target references, "
+            "feedback IDs, run IDs, user IDs, and router debug require explicit expert disclosure."
+        ),
+    }
+    if include_internal_refs:
+        summary["internal_refs"] = {
+            "feedback_ids": [
+                _first_value(item, ("feedback_id", "id"))
+                for item in records
+                if _first_value(item, ("feedback_id", "id"))
+            ],
+            "run_ids": [
+                _first_value(item, ("run_id",))
+                for item in records
+                if _first_value(item, ("run_id",))
+            ],
+            "target_refs": [
+                _first_value(item, ("target_ref", "target_ref_json", "target"))
+                for item in records
+                if _first_value(item, ("target_ref", "target_ref_json", "target"))
+            ],
+            "raw_feedback": [dict(item) for item in records],
+        }
+    return summary
+
+
 def workspace_surface_summary(
     workspace_state: Any,
     *,
@@ -1939,6 +1989,32 @@ def _feedback_surface_summary(feedback_items: list[Mapping[str, Any]]) -> Dict[s
         "target_types": target_types,
         "applies_to": "next_run_or_continuation" if feedback_items else None,
     }
+
+
+def _feedback_target_summary(feedback_items: list[Mapping[str, Any]]) -> list[Dict[str, Any]]:
+    targets: Dict[str, int] = {}
+    for item in feedback_items:
+        target_type = str(item.get("target_type") or "unknown")
+        feedback_type = str(item.get("feedback_type") or "unknown")
+        key = f"{target_type}:{feedback_type}"
+        targets[key] = targets.get(key, 0) + 1
+    return [
+        {
+            "target_type": key.split(":", 1)[0],
+            "feedback_type": key.split(":", 1)[1],
+            "count": count,
+        }
+        for key, count in sorted(targets.items())
+    ]
+
+
+def _feedback_next_actions(feedback_items: list[Mapping[str, Any]]) -> list[str]:
+    if not feedback_items:
+        return ["add_feedback", "select_hypothesis_or_run"]
+    actions = ["review_feedback_summary", "apply_to_next_run_or_continuation"]
+    if any(str(item.get("target_type") or "") == "hypothesis" for item in feedback_items):
+        actions.append("continue_or_revise_hypotheses")
+    return actions
 
 
 def _confirmation_parent_summary(parent: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
