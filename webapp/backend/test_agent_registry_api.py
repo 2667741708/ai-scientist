@@ -109,19 +109,32 @@ def test_agent_trace_contract_canonicalizes_runtime_phase_aliases(monkeypatch) -
     with tempdir:
         from open_coscientist.agents import canonical_trace_phase as exported_canonical_phase
         from open_coscientist.agents import get_trace_contract_payload as exported_trace_contract
+        from open_coscientist.agents import trace_phase_sort_key as exported_trace_sort_key
         from open_coscientist.agents.registry import (
             canonical_trace_phase,
             get_trace_contract_payload,
+            trace_phase_sort_key,
         )
 
         contract = get_trace_contract_payload()
+        runtime_phases = ["unknown_vendor_phase", "rank", "supervisor", "literature"]
+        ordered_phases = [
+            phase
+            for index, phase in sorted(
+                enumerate(runtime_phases),
+                key=lambda item: trace_phase_sort_key(item[1], fallback_index=item[0]),
+            )
+        ]
 
         assert canonical_trace_phase("rank") == "ranking"
         assert canonical_trace_phase("literature") == "literature_review"
         assert canonical_trace_phase("generation") == "generate"
         assert canonical_trace_phase("unknown") is None
+        assert ordered_phases == ["supervisor", "literature", "rank", "unknown_vendor_phase"]
         assert exported_canonical_phase("rank") == "ranking"
+        assert exported_trace_sort_key("generation")[0] == contract["phase_order_index"]["generate"]
         assert exported_trace_contract()["phase_index"]["ranking"]["agent_id"] == "ranking_agent"
+        assert contract["unknown_phase_order"] == "after_known_phases"
         assert contract["phase_aliases"]["dedupe"] == "proximity"
         assert contract["phase_index"]["review"]["agent_id"] == "hypothesis_review_agent"
         assert contract["phase_index"]["review"]["prompt_template"] == "prompts/review.md"
