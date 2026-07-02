@@ -244,6 +244,13 @@ def test_agent_trace_surface_summary_hides_expert_details_by_default(monkeypatch
 
         assert summary["phase_order"] == ["literature_review", "review", "vendor_extra"]
         assert summary["trace_count"] == 3
+        assert summary["counts"] == {
+            "complete": 2,
+            "degraded": 1,
+            "synthetic": 1,
+            "unknown_phase": 1,
+            "with_tool_calls": 1,
+        }
         assert summary["degradation_count"] == 1
         assert summary["synthetic_count"] == 1
         assert summary["unknown_phases"] == ["vendor_extra"]
