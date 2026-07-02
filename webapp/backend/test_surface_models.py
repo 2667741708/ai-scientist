@@ -14,6 +14,7 @@ from surface_models import (
     runtime_readiness_surface_summary,
     run_confirmation_surface_summary,
     run_surface_summary,
+    workspace_surface_summary,
 )
 
 
@@ -545,6 +546,135 @@ def test_memory_surface_summary_reports_empty_limited_and_conflicted_states() ->
     ]
     assert "paper-conflict-secret" not in str(conflicted)
     assert "chunk-conflict-secret" not in str(conflicted)
+
+
+def test_workspace_surface_summary_chooses_confirmation_layout_without_raw_details() -> None:
+    state = {
+        "request": {
+            "research_goal": (
+                "Develop a causal fulltext retrieval audit mechanism; measure contradiction rate, "
+                "validate with an ablation benchmark, and fail if citation support remains below 0.70."
+            ),
+            "demo_mode": False,
+            "literature_review": True,
+            "starting_hypotheses": ["A retrieval audit mechanism should reduce unsupported citations."],
+            "user_feedback": [
+                {
+                    "feedback_id": "feedback-secret",
+                    "feedback_type": "critique",
+                    "text": "SECRET FEEDBACK should not appear in workspace summary.",
+                }
+            ],
+            "parent_run_id": "parent-secret",
+            "library_id": "library-secret",
+        },
+        "parent_run": {
+            "run_id": "parent-secret",
+            "research_goal": "Parent run goal",
+            "status": "complete",
+            "hypothesis_count": 2,
+        },
+        "memory_context": {
+            "memory_scope": "project",
+            "memory_sources": ["parent_run", "chat_feedback", "knowledge_base"],
+            "parent_run": {"run_id": "parent-secret", "research_goal": "Parent run goal"},
+            "user_feedback": [{"feedback_id": "feedback-secret", "feedback_type": "critique"}],
+            "evidence_summaries": [
+                {
+                    "paper_id": "paper-secret",
+                    "chunk_id": "chunk-secret",
+                    "library_id": "library-secret",
+                    "title": "Parsed evidence",
+                    "source_reliability": "parsed_fulltext",
+                    "support_level": "fulltext",
+                }
+            ],
+            "execution_memory": {"status": "ready"},
+            "counts": {"user_feedback": 1, "prior_hypotheses": 0, "evidence_sources": 1},
+            "evidence_boundary": {"status": "parsed_fulltext", "evidence_count": 1},
+        },
+        "library": {"library_id": "library-secret", "name": "Evidence library"},
+        "papers": [
+            {
+                "paper_id": "paper-secret",
+                "title": "Parsed evidence",
+                "source_reliability": "parsed_fulltext",
+                "chunks_count": 4,
+            }
+        ],
+        "worker_status": {
+            "enabled": True,
+            "queue_status_counts": {"active": 0, "queued": 0, "running": 0, "retrying": 0, "error": 0},
+        },
+        "execution_memory": {"status": "ready", "resume_supported": True},
+        "service_statuses": {"llm": {"available": True, "status": "ready"}},
+        "agent_trace_summary": {"trace_count": 1},
+    }
+
+    summary = workspace_surface_summary(state)
+
+    assert summary["status"] == "ready_to_start"
+    assert summary["primary_surface"]["surface"] == "run_confirmation_card"
+    assert summary["layout"] == {
+        "shell": "three_panel_research_workspace",
+        "left": "project_navigation",
+        "center": "run_confirmation_card",
+        "right": "collapsible_inspector",
+    }
+    assert summary["surfaces"]["confirmation"]["is_continuation"] is True
+    assert summary["surfaces"]["memory"]["status"] == "ready"
+    assert summary["surfaces"]["evidence_library"]["status"] == "ready"
+    assert summary["surfaces"]["runtime"]["status"] == "ready"
+    inspectors = {item["id"]: item for item in summary["inspectors"]}
+    assert inspectors["memory"]["available"] is True
+    assert inspectors["evidence"]["available"] is True
+    assert inspectors["process"]["available"] is True
+    assert inspectors["runtime"]["available"] is True
+    assert all(item["default_state"] == "collapsed" for item in summary["inspectors"])
+    assert summary["next_actions"] == ["confirm_continuation", "edit_request", "cancel"]
+    assert "raw_memory_context" in summary["hidden_by_default"]
+    assert "internal_refs" not in summary
+    assert "SECRET" not in str(summary)
+    assert "parent-secret" not in str(summary)
+    assert "library-secret" not in str(summary)
+    assert "paper-secret" not in str(summary)
+    assert "feedback-secret" not in str(summary)
+
+    expert_summary = workspace_surface_summary(state, include_internal_refs=True)
+
+    assert expert_summary["internal_refs"]["parent_run_id"] == "parent-secret"
+    assert expert_summary["internal_refs"]["library_id"] == "library-secret"
+    assert expert_summary["internal_refs"]["raw_workspace_state"]["request"]["parent_run_id"] == "parent-secret"
+
+
+def test_workspace_surface_summary_prefers_run_progress_for_queued_run() -> None:
+    state = {
+        "request": {"research_goal": "Run queued durable research task", "demo_mode": True},
+        "run": {
+            "run_id": "run-secret",
+            "status": "queued",
+            "request": {"demo_mode": True},
+        },
+        "work_item_snapshot": {
+            "counts": {"active": 1, "queued": 1},
+            "items": [{"work_item_id": "work-secret", "status": "queued", "phase": "generate"}],
+        },
+    }
+
+    summary = workspace_surface_summary(state)
+
+    assert summary["status"] == "in_progress"
+    assert summary["primary_surface"]["surface"] == "run_progress"
+    assert summary["layout"]["center"] == "run_progress"
+    assert summary["surfaces"]["run"]["queue"]["current_work_status"] == "queued"
+    assert summary["next_actions"] == ["monitor_queue", "check_worker_status"]
+    assert "run-secret" not in str(summary)
+    assert "work-secret" not in str(summary)
+
+    expert_summary = workspace_surface_summary(state, include_internal_refs=True)
+
+    assert expert_summary["internal_refs"]["run_id"] == "run-secret"
+    assert expert_summary["internal_refs"]["work_item_ids"] == ["work-secret"]
 
 
 def test_evidence_surface_summary_hides_internal_refs_by_default() -> None:
