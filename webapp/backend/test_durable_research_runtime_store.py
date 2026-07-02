@@ -108,6 +108,7 @@ def test_research_work_item_can_be_blocked_for_manual_recovery() -> None:
         store = KnowledgeBaseStore(Path(tmp))
         item = store.enqueue_work_item(
             workflow_name="workflow.needs_approval",
+            run_id="run-blocked",
             arguments={"approval": "required"},
             max_attempts=3,
         )
@@ -124,6 +125,9 @@ def test_research_work_item_can_be_blocked_for_manual_recovery() -> None:
         assert blocked["error_message"] == "Waiting for expert approval."
         assert counts["blocked"] == 1
         assert counts["active"] == 1
+        snapshot = store.active_work_item_snapshot(run_id="run-blocked")
+        assert snapshot["recovery_action"] == "unblock"
+        assert snapshot["recovery_action_counts"]["unblock"] == 1
         assert store.lease_work_items(owner="worker-block", limit=1) == []
 
 
@@ -223,6 +227,7 @@ def test_active_work_item_snapshot_hides_internal_refs_by_default() -> None:
         snapshot = store.active_work_item_snapshot(run_id="run-snapshot")
         assert snapshot["counts"]["retrying"] == 1
         assert snapshot["counts"]["active"] == 1
+        assert snapshot["recovery_action"] == "retry"
         assert snapshot["recovery_action_counts"]["retry"] == 1
         assert snapshot["recovery_action_counts"]["wait"] == 0
         assert snapshot["filters"]["run_id"] is True
