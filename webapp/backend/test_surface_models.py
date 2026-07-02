@@ -233,6 +233,7 @@ def test_work_queue_surface_summary_hides_raw_work_items_by_default() -> None:
                 "phase": "review",
                 "agent_role": "review_agent",
                 "status": "running",
+                "recovery_action": "wait",
                 "priority": 4,
                 "attempt_count": 1,
                 "max_attempts": 3,
@@ -276,6 +277,7 @@ def test_work_queue_surface_summary_hides_raw_work_items_by_default() -> None:
         "priority": 4,
         "attempts": {"current": 1, "max": 3},
         "next_action": "Monitor progress and process summary.",
+        "recovery_action": "wait",
     }
     assert summary["items_preview"][1]["phase"] == "ranking"
     assert summary["next_actions"] == ["monitor_progress", "view_process_summary"]
