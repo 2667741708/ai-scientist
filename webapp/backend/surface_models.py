@@ -257,8 +257,21 @@ def work_queue_surface_summary(
         _work_queue_item_surface(item, index=index)
         for index, item in enumerate(items[:5])
     ]
+    recovery_action = _work_queue_surface_recovery_action(
+        snapshot=snapshot,
+        active_snapshot=active_snapshot,
+        worker=worker,
+        item_previews=item_previews,
+    )
+    recovery_action_counts = _work_queue_surface_recovery_action_counts(
+        snapshot=snapshot,
+        active_snapshot=active_snapshot,
+        worker=worker,
+    )
     summary = {
         "status": status,
+        "recovery_action": recovery_action,
+        "recovery_action_counts": recovery_action_counts,
         "worker": {
             "enabled": worker_enabled,
             "concurrency": _safe_int(worker.get("concurrency")) or 0,
@@ -275,6 +288,8 @@ def work_queue_surface_summary(
                 "worker.enabled",
                 "worker.concurrency",
                 "counts",
+                "recovery_action",
+                "recovery_action_counts",
                 "current_item.status",
                 "current_item.phase",
                 "current_item.agent_role",
@@ -2162,6 +2177,46 @@ def _work_queue_surface_status(*, counts: Mapping[str, int], worker_enabled: boo
     return "active"
 
 
+def _work_queue_surface_recovery_action(
+    *,
+    snapshot: Mapping[str, Any],
+    active_snapshot: Mapping[str, Any],
+    worker: Mapping[str, Any],
+    item_previews: list[Mapping[str, Any]],
+) -> str:
+    worker_user_status = _as_mapping(worker.get("user_facing_status"))
+    action = (
+        _first_value(snapshot, ("recovery_action",))
+        or _first_value(active_snapshot, ("recovery_action",))
+        or _first_value(worker_user_status, ("recovery_action",))
+    )
+    if action:
+        return _compact_text(action, max_length=40)
+    for item in item_previews:
+        item_action = item.get("recovery_action")
+        if item_action and str(item_action) != "none":
+            return _compact_text(item_action, max_length=40)
+    return "none"
+
+
+def _work_queue_surface_recovery_action_counts(
+    *,
+    snapshot: Mapping[str, Any],
+    active_snapshot: Mapping[str, Any],
+    worker: Mapping[str, Any],
+) -> Dict[str, int]:
+    worker_user_status = _as_mapping(worker.get("user_facing_status"))
+    raw_counts = (
+        _as_mapping(snapshot.get("recovery_action_counts"))
+        or _as_mapping(active_snapshot.get("recovery_action_counts"))
+        or _as_mapping(worker_user_status.get("recovery_action_counts"))
+    )
+    return {
+        action: _safe_int(raw_counts.get(action)) or 0
+        for action in ("wait", "retry", "unblock", "escalate", "inspect", "none")
+    }
+
+
 def _work_queue_item_surface(item: Mapping[str, Any], *, index: int) -> Dict[str, Any]:
     status = str(_first_value(item, ("status",)) or "unknown").lower()
     attempt_count = _safe_int(_first_value(item, ("attempt_count", "attempts"))) or 0
@@ -2452,11 +2507,23 @@ def _run_next_actions(
 
 def _run_queue_summary(work_snapshot: Mapping[str, Any], work_item: Mapping[str, Any]) -> Dict[str, Any]:
     counts = _as_mapping(work_snapshot.get("counts"))
+    recovery_action_counts = _work_queue_surface_recovery_action_counts(
+        snapshot=work_snapshot,
+        active_snapshot={},
+        worker={},
+    )
     summary = {
         "active_work_item_count": _safe_int(counts.get("active")) or 0,
         "queued_count": _safe_int(counts.get("queued")) or 0,
         "retrying_count": _safe_int(counts.get("retrying")) or 0,
         "running_count": _safe_int(counts.get("running")) or 0,
+        "recovery_action": _work_queue_surface_recovery_action(
+            snapshot=work_snapshot,
+            active_snapshot={},
+            worker={},
+            item_previews=[work_item] if work_item else [],
+        ),
+        "recovery_action_counts": recovery_action_counts,
         "current_work_status": work_item.get("status"),
         "current_work_label": work_item.get("status_label"),
         "current_work_next_action": work_item.get("next_action"),
