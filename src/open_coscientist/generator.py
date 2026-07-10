@@ -20,6 +20,7 @@ from .constants import (
 )
 from .models import ExecutionMetrics
 from .nodes.generate import generate_node
+from .nodes.evidence_grounding import EvidenceResolver, evidence_grounding_node
 from .nodes.literature_review import literature_review_node
 from .nodes.reflection import reflection_node
 from .nodes.review import review_node
@@ -61,6 +62,7 @@ class HypothesisGenerator:
         tools_config: Optional[str] = None,
         disable_tools: Optional[List[str]] = None,
         workflow_tool_policy: Optional[Dict[str, Dict[str, Any]]] = None,
+        evidence_resolver: Optional[EvidenceResolver] = None,
     ):
         """
         Initialize the hypothesis generator.
@@ -75,11 +77,13 @@ class HypothesisGenerator:
             tools_config: Path to custom tools YAML config file (None = use defaults)
             disable_tools: List of tool IDs to disable (None = use all enabled tools)
             workflow_tool_policy: Optional per-workflow tool allow/deny policy.
+            evidence_resolver: Optional callback that retrieves knowledge chunks for one hypothesis.
         """
         self.model_name = model_name
         self.max_iterations = max_iterations
         self.initial_hypotheses_count = initial_hypotheses_count
         self.evolution_max_count = evolution_max_count
+        self._evidence_resolver = evidence_resolver
 
         # Configure cache if specified
         if enable_cache is not None:
@@ -148,6 +152,11 @@ class HypothesisGenerator:
         # Add all nodes
         workflow.add_node("supervisor", supervisor_node)
         workflow.add_node("generate", generate_node)
+
+        async def ground_hypothesis_evidence(state: WorkflowState) -> Dict[str, Any]:
+            return await evidence_grounding_node(state, self._evidence_resolver)
+
+        workflow.add_node("evidence_grounding", ground_hypothesis_evidence)
         workflow.add_node("review", review_node)
         workflow.add_node("ranking", ranking_node)
         workflow.add_node("meta_review", meta_review_node)
@@ -163,21 +172,23 @@ class HypothesisGenerator:
         workflow.set_entry_point("supervisor")
 
         if enable_literature_review_node:
-            # Full flow: supervisor → literature_review → generate → reflection → review → ranking
+            # Full flow: supervisor → literature_review → generate → evidence → reflection → review → ranking
             workflow.add_edge("supervisor", "literature_review")
             workflow.add_edge("literature_review", "generate")
-            workflow.add_edge("generate", "reflection")
+            workflow.add_edge("generate", "evidence_grounding")
+            workflow.add_edge("evidence_grounding", "reflection")
             workflow.add_edge("reflection", "review")
         else:
-            # Simplified flow: supervisor → generate → review → ranking
+            # Simplified flow: supervisor → generate → evidence → review → ranking
             workflow.add_edge("supervisor", "generate")
-            workflow.add_edge("generate", "review")
+            workflow.add_edge("generate", "evidence_grounding")
+            workflow.add_edge("evidence_grounding", "review")
 
         workflow.add_edge("review", "ranking")
 
         # Iteration cycle: meta_review → evolve → review → ranking → proximity
         workflow.add_edge("meta_review", "evolve")
-        workflow.add_edge("evolve", "review")  # Re-review evolved hypotheses
+        workflow.add_edge("evolve", "evidence_grounding")  # Refresh evidence for evolved hypotheses
         # Note: review → ranking already defined above
 
         # Conditional: after tournament, decide next step
@@ -360,6 +371,7 @@ class HypothesisGenerator:
             "meta_review": {},
             "removed_duplicates": [],
             "tournament_matchups": [],
+            "evidence_snapshot": {},
             "evolution_details": [],
             "metrics": ExecutionMetrics(),
             "start_time": start_time,
@@ -506,6 +518,7 @@ class HypothesisGenerator:
                 "meta_review": final_state.get("meta_review", {}),
                 "research_plan": final_state.get("supervisor_guidance", {}),
                 "tournament_matchups": final_state.get("tournament_matchups", []),
+                "evidence_snapshot": final_state.get("evidence_snapshot", {}),
                 "evolution_details": final_state.get("evolution_details", []),
                 "debate_transcripts": final_state.get("debate_transcripts"),
                 "messages": final_state.get("messages", []),
@@ -573,6 +586,7 @@ class HypothesisGenerator:
                 "meta_review": {},
                 "research_plan": {},
                 "tournament_matchups": [],
+                "evidence_snapshot": {},
                 "evolution_details": [],
                 "similarity_clusters": [],
                 "current_iteration": 0,
@@ -607,6 +621,8 @@ class HypothesisGenerator:
                         logger.debug(
                             f"updated tournament_matchups: {len(node_state['tournament_matchups'])} items"
                         )
+                    if "evidence_snapshot" in node_state:
+                        cumulative_state["evidence_snapshot"] = node_state["evidence_snapshot"]
                     if "evolution_details" in node_state:
                         cumulative_state["evolution_details"] = node_state["evolution_details"]
                         logger.debug(
@@ -668,6 +684,7 @@ class HypothesisGenerator:
                         "meta_review": cumulative_state["meta_review"],
                         "research_plan": cumulative_state["research_plan"],
                         "tournament_matchups": cumulative_state["tournament_matchups"],
+                        "evidence_snapshot": cumulative_state["evidence_snapshot"],
                         "evolution_details": cumulative_state["evolution_details"],
                         "similarity_clusters": cumulative_state["similarity_clusters"],
                         "current_iteration": cumulative_state["current_iteration"],

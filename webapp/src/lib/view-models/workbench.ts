@@ -33,7 +33,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function countEvidence(run: RunRecord) {
   return run.hypotheses.reduce(
-    (total, hypothesis) => total + Object.keys(hypothesis.citation_map ?? {}).length,
+    (total, hypothesis) => total
+      + Object.keys(hypothesis.citation_map ?? {}).length
+      + (hypothesis.evidence_packet?.item_count ?? 0),
     0,
   );
 }
@@ -267,10 +269,17 @@ function getRunGovernanceItems(run: RunRecord): SummaryItem[] {
   const safety = getSafetyBadge(run);
   const citationQa = getCitationQaBadge(run);
   const expertFeedback = getExpertFeedbackBadge(run);
+  const evidenceGateStatus = run.research_outcome?.evidence_gate?.status;
+  const evidenceGate: SummaryItem = evidenceGateStatus === "passed"
+    ? { label: "闭环证据门", value: "排名前证据检查已通过", tone: "ok" }
+    : evidenceGateStatus
+      ? { label: "闭环证据门", value: "证据仍有限，冠军需要人工复核", tone: "warning" }
+      : { label: "闭环证据门", value: "等待生成 ResearchOutcome", tone: "neutral" };
   return [
     { label: "安全门", value: safety.label, tone: safety.tone },
     { label: "证据核验", value: citationQa.label, tone: citationQa.tone },
     { label: "专家反馈", value: expertFeedback.label, tone: expertFeedback.tone },
+    evidenceGate,
   ];
 }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import os
 import sys
 import tempfile
@@ -116,6 +117,75 @@ def test_research_schedules_api_creates_lists_and_updates_schedules() -> None:
             },
         )
         assert missing_run.status_code == 404
+
+
+def test_auto_schedule_creates_a_new_durable_research_run() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        studio = load_studio(tmp)
+        client = TestClient(studio.app)
+
+        missing_approval = client.post(
+            "/api/research-schedules",
+            json={
+                "title": "Daily evidence-grounded research",
+                "workflow_name": "workflow.open_coscientist_run",
+                "auto_execute": True,
+                "arguments": {
+                    "run_request": {
+                        "research_goal": "Test an automatically scheduled evidence research workflow",
+                        "demo_mode": True,
+                        "literature_review": False,
+                        "auto_discover_papers": False,
+                        "auto_ingest_papers": False,
+                    }
+                },
+            },
+        )
+        assert missing_approval.status_code == 428
+
+        created = client.post(
+            "/api/research-schedules",
+            json={
+                "title": "Daily evidence-grounded research",
+                "workflow_name": "workflow.open_coscientist_run",
+                "auto_execute": True,
+                "interval_hours": 24,
+                "next_run_at": time.time() - 1,
+                "arguments": {
+                    "run_request": {
+                        "research_goal": "Test an automatically scheduled evidence research workflow",
+                        "demo_mode": True,
+                        "literature_review": False,
+                        "auto_discover_papers": False,
+                        "auto_ingest_papers": False,
+                    }
+                },
+                "approval": {
+                    "confirmed": True,
+                    "scope": "research_schedule.auto_execute",
+                    "reason": "test recurring workflow",
+                },
+            },
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["schedule"]["arguments"]["_automation"]["enabled"] is True
+
+        dispatched = asyncio.run(studio.dispatch_due_research_schedules())
+        assert dispatched["dispatched_count"] == 1
+        assert dispatched["failed_count"] == 0
+        run_id = dispatched["items"][0]["run_id"]
+        task_id = dispatched["items"][0]["task_id"]
+        assert studio.knowledge_base.get_research_run(run_id)["status"] == "queued"
+        assert studio.knowledge_base.get_research_task(task_id)["status"] == "in_progress"
+        work_items = studio.knowledge_base.list_work_items(
+            run_id=run_id,
+            workflow_name="workflow.open_coscientist_run",
+            limit=5,
+        )
+        assert len(work_items) == 1
+        assert work_items[0]["status"] == "queued"
+        repeated = asyncio.run(studio.dispatch_due_research_schedules())
+        assert repeated["dispatched_count"] == 0
 
 
 if __name__ == "__main__":

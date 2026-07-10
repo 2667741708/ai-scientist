@@ -36,6 +36,7 @@ class Hypothesis:
         citation_map: Resolves inline citation keys to full source metadata.
             Paper entries: {"type": "paper", "title": ..., "url": ..., "authors": [...], "year": ...}
             KG entries:    {"type": "knowledge_graph", "display": ..., "tool_id": ..., "data": {...}}
+        evidence_packet: Frozen hypothesis-specific knowledge chunks used by review and ranking.
         score: Overall quality score (0-100)
         elo_rating: Elo rating from tournament selection
         reviews: List of reviews received
@@ -56,6 +57,7 @@ class Hypothesis:
     novelty_validation: Optional[str] = None
     enrichments: Dict[str, Any] = field(default_factory=dict)
     citation_map: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    evidence_packet: Dict[str, Any] = field(default_factory=dict)
     score: float = 0.0
     elo_rating: int = 1200  # Starting Elo rating
     reviews: List[HypothesisReview] = field(default_factory=list)
@@ -90,6 +92,7 @@ class Hypothesis:
             "novelty_validation": self.novelty_validation,
             "enrichments": self.enrichments,
             "citation_map": self.citation_map,
+            "evidence_packet": self.evidence_packet,
             "score": self.score,
             "elo_rating": self.elo_rating,
             "reviews": [

@@ -4406,6 +4406,55 @@ class KnowledgeBaseStore:
             ).fetchall()
         return [self._research_schedule_from_row(row) for row in rows]
 
+    def claim_due_research_schedules(
+        self,
+        *,
+        now: Optional[float] = None,
+        limit: int = 100,
+    ) -> list[Dict[str, Any]]:
+        """Atomically claim auto-execute schedules so multiple workers cannot dispatch duplicates."""
+        claimed_at = float(now if now is not None else time.time())
+        claimed: list[Dict[str, Any]] = []
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM research_schedules
+                WHERE status = 'active' AND next_run_at <= ?
+                ORDER BY next_run_at ASC
+                LIMIT ?
+                """,
+                (claimed_at, max(1, min(limit, 300))),
+            ).fetchall()
+            for row in rows:
+                schedule = self._research_schedule_from_row(row)
+                automation = schedule.get("arguments", {}).get("_automation")
+                if not isinstance(automation, dict) or not automation.get("enabled"):
+                    continue
+                next_run_at = claimed_at + float(schedule["interval_hours"]) * 3600
+                connection.execute(
+                    """
+                    UPDATE research_schedules
+                    SET last_run_at = ?, next_run_at = ?, result_ref_json = ?, updated_at = ?
+                    WHERE schedule_id = ? AND status = 'active' AND next_run_at <= ?
+                    """,
+                    (
+                        claimed_at,
+                        next_run_at,
+                        self._to_json({"status": "dispatching"}),
+                        claimed_at,
+                        schedule["schedule_id"],
+                        claimed_at,
+                    ),
+                )
+                if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                    continue
+                schedule["last_run_at"] = claimed_at
+                schedule["next_run_at"] = next_run_at
+                schedule["result_ref"] = {"status": "dispatching"}
+                claimed.append(schedule)
+        return claimed
+
     def _research_schedule_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
             "schedule_id": row["schedule_id"],

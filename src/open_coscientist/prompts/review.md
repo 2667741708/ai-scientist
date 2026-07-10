@@ -17,6 +17,10 @@ Evaluate the hypothesis on these dimensions (score 1-10 for each):
 5. **Clarity** - Precision and clarity of formulation
 6. **Potential Impact** - Significance if proven correct
 
+The hypothesis input may include an evidence packet. Treat retrieved chunks as relevance candidates,
+not automatic support. Explicitly distinguish supporting, contradictory, weak, and missing evidence;
+never invent citations or upgrade metadata/abstract evidence to parsed fulltext.
+
 ## Research Goal
 
 {{research_goal}}

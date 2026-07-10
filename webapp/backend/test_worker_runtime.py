@@ -45,6 +45,31 @@ async def test_worker_tick_executes_leased_work_item() -> None:
 
 
 @pytest.mark.anyio
+async def test_worker_tick_dispatches_due_schedules_before_leasing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = KnowledgeBaseStore(Path(tmp))
+        calls = {"count": 0}
+
+        async def dispatch_schedules():
+            calls["count"] += 1
+            return {"dispatched_count": 1, "failed_count": 0}
+
+        runtime = ResearchWorkerRuntime(
+            store=store,
+            handlers={},
+            schedule_handler=dispatch_schedules,
+            owner="schedule-worker",
+            concurrency=1,
+            enabled=True,
+        )
+
+        status = await runtime.tick()
+
+        assert calls["count"] == 1
+        assert status["schedule_dispatch"]["dispatched_count"] == 1
+
+
+@pytest.mark.anyio
 async def test_worker_tick_fails_missing_handler_without_retry() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = KnowledgeBaseStore(Path(tmp))

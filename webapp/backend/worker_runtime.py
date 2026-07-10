@@ -99,6 +99,7 @@ def _work_item_attempts_available(attempts_remaining: Optional[int]) -> bool:
 class ResearchWorkerRuntime:
     store: Any
     handlers: Dict[str, WorkItemHandler]
+    schedule_handler: Optional[Callable[[], Awaitable[Dict[str, Any]] | Dict[str, Any]]] = None
     owner: str = field(default_factory=default_worker_owner)
     concurrency: int = 1
     lease_seconds: int = 300
@@ -128,6 +129,12 @@ class ResearchWorkerRuntime:
 
     async def tick(self, *, force: bool = False) -> Dict[str, Any]:
         self._last_tick_at = time.time()
+        schedule_dispatch: Dict[str, Any] = {}
+        if (self.enabled or force) and self.schedule_handler is not None:
+            scheduled = self.schedule_handler()
+            if inspect.isawaitable(scheduled):
+                scheduled = await scheduled
+            schedule_dispatch = dict(scheduled or {})
         recovered_count = self.store.recover_expired_leases()
         self._running_tasks = {task for task in self._running_tasks if not task.done()}
         available_slots = max(0, int(self.concurrency or 1) - len(self._running_tasks))
@@ -155,6 +162,7 @@ class ResearchWorkerRuntime:
             "lease_seconds": self.lease_seconds,
             "poll_seconds": self.poll_seconds,
             "recovered_count": recovered_count,
+            "schedule_dispatch": schedule_dispatch,
             "leased_count": len(leased),
             "running_count": running_count,
             "queue_status_counts": queue_status_counts,

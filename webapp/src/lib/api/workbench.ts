@@ -42,6 +42,7 @@ import type {
   ResearchScheduleCreateRequest,
   ResearchSchedulesResponse,
   ResearchScheduleTickResponse,
+  ResearchOutcomeResponse,
   ResearchSkillsResponse,
   ResearchTasksResponse,
   RunCheckpointsResponse,
@@ -598,6 +599,12 @@ export async function listResearchSchedules({
   const response = await apiFetch(`${getApiBase()}/api/research-schedules?${params.toString()}`);
   if (!response.ok) throw new Error(`research_schedules_failed_${response.status}`);
   return (await response.json()) as ResearchSchedulesResponse;
+}
+
+export async function getResearchOutcome(runId: string) {
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/outcome`);
+  if (!response.ok) throw new Error(`research_outcome_failed_${response.status}`);
+  return (await response.json()) as ResearchOutcomeResponse;
 }
 
 export async function createResearchSchedule(request: ResearchScheduleCreateRequest) {

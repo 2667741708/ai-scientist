@@ -22,6 +22,7 @@ from ..llm import call_llm_json
 from ..models import Hypothesis, create_metrics_update
 from ..prompts import get_ranking_prompt
 from ..state import WorkflowState
+from .evidence_grounding import format_hypothesis_with_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -375,8 +376,8 @@ async def judge_matchup(
 
     prompt, schema = get_ranking_prompt(
         research_goal=research_goal,
-        hypothesis_a=hypothesis_a.text,
-        hypothesis_b=hypothesis_b.text,
+        hypothesis_a=format_hypothesis_with_evidence(hypothesis_a),
+        hypothesis_b=format_hypothesis_with_evidence(hypothesis_b),
         supervisor_guidance=supervisor_guidance,
         review_a=review_a,
         review_b=review_b,

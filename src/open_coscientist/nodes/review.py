@@ -22,6 +22,7 @@ from ..llm import call_llm_json
 from ..models import Hypothesis, HypothesisReview, create_metrics_update
 from ..prompts import get_review_batch_prompt, get_review_prompt
 from ..state import WorkflowState
+from .evidence_grounding import format_hypothesis_with_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +296,7 @@ async def review_parallel_individual(
     """
     review_tasks = [
         review_single_hypothesis(
-            hypothesis_text=hyp.text,
+            hypothesis_text=format_hypothesis_with_evidence(hyp),
             research_goal=research_goal,
             model_name=model_name,
             supervisor_guidance=supervisor_guidance,
@@ -336,7 +337,10 @@ async def review_comparative_batch(
     """
     # Format hypotheses for batch review
     hypotheses_list = "\n\n".join(
-        [f"**Hypothesis {i}:**\n{hyp.text}" for i, hyp in enumerate(hypotheses)]
+        [
+            f"**Hypothesis {i}:**\n{format_hypothesis_with_evidence(hyp)}"
+            for i, hyp in enumerate(hypotheses)
+        ]
     )
 
     # Call batch review

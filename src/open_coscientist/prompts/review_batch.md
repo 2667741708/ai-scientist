@@ -17,6 +17,10 @@ Evaluate EACH hypothesis on these dimensions (score 1-10 for each):
 5. **Clarity** - Precision and clarity of formulation
 6. **Potential Impact** - Significance if proven correct
 
+Each hypothesis may include its own evidence packet. Treat retrieved chunks as relevance candidates,
+not automatic support. Penalize absent, contradictory, irrelevant, or weak evidence, and never invent
+citations that are not present in the packet.
+
 ## Research Goal
 
 {{research_goal}}

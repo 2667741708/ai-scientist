@@ -154,6 +154,9 @@ class WorkflowState(TypedDict):
     tournament_matchups: List[Dict[str, Any]]
     """List of tournament matchups with reasoning."""
 
+    evidence_snapshot: Dict[str, Any]
+    """Fingerprint and counts for the hypothesis evidence packets used before review and Elo."""
+
     evolution_details: List[Dict[str, Any]]
     """List of evolution transformations with reasoning."""
 

@@ -23,10 +23,15 @@ For each pair of hypotheses, carefully analyze and compare them based on:
 5. **Clarity and Precision** - Which hypothesis is more clearly and precisely formulated?
 6. **Potential Impact** - Which hypothesis, if validated, would have greater scientific or practical impact?
 7. **Feasibility** - Which hypothesis could be investigated with available or reasonable resources?
+8. **Evidence Grounding** - Which hypothesis is better supported by the supplied knowledge chunks, and which is contradicted or only weakly grounded?
 
 ## Your Task
 
 Make a clear decision on which hypothesis wins the comparison based on these criteria.
+
+Treat retrieved chunks as evidence candidates, not proof. Penalize hypotheses with absent,
+metadata-only, irrelevant, or contradictory evidence. Never invent a source that is not present
+in the supplied evidence packet.
 
 {{comparison_mode_guidance}}
 

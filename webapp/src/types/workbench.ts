@@ -19,6 +19,7 @@ export type TimelineEvent = {
 };
 
 export type Hypothesis = {
+  hypothesis_id?: string;
   text: string;
   explanation?: string;
   literature_grounding?: string;
@@ -34,6 +35,48 @@ export type Hypothesis = {
   citation_source_reliability?: Record<string, string>;
   knowledge_base_support?: KnowledgeSupportItem[];
   experimental_support_summaries?: KnowledgeSupportItem[];
+  evidence_packet?: EvidencePacket;
+};
+
+export type EvidencePacket = {
+  status: "ready" | "limited" | "absent" | "error" | string;
+  query?: string;
+  library_id?: string | null;
+  snapshot_id?: string;
+  item_count: number;
+  parsed_fulltext_count: number;
+  experimental_data_count: number;
+  weak_support_count?: number;
+  items: KnowledgeSupportItem[];
+  boundary?: string;
+};
+
+export type ResearchOutcome = {
+  status: "ready" | "limited" | "absent" | string;
+  run_id: string;
+  winner_id?: string | null;
+  winner_index?: number;
+  winner_hypothesis?: Hypothesis;
+  elo_rating?: number;
+  score?: number;
+  evidence_snapshot_id?: string | null;
+  evidence_packet_snapshot_id?: string | null;
+  evidence_gate: {
+    status: "passed" | "limited" | "failed" | string;
+    minimum_evidence_count?: number;
+    retrieved_evidence_count?: number;
+    strong_evidence_count?: number;
+    reasons?: string[];
+    boundary?: string;
+  };
+  paper_ids?: string[];
+  parse_run_ids?: string[];
+  evidence_ids?: string[];
+  knowledge_chunks?: KnowledgeSupportItem[];
+  citation_map?: Record<string, unknown>;
+  citation_provenance?: Record<string, unknown>;
+  tournament_matchups?: Record<string, unknown>[];
+  experiment_plan?: string | null;
 };
 
 export type AgentTrace = {
@@ -182,6 +225,8 @@ export type RunRecord = {
   metrics: Record<string, unknown>;
   safety_gate?: Record<string, unknown>;
   citation_provenance_qa?: Record<string, unknown>;
+  evidence_snapshot?: Record<string, unknown>;
+  research_outcome?: ResearchOutcome;
   expert_feedback?: Record<string, unknown>;
   error?: string;
 };
@@ -1362,6 +1407,15 @@ export type ResearchScheduleCreateRequest = {
   run_id?: string;
   arguments?: Record<string, unknown>;
   next_run_at?: number;
+  auto_execute?: boolean;
+  approval?: ToolWorkflowApproval;
+};
+
+export type ResearchOutcomeResponse = {
+  run_id: string;
+  status: RunStatus;
+  evidence_snapshot: Record<string, unknown>;
+  research_outcome: ResearchOutcome;
 };
 
 export type ResearchScheduleTickResponse = {

@@ -593,6 +593,8 @@ class ResearchScheduleCreateRequest(BaseModel):
     run_id: Optional[str] = Field(default=None, max_length=80)
     arguments: Dict[str, Any] = Field(default_factory=dict)
     next_run_at: Optional[float] = None
+    auto_execute: bool = False
+    approval: Optional[ToolWorkflowApproval] = None
 
 
 class ResearchScheduleUpdateRequest(BaseModel):
@@ -718,6 +720,8 @@ class RunRecord(BaseModel):
     metrics: Dict[str, Any] = Field(default_factory=dict)
     safety_gate: Dict[str, Any] = Field(default_factory=dict)
     citation_provenance_qa: Dict[str, Any] = Field(default_factory=dict)
+    evidence_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    research_outcome: Dict[str, Any] = Field(default_factory=dict)
     expert_feedback: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
 
@@ -5798,8 +5802,12 @@ def apply_citation_provenance_qa(record: RunRecord) -> None:
             key: get_source_reliability(value)
             for key, value in citation_map.items()
         }
+        evidence_packet = hypothesis.get("evidence_packet") if isinstance(hypothesis, dict) else {}
+        packet_items = evidence_packet.get("items") if isinstance(evidence_packet, dict) else []
         kb_support = (
-            knowledge_base.support_for_hypothesis(
+            [item for item in packet_items if isinstance(item, dict)]
+            if isinstance(packet_items, list) and packet_items
+            else knowledge_base.support_for_hypothesis(
                 hypothesis,
                 limit=6,
                 library_id=record.request.library_id,
@@ -7934,12 +7942,20 @@ def _hypothesis_origin_for(record: RunRecord, hypothesis: Dict[str, Any]) -> Dic
 def annotate_hypothesis_origins(record: RunRecord) -> None:
     annotated: List[Dict[str, Any]] = []
     counts: Dict[str, int] = {}
-    for hypothesis in record.hypotheses:
+    for index, hypothesis in enumerate(record.hypotheses):
         if not isinstance(hypothesis, dict):
             annotated.append(hypothesis)
             continue
         origin = _hypothesis_origin_for(record, hypothesis)
-        merged = {**hypothesis, **origin}
+        merged = {
+            **hypothesis,
+            "hypothesis_id": str(
+                hypothesis.get("hypothesis_id")
+                or hypothesis.get("id")
+                or f"{record.run_id}:hypothesis:{index + 1:03d}"
+            ),
+            **origin,
+        }
         counts[str(merged["origin"])] = counts.get(str(merged["origin"]), 0) + 1
         annotated.append(merged)
     record.hypotheses = annotated
@@ -7948,6 +7964,104 @@ def annotate_hypothesis_origins(record: RunRecord) -> None:
         "Origins are inferred from user starting hypotheses, generation metadata, and evolution hints. "
         "They are UI/audit labels, not scientific evidence."
     )
+
+
+def build_research_outcome(record: RunRecord) -> Dict[str, Any]:
+    """Build one durable, auditable result package for the top Elo hypothesis."""
+    if not record.hypotheses:
+        return {
+            "status": "absent",
+            "run_id": record.run_id,
+            "evidence_gate": {"status": "failed", "reasons": ["no_hypotheses"]},
+        }
+
+    winner_index, winner = max(
+        enumerate(record.hypotheses),
+        key=lambda pair: float(pair[1].get("elo_rating") or pair[1].get("score") or 0),
+    )
+    packet = winner.get("evidence_packet") if isinstance(winner.get("evidence_packet"), dict) else {}
+    packet_items = packet.get("items") if isinstance(packet.get("items"), list) else []
+    provenance_hypotheses = record.citation_provenance_qa.get("hypotheses")
+    provenance_hypotheses = provenance_hypotheses if isinstance(provenance_hypotheses, list) else []
+    provenance = next(
+        (
+            item
+            for item in provenance_hypotheses
+            if isinstance(item, dict) and item.get("hypothesis_index") == winner_index
+        ),
+        {},
+    )
+    minimum_evidence = int(record.request.min_references or 0)
+    strong_count = sum(
+        1
+        for item in packet_items
+        if isinstance(item, dict)
+        and (
+            item.get("source_reliability") == "parsed_fulltext"
+            or item.get("support_level") == "experimental_data"
+        )
+    )
+    reasons: List[str] = []
+    if len(packet_items) < minimum_evidence:
+        reasons.append("below_minimum_evidence_count")
+    if record.request.literature_review and strong_count == 0:
+        reasons.append("no_parsed_fulltext_or_experimental_evidence")
+    if provenance.get("orphaned_citations"):
+        reasons.append("orphaned_citations")
+    if not packet_items:
+        reasons.append("no_hypothesis_specific_evidence")
+
+    paper_ids = list(
+        dict.fromkeys(
+            str(item.get("paper_id"))
+            for item in packet_items
+            if isinstance(item, dict) and item.get("paper_id")
+        )
+    )
+    parse_run_ids = list(
+        dict.fromkeys(
+            str(item.get("parse_run_id"))
+            for item in packet_items
+            if isinstance(item, dict) and item.get("parse_run_id")
+        )
+    )
+    evidence_ids = list(
+        dict.fromkeys(
+            str(item.get("evidence_id") or item.get("chunk_id"))
+            for item in packet_items
+            if isinstance(item, dict) and (item.get("evidence_id") or item.get("chunk_id"))
+        )
+    )
+    return {
+        "status": "ready" if not reasons else "limited",
+        "run_id": record.run_id,
+        "winner_id": winner.get("hypothesis_id"),
+        "winner_index": winner_index,
+        "winner_hypothesis": winner,
+        "elo_rating": winner.get("elo_rating"),
+        "score": winner.get("score"),
+        "evidence_snapshot_id": record.evidence_snapshot.get("snapshot_id"),
+        "evidence_packet_snapshot_id": packet.get("snapshot_id"),
+        "evidence_gate": {
+            "status": "passed" if not reasons else "limited",
+            "minimum_evidence_count": minimum_evidence,
+            "retrieved_evidence_count": len(packet_items),
+            "strong_evidence_count": strong_count,
+            "reasons": reasons,
+            "boundary": (
+                "A passed gate means provenance requirements were met for ranking. "
+                "It does not mean the hypothesis has been experimentally validated."
+            ),
+        },
+        "paper_ids": paper_ids,
+        "parse_run_ids": parse_run_ids,
+        "evidence_ids": evidence_ids,
+        "knowledge_chunks": packet_items,
+        "citation_map": winner.get("citation_map") or {},
+        "citation_provenance": provenance,
+        "tournament_matchups": record.tournament_matchups,
+        "experiment_plan": winner.get("experiment"),
+    }
 
 
 def demo_hypotheses(goal: str) -> List[Dict[str, Any]]:
@@ -8282,10 +8396,39 @@ async def run_demo(record: RunRecord) -> None:
     }
     annotate_hypothesis_origins(record)
     apply_citation_provenance_qa(record)
+    record.evidence_snapshot = {
+        "status": "synthetic_demo",
+        "snapshot_id": f"demo_{record.run_id}",
+        "boundary": "Demo evidence is synthetic and was not used as scientific grounding.",
+    }
+    record.research_outcome = build_research_outcome(record)
     initialize_expert_feedback_state(record)
     record.status = "complete"
     record.updated_at = time.time()
     persist_run_record(record)
+
+
+def build_knowledge_base_evidence_resolver(record: RunRecord):
+    """Create the webapp adapter used by the core evidence-grounding node."""
+
+    async def resolve(hypothesis: Dict[str, Any]) -> Dict[str, Any]:
+        items = await asyncio.to_thread(
+            knowledge_base.support_for_hypothesis,
+            hypothesis,
+            limit=max(6, int(record.request.max_references or 0)),
+            library_id=record.request.library_id,
+        )
+        return {
+            "status": "ready" if items else "absent",
+            "query": " ".join(
+                str(hypothesis.get(key) or "")
+                for key in ("text", "explanation", "experiment")
+            ).strip(),
+            "library_id": record.request.library_id,
+            "items": items,
+        }
+
+    return resolve
 
 
 async def run_real(record: RunRecord) -> None:
@@ -8328,6 +8471,7 @@ async def run_real(record: RunRecord) -> None:
             evolution_max_count=max(1, min(3, record.request.initial_hypotheses)),
             enable_cache=True,
             workflow_tool_policy=default_live_workflow_tool_policy(),
+            evidence_resolver=build_knowledge_base_evidence_resolver(record),
         )
         reference_constraints = (
             f"For each generated hypothesis, target between {record.request.min_references} "
@@ -8416,6 +8560,7 @@ async def run_real(record: RunRecord) -> None:
             ),
         }
         record.tournament_matchups = serialize_value(result.get("tournament_matchups", []))
+        record.evidence_snapshot = serialize_value(result.get("evidence_snapshot", {}))
         record.metrics = serialize_value(result.get("metrics", {}))
         if evidence_first_summary:
             record.metrics["evidence_first"] = evidence_first_summary
@@ -8434,6 +8579,7 @@ async def run_real(record: RunRecord) -> None:
             record.research_plan["evidence_first"] = evidence_first_summary
         annotate_hypothesis_origins(record)
         apply_citation_provenance_qa(record)
+        record.research_outcome = build_research_outcome(record)
         initialize_expert_feedback_state(record)
         add_event(record, "Complete", "Run finalized", f"{len(record.hypotheses)} hypotheses returned", "complete")
         record.status = "complete"
@@ -8626,7 +8772,32 @@ async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[s
     task = run_demo(record) if record.request.demo_mode else run_real_evidence_first(record)
     await run_with_guard(record, task)
     if record.status != "complete":
+        for research_task in knowledge_base.list_research_tasks(
+            run_id=run_id,
+            task_type="scheduled_workflow",
+            limit=50,
+        ):
+            knowledge_base.update_research_task(
+                str(research_task["task_id"]),
+                status="blocked",
+                blocked_reason=record.error or f"Run ended with status {record.status}",
+                result_ref={"run_id": run_id, "status": record.status},
+            )
         raise RuntimeError(record.error or f"Run ended with status {record.status}")
+    for research_task in knowledge_base.list_research_tasks(
+        run_id=run_id,
+        task_type="scheduled_workflow",
+        limit=50,
+    ):
+        knowledge_base.update_research_task(
+            str(research_task["task_id"]),
+            status="completed",
+            result_ref={
+                "run_id": run_id,
+                "status": record.status,
+                "winner_id": record.research_outcome.get("winner_id"),
+            },
+        )
     return {"run_id": run_id, "status": record.status}
 
 
@@ -8634,6 +8805,7 @@ def build_worker_runtime() -> ResearchWorkerRuntime:
     return ResearchWorkerRuntime(
         store=knowledge_base,
         handlers={"workflow.open_coscientist_run": execute_open_coscientist_run_work_item},
+        schedule_handler=dispatch_due_research_schedules,
         owner=WORKER_OWNER,
         concurrency=WORKER_CONCURRENCY,
         lease_seconds=WORKER_LEASE_SECONDS,
@@ -12641,6 +12813,17 @@ async def create_research_schedule(request: ResearchScheduleCreateRequest) -> Di
     phase = canonical_phase(request.phase) if request.phase else None
     next_run_at = request.next_run_at if request.next_run_at is not None else time.time() + request.interval_hours * 3600
     schedule_id = f"sched_{uuid.uuid4().hex[:12]}"
+    arguments = dict(request.arguments)
+    if request.auto_execute:
+        approval = require_tool_workflow_approval(
+            request.approval or ToolWorkflowApproval(),
+            expected_scope="research_schedule.auto_execute",
+        )
+        arguments["_automation"] = {
+            "enabled": True,
+            "approval_scope": approval.get("scope"),
+            "reason": approval.get("reason"),
+        }
     schedule = knowledge_base.create_research_schedule(
         schedule_id=schedule_id,
         run_id=request.run_id,
@@ -12649,7 +12832,7 @@ async def create_research_schedule(request: ResearchScheduleCreateRequest) -> Di
         status=request.status,
         interval_hours=request.interval_hours,
         phase=phase,
-        arguments=request.arguments,
+        arguments=arguments,
         next_run_at=next_run_at,
     )
     return {"schedule": schedule}
@@ -12750,6 +12933,123 @@ async def update_research_schedule(
     return {"schedule": schedule}
 
 
+def scheduled_run_request(schedule: Dict[str, Any]) -> RunRequest:
+    """Build a new run request from a schedule and its optional template run."""
+    arguments = dict(schedule.get("arguments") or {})
+    arguments.pop("_automation", None)
+    nested = arguments.pop("run_request", None)
+    overrides = dict(nested) if isinstance(nested, dict) else arguments
+
+    template = load_run_record(str(schedule.get("run_id") or "")) if schedule.get("run_id") else None
+    base = template.request.model_dump() if template else {}
+    base.update(overrides)
+    if template and "parent_run_id" not in overrides:
+        base["parent_run_id"] = template.run_id
+        base["refinement_mode"] = "continue_from_run"
+    return RunRequest(**base)
+
+
+async def dispatch_research_schedule(
+    schedule: Dict[str, Any],
+    *,
+    approval: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Materialize one due schedule as a task and, when supported, a queued run."""
+    now = time.time()
+    next_run_at = now + float(schedule["interval_hours"]) * 3600
+    schedule_id = str(schedule["schedule_id"])
+
+    if schedule["workflow_name"] == "workflow.open_coscientist_run":
+        run_request = scheduled_run_request(schedule)
+        run_result = await create_run(run_request)
+        run_id = str(run_result["run_id"])
+        task = knowledge_base.create_research_task(
+            task_id=f"task_{uuid.uuid4().hex[:12]}",
+            run_id=run_id,
+            title=f"Scheduled: {schedule['title']}",
+            task_type="scheduled_workflow",
+            status="in_progress",
+            priority=2,
+            phase=schedule.get("phase") or "workflow",
+            target_ref={
+                "schedule_id": schedule_id,
+                "workflow_name": schedule["workflow_name"],
+                "template_run_id": schedule.get("run_id"),
+            },
+            result_ref={
+                "run_id": run_id,
+                "work_item_id": run_result.get("work_item_id"),
+                "status": "queued",
+            },
+            notes="Schedule created a new durable research run and queued it for the research worker.",
+        )
+        result_ref = {
+            "task_id": task["task_id"],
+            "run_id": run_id,
+            "work_item_id": run_result.get("work_item_id"),
+            "approval": approval,
+        }
+    else:
+        task = knowledge_base.create_research_task(
+            task_id=f"task_{uuid.uuid4().hex[:12]}",
+            run_id=schedule.get("run_id"),
+            title=f"Scheduled: {schedule['title']}",
+            task_type="scheduled_workflow",
+            status="ready",
+            priority=2,
+            phase=schedule.get("phase"),
+            target_ref={
+                "schedule_id": schedule_id,
+                "workflow_name": schedule["workflow_name"],
+                "arguments": schedule["arguments"],
+            },
+            result_ref={},
+            notes="The scheduled workflow has no registered automatic executor and requires an approved runner.",
+        )
+        result_ref = {"task_id": task["task_id"], "approval": approval}
+
+    updated_schedule = knowledge_base.update_research_schedule(
+        schedule_id,
+        last_run_at=now,
+        next_run_at=next_run_at,
+        result_ref=result_ref,
+    )
+    return {"schedule": updated_schedule, "task": task, "approval": approval}
+
+
+async def dispatch_due_research_schedules() -> Dict[str, Any]:
+    """Worker pre-tick hook for schedules explicitly approved for auto execution."""
+    now = time.time()
+    dispatched: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for schedule in knowledge_base.claim_due_research_schedules(now=now, limit=100):
+        automation = (schedule.get("arguments") or {}).get("_automation")
+        assert isinstance(automation, dict) and automation.get("enabled")
+        approval = {
+            "confirmed": True,
+            "scope": str(automation.get("approval_scope") or "research_schedule.auto_execute"),
+            "reason": str(automation.get("reason") or "approved_schedule"),
+        }
+        try:
+            result = await dispatch_research_schedule(schedule, approval=approval)
+            dispatched.append(
+                {
+                    "schedule_id": schedule["schedule_id"],
+                    "task_id": result["task"].get("task_id"),
+                    "run_id": result["task"].get("run_id"),
+                }
+            )
+        except Exception as exc:
+            knowledge_base.update_research_schedule(
+                str(schedule["schedule_id"]),
+                last_run_at=now,
+                next_run_at=now + float(schedule["interval_hours"]) * 3600,
+                result_ref={"status": "error", "message": str(exc)[:500]},
+            )
+            failed.append({"schedule_id": schedule["schedule_id"], "message": str(exc)[:240]})
+    return {"dispatched_count": len(dispatched), "failed_count": len(failed), "items": dispatched, "errors": failed}
+
+
 @app.post("/api/research-schedules/{schedule_id}/tick")
 async def tick_research_schedule(
     schedule_id: str,
@@ -12786,38 +13086,7 @@ async def tick_research_schedule(
                 "next_run_at": schedule["next_run_at"],
             },
         )
-    task_id = f"task_{uuid.uuid4().hex[:12]}"
-    task = knowledge_base.create_research_task(
-        task_id=task_id,
-        run_id=schedule["run_id"],
-        title=f"Scheduled: {schedule['title']}",
-        task_type="scheduled_workflow",
-        status="ready",
-        priority=2,
-        phase=schedule["phase"],
-        target_ref={
-            "schedule_id": schedule_id,
-            "workflow_name": schedule["workflow_name"],
-            "arguments": schedule["arguments"],
-        },
-        result_ref={},
-        notes=(
-            "Created by research schedule tick. Execute the referenced workflow through its "
-            "approval-backed endpoint before treating it as completed."
-        ),
-    )
-    next_run_at = now + float(schedule["interval_hours"]) * 3600
-    updated_schedule = knowledge_base.update_research_schedule(
-        schedule_id,
-        last_run_at=now,
-        next_run_at=next_run_at,
-        result_ref={"task_id": task_id, "approval": approval},
-    )
-    return {
-        "schedule": updated_schedule,
-        "task": task,
-        "approval": approval,
-    }
+    return await dispatch_research_schedule(schedule, approval=approval)
 
 
 @app.post("/api/research-delegations")
@@ -13988,6 +14257,7 @@ async def get_workbench_snapshot(
             "evidence_search": True,
             "project_artifacts": True,
             "run_events": True,
+            "research_outcome": True,
             "synthetic_demo": True,
         },
         "evidence_boundary": evidence_boundary,
@@ -14212,6 +14482,20 @@ async def get_run_evidence_links(run_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Run not found")
     links = knowledge_base.get_hypothesis_evidence_links(run_id)
     return {"run_id": run_id, "evidence_links": links, "count": len(links)}
+
+
+@app.get("/api/runs/{run_id}/outcome")
+async def get_run_research_outcome(run_id: str) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    outcome = record.research_outcome or build_research_outcome(record)
+    return {
+        "run_id": run_id,
+        "status": record.status,
+        "evidence_snapshot": _public_snapshot_value(record.evidence_snapshot),
+        "research_outcome": _public_snapshot_value(outcome),
+    }
 
 
 @app.get("/api/runs/{run_id}/evidence-retrievals")
