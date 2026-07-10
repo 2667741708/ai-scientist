@@ -1,10 +1,10 @@
 import { Link } from "react-router-dom";
 import { EmptyState } from "../../components/feedback/states";
-import { createExperimentPlan } from "../../lib/api/workbench";
+import { createExperimentPlan, getResearchAutopilot, startResearchAutopilot } from "../../lib/api/workbench";
 import { copy, formatBackendText } from "../../lib/formatters/workbench";
 import { mapRunToWorkspaceView } from "../../lib/view-models/workbench";
-import type { RunRecord } from "../../types/workbench";
-import { useState } from "react";
+import type { ResearchLoopState, RunRecord } from "../../types/workbench";
+import { useEffect, useState } from "react";
 import { RemoteWorkspacePanel } from "./RemoteWorkspacePanel";
 import { WebTerminalPanel, type WebTerminalPreset } from "./WebTerminalPanel";
 
@@ -18,6 +18,30 @@ export function ExperimentsPanel({
   const [terminalPreset, setTerminalPreset] = useState<WebTerminalPreset | null>(null);
   const [planState, setPlanState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [planResult, setPlanResult] = useState<Record<string, unknown> | null>(null);
+  const [loopState, setLoopState] = useState<ResearchLoopState | null>(record?.research_loop ?? null);
+  const [loopBusy, setLoopBusy] = useState(false);
+  const [loopError, setLoopError] = useState(false);
+
+  useEffect(() => {
+    setLoopState(record?.research_loop ?? null);
+  }, [record?.research_loop]);
+  useEffect(() => {
+    if (!record || !["queued", "running", "reranking"].includes(loopState?.status ?? "")) return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await getResearchAutopilot(record.run_id);
+        if (!cancelled) setLoopState(response.research_loop);
+      } catch {
+        // Preserve the last durable snapshot and retry on the next interval.
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [record?.run_id, loopState?.status]);
 
   if (!record) {
     return (
@@ -40,6 +64,33 @@ export function ExperimentsPanel({
       setPlanState("error");
     }
   };
+  const startLoop = async () => {
+    if (loopState) return;
+    setLoopBusy(true);
+    setLoopError(false);
+    try {
+      const response = await startResearchAutopilot(record.run_id, {
+        mode: "guarded",
+        auto_evidence: true,
+        auto_plan: true,
+        auto_execute: false,
+        auto_interpret: false,
+        auto_rerank: true,
+        continue_on_limited_evidence: true,
+        grants: [{
+          confirmed: true,
+          scope: "mcp.literature_review",
+          reason: "Researcher started the guarded evidence expansion loop.",
+          max_uses: 1,
+        }],
+      });
+      setLoopState(response.research_loop);
+    } catch {
+      setLoopError(true);
+    } finally {
+      setLoopBusy(false);
+    }
+  };
 
   return (
     <div className="experiment-page-stack">
@@ -53,6 +104,9 @@ export function ExperimentsPanel({
           <div className="task-actions">
             <button className="button-primary" type="button" onClick={() => void createPlan()} disabled={!selectedHypothesis || planState === "loading"} aria-busy={planState === "loading"}>
               {planState === "loading" ? "正在生成实验计划" : planState === "success" ? "已保存实验计划" : "生成可证伪实验"}
+            </button>
+            <button className="button-secondary" type="button" onClick={() => void startLoop()} disabled={!selectedHypothesis || loopBusy || Boolean(loopState)} aria-busy={loopBusy}>
+              {loopBusy ? "正在创建闭环" : loopState?.status ? `闭环：${loopState.status}` : "创建自动研究闭环"}
             </button>
             <Link to={`/projects/${record.run_id}/hypotheses`}>查看假设</Link>
             <Link to={`/projects/${record.run_id}/reports`}>写入报告</Link>
@@ -75,6 +129,8 @@ export function ExperimentsPanel({
       </section>
 
       {planState === "error" ? <div className="control-feedback error" role="alert">实验计划生成失败，请稍后重试。</div> : null}
+      {loopError ? <div className="control-feedback error" role="alert">闭环未能启动；已有任务请在 Lattice 中恢复，或稍后重试。</div> : null}
+      {loopState ? <ResearchLoopResult state={loopState} /> : null}
       {planResult ? <ExperimentPlanResult plan={planResult} /> : null}
 
       <RemoteWorkspacePanel
@@ -84,6 +140,29 @@ export function ExperimentsPanel({
 
       <WebTerminalPanel preset={terminalPreset} />
     </div>
+  );
+}
+
+function ResearchLoopResult({ state }: { state: ResearchLoopState }) {
+  const stages = state.stages ?? [];
+  return (
+    <section className="task-surface" aria-label="自动研究闭环状态">
+      <header className="task-header">
+        <div>
+          <span>Research Autopilot</span>
+          <h2>{state.status === "awaiting_approval" ? "等待限定授权" : state.status === "awaiting_human" ? "等待研究者判断" : "闭环任务已建立"}</h2>
+          <p>安全的检索、解析、证据整理和实验计划可自动推进；远程计算、低置信结论与冲突证据会停下来等待你。</p>
+        </div>
+      </header>
+      <div className="task-list">
+        {stages.map((stage) => (
+          <article key={stage.id}>
+            <strong>{stage.id}</strong>
+            <span>{stage.summary || stage.status}</span>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

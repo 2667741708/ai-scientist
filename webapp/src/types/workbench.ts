@@ -203,6 +203,7 @@ export type RunRequest = {
   auto_ingest_papers?: boolean;
   paper_discovery_limit?: number;
   paper_ingest_limit?: number;
+  autopilot?: ResearchAutopilotPolicy;
 };
 
 export type ContinueRunRequest = {
@@ -228,6 +229,85 @@ export type ContinueRunRequest = {
   paper_ingest_limit?: number | null;
 };
 
+export type ResearchAutopilotGrant = {
+  confirmed: boolean;
+  scope: string;
+  reason?: string | null;
+  server_id?: string | null;
+  max_uses?: number;
+  used?: number;
+  expires_at?: number | null;
+};
+
+export type ResearchAutopilotCompute = {
+  kind: "none" | "local_python" | "ssh";
+  script_path?: string;
+  args?: string[];
+  server_id?: string;
+  command?: string;
+  workdir?: string | null;
+  timeout_seconds?: number;
+};
+
+export type ResearchAutopilotPolicy = {
+  mode?: "manual" | "guarded" | "autonomous_compute";
+  max_cycles?: number;
+  auto_evidence?: boolean;
+  auto_plan?: boolean;
+  auto_execute?: boolean;
+  auto_interpret?: boolean;
+  auto_rerank?: boolean;
+  continue_on_limited_evidence?: boolean;
+  grants?: ResearchAutopilotGrant[];
+  compute?: ResearchAutopilotCompute;
+  evaluation?: {
+    metric_path?: string;
+    operator?: ">=" | ">" | "<=" | "<" | "==" | "!=";
+    threshold?: number;
+  };
+};
+
+export type ResearchLoopStage = {
+  id: string;
+  label?: string;
+  order?: number;
+  status: "pending" | "running" | "complete" | "limited" | "awaiting_input" | "awaiting_approval" | "awaiting_human" | "error" | "cancelled" | string;
+  summary?: string;
+  message?: string;
+  attempts?: number;
+  updated_at?: number;
+  details?: Record<string, unknown>;
+  artifacts?: Record<string, unknown>[];
+};
+
+export type ResearchLoopApproval = {
+  scope: string;
+  stage?: string;
+  reason?: string;
+  status?: string;
+  server_id?: string | null;
+};
+
+export type ResearchLoopState = {
+  controller_version?: string;
+  run_id?: string;
+  status?: string;
+  current_stage?: string;
+  cycle?: number;
+  max_cycles?: number;
+  policy?: ResearchAutopilotPolicy;
+  stages?: ResearchLoopStage[];
+  pending_approvals?: ResearchLoopApproval[];
+  approval_history?: ResearchLoopApproval[];
+  selected_hypothesis_index?: number;
+  selected_hypothesis_id?: string;
+  experiment_protocol?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
+  interpretation?: Record<string, unknown>;
+  rerank_run_id?: string;
+  boundary?: string;
+};
+
 export type RunRecord = {
   run_id: string;
   status: RunStatus;
@@ -242,6 +322,7 @@ export type RunRecord = {
   citation_provenance_qa?: Record<string, unknown>;
   evidence_snapshot?: Record<string, unknown>;
   research_outcome?: ResearchOutcome;
+  research_loop?: ResearchLoopState;
   expert_feedback?: Record<string, unknown>;
   error?: string;
 };

@@ -1,9 +1,42 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createExperimentPlan, listKnowledgePapers, saveProjectArtifact } from "../lib/api/workbench";
+import {
+  createExperimentPlan,
+  getResearchAutopilot,
+  listKnowledgePapers,
+  pauseResearchAutopilot,
+  recordExperimentFeedback,
+  resumeResearchAutopilot,
+  saveProjectArtifact,
+  startResearchAutopilot,
+} from "../lib/api/workbench";
 import { formatBackendText } from "../lib/formatters/workbench";
 import { useWorkbench } from "../features/runs/workbench-context";
+
+const loopStatusLabels = {
+  queued: "已排队",
+  running: "推进中",
+  awaiting_input: "待配置",
+  awaiting_approval: "待授权",
+  awaiting_human: "待判断",
+  reranking: "Elo 重排中",
+  paused: "已暂停",
+  complete: "已完成",
+  error: "需修复",
+};
+
+const loopStageLabels = {
+  discover: "发现论文",
+  acquire_parse: "解析入库",
+  ground: "证据定位",
+  generate_rank: "假设竞赛",
+  plan: "实验预注册",
+  execute: "受限执行",
+  review: "结果解释",
+  rerank: "Elo 重排",
+  outcome: "研究结论",
+};
 
 const icons = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
@@ -466,6 +499,19 @@ function HypothesisLab({ notify, workbench }) {
   const [sources, setSources] = useState(["论文库", "研究备忘"]);
   const [activeId, setActiveId] = useState("H2");
   const [saved, setSaved] = useState([]);
+  const [loopState, setLoopState] = useState(currentRun?.research_loop || null);
+  const [loopBusy, setLoopBusy] = useState(false);
+  const [loopConfigOpen, setLoopConfigOpen] = useState(false);
+  const [computeKind, setComputeKind] = useState("local_python");
+  const [scriptPath, setScriptPath] = useState("");
+  const [serverId, setServerId] = useState("c201-4090");
+  const [remoteCommand, setRemoteCommand] = useState("");
+  const [remoteWorkdir, setRemoteWorkdir] = useState("");
+  const [metricPath, setMetricPath] = useState("metrics.primary");
+  const [metricOperator, setMetricOperator] = useState(">=");
+  const [metricThreshold, setMetricThreshold] = useState("");
+  const [autoInterpret, setAutoInterpret] = useState(false);
+  const [autoRerank, setAutoRerank] = useState(true);
   const toggleSource = (source) => setSources((prev) => prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source]);
   const liveHypotheses = useMemo(
     () => (currentRun?.hypotheses ?? []).map(toLatticeHypothesis),
@@ -474,12 +520,40 @@ function HypothesisLab({ notify, workbench }) {
   const generated = liveHypotheses.length > 0;
   const loading = isBusy;
   const active = liveHypotheses.find((hypothesis) => hypothesis.id === activeId) || liveHypotheses[0];
+  const loopNeedsConfig = ["awaiting_input", "awaiting_approval", "paused", "error"].includes(loopState?.status);
+  const loopWinner = Number.isInteger(loopState?.selected_hypothesis_index)
+    ? liveHypotheses[loopState.selected_hypothesis_index]
+    : null;
 
   useEffect(() => {
     if (liveHypotheses[0] && !liveHypotheses.some((hypothesis) => hypothesis.id === activeId)) {
       setActiveId(liveHypotheses[0].id);
     }
   }, [activeId, liveHypotheses]);
+  useEffect(() => {
+    setLoopState(currentRun?.research_loop || null);
+  }, [currentRun?.research_loop]);
+  useEffect(() => {
+    if (loopNeedsConfig) setLoopConfigOpen(true);
+  }, [loopNeedsConfig]);
+  useEffect(() => {
+    if (!currentRun || !["queued", "running", "reranking"].includes(loopState?.status)) return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await getResearchAutopilot(currentRun.run_id);
+        if (!cancelled) setLoopState(response.research_loop);
+      } catch {
+        // Keep the last durable snapshot visible; the next interval can recover.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [currentRun?.run_id, loopState?.status]);
 
   async function generate() {
     const runId = await startRun(question);
@@ -518,6 +592,124 @@ function HypothesisLab({ notify, workbench }) {
       notify("可证伪实验计划已创建并保存到项目。 ");
     } catch {
       notify("实验计划暂时无法创建，请稍后重试。 ");
+    }
+  }
+
+  async function toggleResearchLoop() {
+    if (!currentRun) return;
+    if (loopState?.status === "complete") {
+      notify("这个闭环已经完成；可从获胜结果创建下一次 continuation run。");
+      return;
+    }
+    if (loopState && !["queued", "running"].includes(loopState.status)) {
+      setLoopConfigOpen(true);
+      notify(loopState.status === "awaiting_human" ? "请确认实验解释或检查不确定执行。" : "补充计算目标、指标和限定授权后即可恢复。 ");
+      return;
+    }
+    setLoopBusy(true);
+    try {
+      if (["queued", "running"].includes(loopState?.status)) {
+        const response = await pauseResearchAutopilot(currentRun.run_id);
+        setLoopState(response.research_loop);
+        notify("自动闭环已暂停；已经开始的远程命令不会被强制终止。");
+      } else {
+        const response = await startResearchAutopilot(currentRun.run_id, {
+          mode: "guarded",
+          auto_evidence: true,
+          auto_plan: true,
+          auto_execute: false,
+          auto_interpret: false,
+          auto_rerank: true,
+          continue_on_limited_evidence: true,
+          grants: [{ confirmed: true, scope: "mcp.literature_review", reason: "Researcher started the guarded evidence expansion loop.", max_uses: 1 }],
+        });
+        setLoopState(response.research_loop);
+        notify("已创建可恢复的研究闭环；安全步骤会自动推进，高风险节点会等待你。 ");
+      }
+    } catch {
+      notify("闭环状态暂时无法更新，请查看任务状态或稍后重试。 ");
+    } finally {
+      setLoopBusy(false);
+    }
+  }
+
+  async function resumeResearchLoop() {
+    if (!currentRun) return;
+    const threshold = Number(metricThreshold);
+    if (!metricThreshold.trim() || !Number.isFinite(threshold)) {
+      notify("请填写有限数值形式的预注册阈值。 ");
+      return;
+    }
+    if (computeKind === "local_python" && !scriptPath.trim()) {
+      notify("请填写实验根目录内的 Python 脚本路径。 ");
+      return;
+    }
+    if (computeKind === "ssh" && (!serverId.trim() || !remoteCommand.trim())) {
+      notify("请选择登记服务器并填写不含密码或 token 的远程命令。 ");
+      return;
+    }
+    const executionScope = computeKind === "ssh" ? "ssh.training_command" : "experiment.background_job";
+    const compute = computeKind === "ssh"
+      ? { kind: "ssh", server_id: serverId.trim(), command: remoteCommand.trim(), workdir: remoteWorkdir.trim() || undefined, timeout_seconds: 3600 }
+      : { kind: "local_python", script_path: scriptPath.trim(), timeout_seconds: 300 };
+    const grants = [{
+      confirmed: true,
+      scope: executionScope,
+      server_id: computeKind === "ssh" ? serverId.trim() : undefined,
+      reason: "Researcher explicitly approved this preregistered compute target in Lattice.",
+      max_uses: 1,
+    }];
+    if (autoInterpret) grants.push({
+      confirmed: true,
+      scope: "experiment.feedback",
+      reason: "Researcher approved deterministic adoption of the preregistered metric comparison.",
+      max_uses: 1,
+    });
+    setLoopBusy(true);
+    try {
+      const response = await resumeResearchAutopilot(currentRun.run_id, {
+        compute,
+        evaluation: { metric_path: metricPath.trim() || "metrics.primary", operator: metricOperator, threshold },
+        grants,
+        continue_on_limited_evidence: true,
+        auto_interpret: autoInterpret,
+        auto_rerank: autoRerank,
+      });
+      setLoopState(response.research_loop);
+      setLoopConfigOpen(false);
+      notify("限定授权已记录；闭环将从持久化检查点继续。 ");
+    } catch {
+      notify("恢复失败：请检查脚本、服务器、命令和当前任务状态。 ");
+    } finally {
+      setLoopBusy(false);
+    }
+  }
+
+  async function confirmExperimentVerdict(verdict) {
+    if (!currentRun || loopState?.current_stage !== "review") return;
+    const jobId = loopState?.execution?.job_id;
+    const hypothesisIndex = loopState?.selected_hypothesis_index;
+    if (!jobId || !Number.isInteger(hypothesisIndex)) {
+      notify("没有找到可解释的实验执行引用。 ");
+      return;
+    }
+    setLoopBusy(true);
+    try {
+      await recordExperimentFeedback(currentRun.run_id, {
+        job_id: jobId,
+        hypothesis_index: hypothesisIndex,
+        verdict,
+        rationale: `Researcher reviewed the persisted experiment result in Lattice and marked it ${verdict}.`,
+        rerank: true,
+        approval: { confirmed: true, scope: "experiment.feedback", reason: "Explicit researcher interpretation in Lattice." },
+      });
+      const response = await getResearchAutopilot(currentRun.run_id);
+      setLoopState(response.research_loop);
+      notify("研究者解释已写回证据包，并进入 Review / Elo 重排。 ");
+    } catch {
+      notify("实验解释未能写回；请检查任务是否终态以及假设绑定。 ");
+    } finally {
+      setLoopBusy(false);
     }
   }
   return (
@@ -570,6 +762,33 @@ function HypothesisLab({ notify, workbench }) {
             <div className="framework-step"><span>03</span><div><strong>最小实验</strong><p>{active.raw.experiment || "需要生成可观测变量、对照组与最小验证路径。"}</p></div></div>
             <div className="framework-step"><span>04</span><div><strong>证伪条件</strong><p>若关键观测变量在对照条件下不优于替代解释，则应拒绝或修订该假设。</p></div></div>
             <button className="primary-button full" onClick={() => void createExperiment()}>创建最小实验 <Icon name="arrow" size={17} /></button>
+            <section className="autopilot-card">
+              <div className="autopilot-head"><span><Icon name="layers" size={15} />RESEARCH AUTOPILOT</span><Badge tone={loopState?.status === "complete" ? "green" : loopState?.status === "error" ? "amber" : loopState?.status ? "violet" : "neutral"}>{loopStatusLabels[loopState?.status] || "未启动"}</Badge></div>
+              <p>检索与解析、证据核验、实验协议、受限计算、结果解释和 Elo 重排共用一条可恢复任务链。</p>
+              {loopWinner ? <div className="autopilot-winner"><span>当前闭环对象</span><strong>{loopWinner.id} · {loopWinner.title}</strong></div> : null}
+              {loopState?.stages?.length ? <div className="autopilot-stages">{loopState.stages.map((stage) => <span key={stage.id} className={`${stage.status === "complete" ? "done" : ""} ${stage.id === loopState.current_stage ? "active" : ""} ${["limited", "error", "awaiting_human", "awaiting_input", "awaiting_approval"].includes(stage.status) ? "attention" : ""}`} title={stage.summary || stage.message || stage.status}><i />{loopStageLabels[stage.id] || stage.label || stage.id}</span>)}</div> : null}
+              {loopState?.current_stage ? <div className="autopilot-current"><span>{loopStageLabels[loopState.current_stage] || loopState.current_stage}</span><p>{loopState.stages?.find((stage) => stage.id === loopState.current_stage)?.summary || loopState.stages?.find((stage) => stage.id === loopState.current_stage)?.message || "正在等待持久化任务更新。"}</p></div> : null}
+              {loopState?.status === "awaiting_human" && loopState?.current_stage === "review" ? (
+                <div className="autopilot-review">
+                  <strong>研究者解释</strong>
+                  <p>{loopState?.interpretation?.rationale || "请检查指标、日志和反例，再决定实验与假设的关系。"}</p>
+                  <div><button type="button" disabled={loopBusy} onClick={() => void confirmExperimentVerdict("support")}>支持</button><button type="button" disabled={loopBusy} onClick={() => void confirmExperimentVerdict("contradict")}>反驳</button><button type="button" disabled={loopBusy} onClick={() => void confirmExperimentVerdict("inconclusive")}>不足</button></div>
+                </div>
+              ) : null}
+              {loopConfigOpen && loopState?.status !== "awaiting_human" ? (
+                <div className="autopilot-config">
+                  <div className="autopilot-config-head"><strong>恢复检查点</strong><button type="button" onClick={() => setLoopConfigOpen(false)}>收起</button></div>
+                  <label>计算目标<select value={computeKind} onChange={(event) => setComputeKind(event.target.value)}><option value="local_python">受限本地 Python</option><option value="ssh">登记 SSH 服务器</option></select></label>
+                  {computeKind === "local_python" ? <label>脚本路径<input value={scriptPath} onChange={(event) => setScriptPath(event.target.value)} placeholder="benchmark.py（相对 .experiments）" /></label> : <><label>服务器<select value={serverId} onChange={(event) => setServerId(event.target.value)}><option value="c201-4090">c201-4090</option><option value="c201-5080">c201-5080</option><option value="d437">d437</option></select></label><label>工作目录<input value={remoteWorkdir} onChange={(event) => setRemoteWorkdir(event.target.value)} placeholder="服务器已配置目录" /></label><label>远程命令<textarea value={remoteCommand} onChange={(event) => setRemoteCommand(event.target.value)} placeholder="python train.py --config experiment.yaml" /></label><small className="config-warning">不要在命令中粘贴密码、token 或 API key；凭据应预先配置在服务器。</small></>}
+                  <div className="metric-grid"><label>指标路径<input value={metricPath} onChange={(event) => setMetricPath(event.target.value)} /></label><label>比较<select value={metricOperator} onChange={(event) => setMetricOperator(event.target.value)}><option>&gt;=</option><option>&gt;</option><option>&lt;=</option><option>&lt;</option><option>==</option><option>!=</option></select></label><label>阈值<input inputMode="decimal" value={metricThreshold} onChange={(event) => setMetricThreshold(event.target.value)} placeholder="0.80" /></label></div>
+                  <label className="autopilot-check"><input type="checkbox" checked={autoInterpret} onChange={(event) => setAutoInterpret(event.target.checked)} /><span>指标满足预注册规则时自动写回证据</span></label>
+                  <label className="autopilot-check"><input type="checkbox" checked={autoRerank} onChange={(event) => setAutoRerank(event.target.checked)} /><span>写回后自动进入 Review / Elo 重排</span></label>
+                  <button className="primary-button full" type="button" disabled={loopBusy} onClick={() => void resumeResearchLoop()}>{loopBusy ? "正在恢复" : computeKind === "ssh" ? "授权此服务器并继续" : "授权此脚本并继续"}</button>
+                </div>
+              ) : null}
+              <button className="secondary-button full" type="button" disabled={loopBusy || ["complete", "reranking", "awaiting_human"].includes(loopState?.status)} onClick={() => void toggleResearchLoop()}>{loopBusy ? "正在更新" : ["queued", "running"].includes(loopState?.status) ? "暂停自动推进" : loopState?.status === "complete" ? "闭环已完成" : loopState?.status === "reranking" ? "正在重排" : loopState?.status === "awaiting_human" ? "等待人工核验" : loopState ? "配置并恢复" : "启动受控闭环"}</button>
+              <small>检索、解析和整理可按任务授权自动推进；远程执行、缺失阈值、不确定结果和命题 lineage 会停在可恢复检查点。</small>
+            </section>
           </>
         ) : (
           <div className="rail-placeholder"><Icon name="target" size={25} /><h3>这里会出现检验路径</h3><p>选择一个候选假设后，系统会展开监督单位、实验变量与证伪条件。</p></div>

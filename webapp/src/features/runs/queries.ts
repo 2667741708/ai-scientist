@@ -21,7 +21,11 @@ export function useRunHistoryQuery() {
     refetchInterval: (query) => {
       const records = query.state.data as RunRecord[] | undefined;
       if (!records?.length) return false;
-      return records.some((record) => record.status === "queued" || record.status === "running") ? 1500 : false;
+      return records.some((record) =>
+        record.status === "queued"
+        || record.status === "running"
+        || ["queued", "running", "reranking"].includes(record.research_loop?.status ?? ""),
+      ) ? 1500 : false;
     },
   });
 }
@@ -36,7 +40,11 @@ export function useRunByIdQuery(runId: string | null) {
     refetchInterval: (query) => {
       const record = query.state.data as RunRecord | undefined;
       if (!record) return 900;
-      return record.status === "queued" || record.status === "running" ? 900 : false;
+      return record.status === "queued"
+        || record.status === "running"
+        || ["queued", "running", "reranking"].includes(record.research_loop?.status ?? "")
+        ? 900
+        : false;
     },
   });
 }

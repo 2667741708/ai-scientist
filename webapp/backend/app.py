@@ -71,6 +71,18 @@ try:
         list_phase_tool_policies,
     )
     from backend.research_skills import get_research_skill, list_research_skills
+    from backend.research_autopilot import (
+        AutopilotValidationError,
+        build_experiment_protocol,
+        build_loop_state,
+        consume_exact_grant,
+        evaluate_experiment_result,
+        exact_grant,
+        execution_scope,
+        normalize_policy,
+        parse_result_json_marker,
+        update_loop_stage,
+    )
     from backend.remote_workspace import (
         RemoteWorkspaceError,
         create_tmux_session,
@@ -155,6 +167,18 @@ except ModuleNotFoundError:
         list_phase_tool_policies,
     )
     from research_skills import get_research_skill, list_research_skills
+    from research_autopilot import (
+        AutopilotValidationError,
+        build_experiment_protocol,
+        build_loop_state,
+        consume_exact_grant,
+        evaluate_experiment_result,
+        exact_grant,
+        execution_scope,
+        normalize_policy,
+        parse_result_json_marker,
+        update_loop_stage,
+    )
     from remote_workspace import (
         RemoteWorkspaceError,
         create_tmux_session,
@@ -235,6 +259,7 @@ class RunRequest(BaseModel):
     auto_ingest_papers: bool = True
     paper_discovery_limit: int = Field(default=8, ge=1, le=20)
     paper_ingest_limit: int = Field(default=4, ge=0, le=12)
+    autopilot: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ContinueRunRequest(BaseModel):
@@ -258,6 +283,19 @@ class ContinueRunRequest(BaseModel):
     auto_ingest_papers: Optional[bool] = None
     paper_discovery_limit: Optional[int] = Field(default=None, ge=1, le=20)
     paper_ingest_limit: Optional[int] = Field(default=None, ge=0, le=12)
+
+
+class ResearchAutopilotRequest(BaseModel):
+    policy: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchAutopilotResumeRequest(BaseModel):
+    grants: List[Dict[str, Any]] = Field(default_factory=list, max_length=20)
+    compute: Optional[Dict[str, Any]] = None
+    evaluation: Optional[Dict[str, Any]] = None
+    continue_on_limited_evidence: Optional[bool] = None
+    auto_interpret: Optional[bool] = None
+    auto_rerank: Optional[bool] = None
 
 
 class TranslationRequest(BaseModel):
@@ -733,6 +771,7 @@ class RunRecord(BaseModel):
     citation_provenance_qa: Dict[str, Any] = Field(default_factory=dict)
     evidence_snapshot: Dict[str, Any] = Field(default_factory=dict)
     research_outcome: Dict[str, Any] = Field(default_factory=dict)
+    research_loop: Dict[str, Any] = Field(default_factory=dict)
     expert_feedback: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
 
@@ -7227,7 +7266,12 @@ _PRIVATE_PATH_KEYS = {
     "input_path",
     "pdf_path",
     "solve_dir",
+    "script_path",
+    "workdir",
+    "run_dir",
 }
+
+_PRIVATE_COMMAND_KEYS = {"command", "raw_command"}
 
 
 def _is_local_path(value: Any) -> bool:
@@ -7240,6 +7284,8 @@ def _public_snapshot_value(value: Any, *, key: str = "") -> Any:
     """Remove machine-local paths from the public workbench facade."""
     if key.lower() in _PRIVATE_PATH_KEYS:
         return None
+    if key.lower() in _PRIVATE_COMMAND_KEYS:
+        return "[redacted command]" if value else value
     if isinstance(value, dict):
         return {
             str(child_key): _public_snapshot_value(child_value, key=str(child_key))
@@ -8142,6 +8188,10 @@ def apply_experiment_feedback_to_record(
     record: RunRecord,
     request: ExperimentFeedbackRequest,
     job: Dict[str, Any],
+    *,
+    source_channel: str = "approved_experiment_feedback",
+    relationship_confidence: float = 1.0,
+    persist_loop_marker: bool = False,
 ) -> Dict[str, Any]:
     """Attach a human-approved experiment interpretation as structured evidence."""
     if request.hypothesis_index >= len(record.hypotheses):
@@ -8171,14 +8221,14 @@ def apply_experiment_feedback_to_record(
         "support_level": "experimental_data",
         "source_reliability": "experiment_run",
         "relationship": relationship,
-        "relationship_confidence": 1.0,
+        "relationship_confidence": max(0.0, min(float(relationship_confidence), 1.0)),
         "relationship_rationale": request.rationale,
         "text_preview": (
             f"Human interpretation: {request.rationale} "
             f"Execution status: {job.get('status')}; result_ref: {tool_result_ref.get('result_id') or 'stored'}."
         ),
         "experiment_data_summary": request.rationale,
-        "source_channel": "approved_experiment_feedback",
+        "source_channel": source_channel,
         "job_id": request.job_id,
         "result_id": tool_result_ref.get("result_id"),
     }
@@ -8209,6 +8259,8 @@ def apply_experiment_feedback_to_record(
         }
     )
     hypothesis["experiment_runs"] = experiment_runs
+    if persist_loop_marker and isinstance(record.research_loop, dict):
+        record.research_loop["interpretation_evidence_id"] = evidence_item["evidence_id"]
     refresh_run_evidence_snapshot(record)
     apply_citation_provenance_qa(record)
     record.research_outcome = build_research_outcome(record)
@@ -8222,6 +8274,226 @@ def apply_experiment_feedback_to_record(
     )
     persist_run_record(record)
     return evidence_item
+
+
+AUTOPILOT_WORKFLOW = "workflow.research_autopilot"
+
+
+def selected_winner(record: RunRecord) -> tuple[int, Dict[str, Any]]:
+    if not record.hypotheses:
+        raise ValueError("Research autopilot requires at least one hypothesis.")
+    requested = record.research_outcome.get("winner_index")
+    if isinstance(requested, int) and 0 <= requested < len(record.hypotheses):
+        return requested, record.hypotheses[requested]
+    return max(
+        enumerate(record.hypotheses),
+        key=lambda pair: float(pair[1].get("elo_rating") or pair[1].get("score") or 0),
+    )
+
+
+def selected_loop_hypothesis(record: RunRecord) -> tuple[int, Dict[str, Any]]:
+    """Keep an autopilot cycle bound to the hypothesis selected when it was enqueued."""
+    selected_index = record.research_loop.get("selected_hypothesis_index")
+    selected_id = str(record.research_loop.get("selected_hypothesis_id") or "")
+    if isinstance(selected_index, int) and 0 <= selected_index < len(record.hypotheses):
+        hypothesis = record.hypotheses[selected_index]
+        hypothesis_id = str(hypothesis.get("hypothesis_id") or hypothesis.get("id") or "")
+        if not selected_id or not hypothesis_id or selected_id == hypothesis_id:
+            return selected_index, hypothesis
+    return selected_winner(record)
+
+
+def validate_autopilot_policy_for_persistence(policy: Dict[str, Any]) -> Dict[str, Any]:
+    """Reject inline SSH secrets before a durable policy is written to the project database."""
+    normalized = normalize_policy(policy)
+    compute = normalized.get("compute") if isinstance(normalized.get("compute"), dict) else {}
+    command = str(compute.get("command") or "")
+    if compute.get("kind") == "ssh" and command and redact_sensitive_text(command) != command:
+        raise AutopilotValidationError(
+            "SSH commands cannot contain inline passwords, tokens, or API keys. "
+            "Configure secrets on the registered server and reference them by environment name."
+        )
+    return normalized
+
+
+def consume_autopilot_grant(
+    record: RunRecord,
+    policy: Dict[str, Any],
+    scope: str,
+    *,
+    server_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Consume and audit one bounded mission grant before its side effect begins."""
+    updated = consume_exact_grant(policy, scope, server_id)
+    history = list(record.research_loop.get("approval_history") or [])
+    history.append(
+        {
+            "scope": scope,
+            "server_id": server_id,
+            "status": "consumed",
+            "used_at": time.time(),
+            "reason": "Consumed immediately before the approved autopilot side effect.",
+        }
+    )
+    record.research_loop["policy"] = updated
+    record.research_loop["approval_history"] = history[-100:]
+    record.updated_at = time.time()
+    persist_run_record(record)
+    return updated
+
+
+def autopilot_execution_job_id(record: RunRecord, protocol: Dict[str, Any]) -> str:
+    payload = (
+        f"{record.run_id}|{record.research_loop.get('cycle') or 1}|"
+        f"{protocol.get('protocol_id') or ''}"
+    )
+    return f"job_autopilot_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:20]}"
+
+
+def find_autopilot_rerank_child(parent_run_id: str, job_id: str) -> Optional[RunRecord]:
+    """Recover a continuation created before the parent persisted its child reference."""
+    for summary in knowledge_base.list_research_runs(limit=200):
+        child = load_run_record(str(summary.get("run_id") or ""))
+        if not child or child.request.parent_run_id != parent_run_id:
+            continue
+        for item in child.request.user_feedback:
+            target_ref = (
+                item.target_ref
+                if isinstance(item, FeedbackItem)
+                else item.get("target_ref", {}) if isinstance(item, dict) else {}
+            )
+            if str(target_ref.get("job_id") or "") == job_id:
+                return child
+    return None
+
+
+def persist_loop_stage(
+    record: RunRecord,
+    stage: str,
+    status: str,
+    summary: str,
+    *,
+    details: Optional[Dict[str, Any]] = None,
+    loop_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    state = update_loop_stage(
+        record.research_loop,
+        stage,
+        status,
+        summary=summary,
+        details=details or {},
+    )
+    if loop_status:
+        state["status"] = loop_status
+    record.research_loop = state
+    record.updated_at = time.time()
+    persist_run_record(record)
+    return state
+
+
+def enqueue_research_autopilot(
+    record: RunRecord,
+    raw_policy: Optional[Dict[str, Any]] = None,
+    *,
+    resume: bool = False,
+) -> Dict[str, Any]:
+    policy = validate_autopilot_policy_for_persistence(
+        raw_policy or record.request.autopilot or {}
+    )
+    if not resume or not record.research_loop:
+        state = build_loop_state(policy, run_id=record.run_id)
+        evidence_first = record.metrics.get("evidence_first") if isinstance(record.metrics, dict) else {}
+        state = update_loop_stage(
+            state,
+            "discover",
+            "complete" if isinstance(evidence_first, dict) and evidence_first.get("candidate_count") else "limited",
+            summary=(
+                f"发现 {int(evidence_first.get('candidate_count') or 0)} 个论文候选。"
+                if isinstance(evidence_first, dict)
+                else "当前 run 没有独立的论文发现摘要。"
+            ),
+        )
+        state = update_loop_stage(
+            state,
+            "acquire_parse",
+            "complete" if isinstance(evidence_first, dict) and evidence_first.get("ingested_count") else "limited",
+            summary=(
+                f"已解析入库 {int(evidence_first.get('ingested_count') or 0)} 篇论文。"
+                if isinstance(evidence_first, dict)
+                else "将使用当前知识库内容。"
+            ),
+        )
+        state = update_loop_stage(
+            state,
+            "ground",
+            "complete" if record.evidence_snapshot.get("evidence_item_count") else "limited",
+            summary=f"证据快照包含 {int(record.evidence_snapshot.get('evidence_item_count') or 0)} 条证据。",
+        )
+        state = update_loop_stage(
+            state,
+            "generate_rank",
+            "complete",
+            summary=f"已生成 {len(record.hypotheses)} 条假设和 {len(record.tournament_matchups)} 场比较。",
+        )
+    else:
+        state = dict(record.research_loop)
+        state["policy"] = policy
+        state["status"] = "queued"
+        state["pending_approvals"] = []
+        state["resume_count"] = int(state.get("resume_count") or 0) + 1
+    winner_index, winner = (
+        selected_loop_hypothesis(record)
+        if resume and record.research_loop.get("selected_hypothesis_index") is not None
+        else selected_winner(record)
+    )
+    state["selected_hypothesis_index"] = winner_index
+    state["selected_hypothesis_id"] = winner.get("hypothesis_id")
+    state["status"] = "queued"
+    record.research_loop = state
+    record.updated_at = time.time()
+    persist_run_record(record)
+
+    work_item = knowledge_base.enqueue_work_item(
+        workflow_name=AUTOPILOT_WORKFLOW,
+        run_id=record.run_id,
+        phase="research_autopilot",
+        agent_role="autopilot_supervisor",
+        arguments={"run_id": record.run_id, "policy": policy},
+        idempotency_key=(
+            f"{AUTOPILOT_WORKFLOW}:{record.run_id}:{int(state.get('cycle') or 0)}:"
+            f"{int(state.get('resume_count') or 0)}"
+        ),
+    )
+    existing_tasks = knowledge_base.list_research_tasks(
+        run_id=record.run_id,
+        task_type="research_autopilot",
+        limit=20,
+    )
+    active_task = next(
+        (task for task in existing_tasks if task.get("status") in {"ready", "running", "blocked"}),
+        None,
+    )
+    if active_task:
+        knowledge_base.update_research_task(
+            str(active_task["task_id"]),
+            status="ready",
+            blocked_reason="",
+            result_ref={"work_item_id": work_item.get("work_item_id"), "status": "queued"},
+        )
+    else:
+        knowledge_base.create_research_task(
+            task_id=f"task_{uuid.uuid4().hex[:12]}",
+            run_id=record.run_id,
+            title="Research Autopilot closed loop",
+            task_type="research_autopilot",
+            status="ready",
+            priority=1,
+            phase="research_autopilot",
+            target_ref={"hypothesis_index": winner_index},
+            result_ref={"work_item_id": work_item.get("work_item_id"), "status": "queued"},
+            notes="Durable controller for evidence, experiment execution, interpretation, and reranking.",
+        )
+    return {"research_loop": state, "work_item": work_item}
 
 
 def demo_hypotheses(goal: str) -> List[Dict[str, Any]]:
@@ -8571,6 +8843,61 @@ async def run_demo(record: RunRecord) -> None:
 def build_knowledge_base_evidence_resolver(record: RunRecord):
     """Create the webapp adapter used by the core evidence-grounding node."""
 
+    def inherited_experiment_items(hypothesis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not record.request.parent_run_id:
+            return []
+        parent = load_run_record(record.request.parent_run_id)
+        if not parent:
+            return []
+        query_text = _normalize_hypothesis_text(hypothesis.get("text"))
+        query_terms = set(re.findall(r"[A-Za-z0-9_\-\u4e00-\u9fff]{2,}", query_text))
+        best: Optional[Dict[str, Any]] = None
+        best_score = 0.0
+        for candidate in parent.hypotheses:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_terms = set(
+                re.findall(r"[A-Za-z0-9_\-\u4e00-\u9fff]{2,}", str(candidate.get("text") or "").lower())
+            )
+            union = query_terms.union(candidate_terms)
+            score = len(query_terms.intersection(candidate_terms)) / max(1, len(union))
+            if score > best_score:
+                best, best_score = candidate, score
+        if best is None or best_score < 0.35:
+            return []
+        best_text = _normalize_hypothesis_text(best.get("text"))
+        exact_lineage = bool(query_text and query_text == best_text)
+        packet = best.get("evidence_packet") if isinstance(best.get("evidence_packet"), dict) else {}
+        packet_items = packet.get("items") if isinstance(packet.get("items"), list) else []
+        inherited: List[Dict[str, Any]] = []
+        for item in packet_items:
+            if not (
+                isinstance(item, dict)
+                and item.get("support_level") == "experimental_data"
+                and item.get("source_channel") in {
+                    "approved_experiment_feedback",
+                    "policy_evaluated_experiment",
+                }
+            ):
+                continue
+            copied = {
+                **item,
+                "inherited_from_run_id": parent.run_id,
+                "inherited_from_hypothesis_id": best.get("hypothesis_id"),
+                "lineage_similarity": round(best_score, 4),
+                "lineage_status": "exact" if exact_lineage else "review_required",
+            }
+            if not exact_lineage:
+                copied["original_relationship"] = copied.get("relationship")
+                copied["relationship"] = "insufficient"
+                copied["source_channel"] = "inherited_experiment_context"
+                copied["relationship_rationale"] = (
+                    "Experiment came from a text-similar parent hypothesis; applicability to the revised claim "
+                    "requires explicit review."
+                )
+            inherited.append(copied)
+        return inherited
+
     async def resolve(hypothesis: Dict[str, Any]) -> Dict[str, Any]:
         items = await asyncio.to_thread(
             knowledge_base.support_for_hypothesis,
@@ -8581,6 +8908,17 @@ def build_knowledge_base_evidence_resolver(record: RunRecord):
         items = evidence_verifier.classify_evidence_items(
             hypothesis_text=str(hypothesis.get("text") or ""),
             evidence_items=items,
+        )
+        inherited = inherited_experiment_items(hypothesis)
+        existing_ids = {
+            str(item.get("evidence_id") or item.get("chunk_id") or "")
+            for item in items
+            if isinstance(item, dict)
+        }
+        items.extend(
+            item
+            for item in inherited
+            if str(item.get("evidence_id") or item.get("chunk_id") or "") not in existing_ids
         )
         return {
             "status": "ready" if items else "absent",
@@ -8924,6 +9262,897 @@ async def run_real_evidence_first(record: RunRecord) -> None:
     await run_real(record)
 
 
+def update_autopilot_task(
+    run_id: str,
+    *,
+    status: TaskStatus,
+    result_ref: Optional[Dict[str, Any]] = None,
+    blocked_reason: Optional[str] = None,
+) -> None:
+    tasks = knowledge_base.list_research_tasks(
+        run_id=run_id,
+        task_type="research_autopilot",
+        limit=20,
+    )
+    if not tasks:
+        return
+    knowledge_base.update_research_task(
+        str(tasks[0]["task_id"]),
+        status=status,
+        result_ref=result_ref or tasks[0].get("result_ref") or {},
+        blocked_reason="" if blocked_reason is None else blocked_reason,
+    )
+
+
+async def refresh_run_evidence_packets(record: RunRecord) -> None:
+    """Re-ground the stable hypothesis pool after targeted paper acquisition."""
+    from open_coscientist.models import Hypothesis
+    from open_coscientist.nodes.evidence_grounding import normalize_evidence_packet
+
+    resolver = build_knowledge_base_evidence_resolver(record)
+    for hypothesis in record.hypotheses:
+        if not isinstance(hypothesis, dict):
+            continue
+        previous_packet = hypothesis.get("evidence_packet") if isinstance(hypothesis.get("evidence_packet"), dict) else {}
+        approved_experiments = [
+            dict(item)
+            for item in (previous_packet.get("items") or [])
+            if isinstance(item, dict)
+            and item.get("support_level") == "experimental_data"
+            and item.get("source_channel") in {
+                "approved_experiment_feedback",
+                "policy_evaluated_experiment",
+            }
+        ]
+        resolved = await resolver(hypothesis)
+        resolved_items = [item for item in (resolved.get("items") or []) if isinstance(item, dict)]
+        known_ids = {
+            str(item.get("evidence_id") or item.get("chunk_id") or "")
+            for item in resolved_items
+        }
+        resolved["items"] = [
+            *resolved_items,
+            *[
+                item
+                for item in approved_experiments
+                if str(item.get("evidence_id") or item.get("chunk_id") or "") not in known_ids
+            ],
+        ]
+        hypothesis["evidence_packet"] = normalize_evidence_packet(
+            resolved,
+            hypothesis=Hypothesis(text=str(hypothesis.get("text") or "")),
+        )
+    refresh_run_evidence_snapshot(record)
+    apply_citation_provenance_qa(record)
+    record.research_outcome = build_research_outcome(record)
+    record.updated_at = time.time()
+    persist_run_record(record)
+
+
+async def execute_autopilot_compute(
+    record: RunRecord,
+    *,
+    hypothesis_index: int,
+    policy: Dict[str, Any],
+    protocol: Dict[str, Any],
+    job_id: str,
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    compute = dict(policy.get("compute") or {})
+    kind = str(compute.get("kind") or "none")
+    manifest_compute = dict(compute)
+    raw_command = manifest_compute.pop("command", None)
+    if isinstance(raw_command, str) and raw_command:
+        manifest_compute["command_sha256"] = hashlib.sha256(
+            raw_command.encode("utf-8")
+        ).hexdigest()
+        manifest_compute["command_configured"] = True
+    manifest = {"protocol": protocol, "compute": manifest_compute}
+    if kind == "local_python":
+        tool_name = "experiment.background_job"
+        script_path = str(compute.get("script_path") or "")
+        guardrail = validate_experiment_script(script_path, experiment_root=EXPERIMENT_ROOT)
+        arguments = {
+            "script_path": guardrail["script_path"],
+            "args": list(compute.get("args") or [])[:50],
+            "hypothesis_index": hypothesis_index,
+            "autopilot": True,
+        }
+        existing_job = knowledge_base.get_background_job(job_id)
+        if existing_job and existing_job.get("status") != "queued":
+            raise ValueError(
+                "A durable execution intent already left the queued state; refusing to repeat compute."
+            )
+        if not existing_job:
+            knowledge_base.create_background_job(
+                job_id=job_id,
+                run_id=record.run_id,
+                workflow_name=tool_name,
+                phase="experiment_execution",
+                arguments=arguments,
+            )
+        knowledge_base.update_background_job(job_id, status="running")
+        result = await asyncio.to_thread(
+            run_python_experiment,
+            script_path,
+            experiment_root=EXPERIMENT_ROOT,
+            artifact_root=EXPERIMENT_ARTIFACT_ROOT,
+            args=arguments["args"],
+            timeout_seconds=int(compute.get("timeout_seconds") or 300),
+        )
+        result_payload = result.to_dict()
+        result_kind = "experiment_run"
+        result_summary = f"Autopilot local experiment finished with status={result.status}."
+    elif kind == "ssh":
+        tool_name = "ssh.training_command"
+        server_id = str(compute.get("server_id") or "")
+        command = str(compute.get("command") or "")
+        workdir = str(compute.get("workdir") or "").strip() or None
+        guardrail = validate_ssh_training_command(command, server_id=server_id, workdir=workdir)
+        if not guardrail.get("allowed"):
+            raise SshTrainingError(str(guardrail.get("message") or "SSH command blocked by guardrail."))
+        arguments = {
+            "server_id": server_id,
+            "command": redact_sensitive_text(command),
+            "workdir": workdir,
+            "hypothesis_index": hypothesis_index,
+            "autopilot": True,
+        }
+        existing_job = knowledge_base.get_background_job(job_id)
+        if existing_job and existing_job.get("status") != "queued":
+            raise ValueError(
+                "A durable execution intent already left the queued state; refusing to repeat compute."
+            )
+        if not existing_job:
+            knowledge_base.create_background_job(
+                job_id=job_id,
+                run_id=record.run_id,
+                workflow_name=tool_name,
+                phase="experiment_execution",
+                arguments=arguments,
+            )
+        knowledge_base.update_background_job(job_id, status="running")
+        result = await asyncio.to_thread(
+            run_ssh_training_command,
+            server_id=server_id,
+            command=command,
+            workdir=workdir,
+            artifact_root=SSH_TRAINING_ARTIFACT_ROOT,
+            timeout_seconds=int(compute.get("timeout_seconds") or 3600),
+            job_id=job_id,
+        )
+        result_payload = result.to_dict()
+        try:
+            result_payload["result_json"] = parse_result_json_marker(str(result_payload.get("stdout") or ""))
+        except AutopilotValidationError as exc:
+            result_payload["result_json"] = None
+            result_payload["result_contract_error"] = str(exc)
+        result_kind = "ssh_training_run"
+        result_summary = f"Autopilot SSH experiment on {server_id} finished with status={result.status}."
+    else:
+        raise ValueError("Autopilot compute kind must be local_python or ssh before execution.")
+
+    result_ref = knowledge_base.store_tool_result(
+        run_id=record.run_id,
+        tool_name=tool_name,
+        phase="experiment_execution",
+        content={**result_payload, "experiment_manifest": manifest},
+        result_kind=result_kind,
+        summary=result_summary,
+    )
+    knowledge_base.record_research_tool_call(
+        run_id=record.run_id,
+        tool_name=tool_name,
+        phase="experiment_execution",
+        status=str(result_payload.get("status") or "complete"),
+        arguments=arguments,
+        result_summary=result_summary,
+        metadata={
+            "result_ref": result_ref,
+            "guardrail": result_payload.get("guardrail") or guardrail,
+            "artifacts": result_payload.get("artifacts") or {},
+            "approval": {
+                "scope": execution_scope(compute),
+                "status": "consumed_before_execution",
+            },
+            "autopilot": True,
+        },
+    )
+    job_result_ref = {
+        "tool_result": result_ref,
+        "executor": kind,
+        "status": result_payload.get("status"),
+        "returncode": result_payload.get("returncode"),
+        "artifacts": result_payload.get("artifacts") or {},
+    }
+    knowledge_base.update_background_job(
+        job_id,
+        status=str(result_payload.get("status") or "complete"),
+        result_ref=job_result_ref,
+    )
+    attach_compute_execution_result(
+        run_id=record.run_id,
+        hypothesis_index=hypothesis_index,
+        job_id=job_id,
+        result_payload=result_payload,
+        result_ref=result_ref,
+        executor=kind,
+        manifest=manifest,
+    )
+    return knowledge_base.get_background_job(job_id) or {}, result_payload, result_ref
+
+
+async def execute_research_autopilot_work_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = str(item.get("run_id") or item.get("arguments", {}).get("run_id") or "").strip()
+    record = load_run_record(run_id)
+    if not record:
+        raise ValueError(f"Run not found for research autopilot: {run_id}")
+    if record.research_loop.get("status") in {"paused", "cancelled", "complete", "reranking"}:
+        return {"run_id": run_id, "status": record.research_loop.get("status")}
+
+    policy = validate_autopilot_policy_for_persistence(
+        record.research_loop.get("policy") or item.get("arguments", {}).get("policy") or {}
+    )
+    winner_index, winner = selected_loop_hypothesis(record)
+    update_autopilot_task(run_id, status="running")
+    evidence_gate = record.research_outcome.get("evidence_gate") if isinstance(record.research_outcome, dict) else {}
+    needs_more_evidence = not isinstance(evidence_gate, dict) or evidence_gate.get("status") != "passed"
+    expansion = record.research_loop.get("evidence_expansion") if isinstance(record.research_loop, dict) else {}
+    expansion_done = isinstance(expansion, dict) and expansion.get("status") == "complete"
+    if (
+        policy.get("auto_evidence")
+        and needs_more_evidence
+        and record.request.literature_review
+        and not record.request.demo_mode
+        and not expansion_done
+    ):
+        evidence_scope = "mcp.literature_review"
+        if not exact_grant(policy, evidence_scope):
+            if not policy.get("continue_on_limited_evidence"):
+                record.research_loop["pending_approvals"] = [
+                    {
+                        "scope": evidence_scope,
+                        "stage": "acquire_parse",
+                        "reason": "Targeted counter-evidence discovery may access the network and write parsed papers to the project library.",
+                    }
+                ]
+                state = persist_loop_stage(
+                    record,
+                    "acquire_parse",
+                    "awaiting_approval",
+                    "当前冠军假设证据仍有限；等待任务级文献检索与入库授权。",
+                    details={"required_scope": evidence_scope},
+                    loop_status="awaiting_approval",
+                )
+                update_autopilot_task(
+                    run_id,
+                    status="blocked",
+                    blocked_reason=f"Awaiting mission-scoped approval: {evidence_scope}",
+                )
+                return {"run_id": run_id, "status": state["status"], "research_loop": state}
+            persist_loop_stage(
+                record,
+                "acquire_parse",
+                "limited",
+                "未授予补充文献检索权限；按策略继续生成实验协议，但不会把证据缺口视为支持。",
+                loop_status="running",
+            )
+        else:
+            policy = consume_autopilot_grant(record, policy, evidence_scope)
+            record = load_run_record(run_id) or record
+            persist_loop_stage(
+                record,
+                "discover",
+                "running",
+                "正在围绕冠军假设及其潜在反证执行第二轮定向文献检索。",
+                loop_status="running",
+            )
+            try:
+                library_id = knowledge_base.resolve_library_id(record.request.library_id)
+                discovery = await discover_literature_for_library(
+                    LiteratureDiscoveryRequest(
+                        query=(
+                            f"{str(winner.get('text') or '')} contradictory evidence failed replication "
+                            "negative result alternative explanation"
+                        )[:500],
+                        library_id=library_id,
+                        preferred_source="auto",
+                        max_results=record.request.paper_discovery_limit,
+                        planning_mode="llm",
+                        model_name=record.request.model_name,
+                        auto_discover_pdf_links=True,
+                        auto_ingest_pdfs=True,
+                        auto_ingest_limit=record.request.paper_ingest_limit,
+                        approval=ToolWorkflowApproval(
+                            confirmed=True,
+                            scope=evidence_scope,
+                            reason="mission-scoped research autopilot grant",
+                        ),
+                    )
+                )
+                expansion_summary = summarize_evidence_first_discovery(discovery, library_id=library_id)
+                expansion_summary["status"] = "complete"
+                record = load_run_record(run_id) or record
+                record.research_loop["evidence_expansion"] = expansion_summary
+                persist_loop_stage(
+                    record,
+                    "acquire_parse",
+                    "complete",
+                    (
+                        f"定向检索得到 {expansion_summary['candidate_count']} 个候选，"
+                        f"新增解析 {expansion_summary['ingested_count']} 篇。"
+                    ),
+                    details=expansion_summary,
+                    loop_status="running",
+                )
+                await refresh_run_evidence_packets(record)
+                record = load_run_record(run_id) or record
+                persist_loop_stage(
+                    record,
+                    "ground",
+                    "complete" if record.evidence_snapshot.get("evidence_item_count") else "limited",
+                    "已用扩展后的知识库重新定位每条假设的支持、反证与证据不足片段。",
+                    details={"evidence_snapshot_id": record.evidence_snapshot.get("snapshot_id")},
+                    loop_status="running",
+                )
+                winner_index, winner = selected_loop_hypothesis(record)
+            except Exception as exc:
+                record = load_run_record(run_id) or record
+                record.research_loop["evidence_expansion"] = {
+                    "status": "error",
+                    "message": str(exc)[:500],
+                }
+                if not policy.get("continue_on_limited_evidence"):
+                    state = persist_loop_stage(
+                        record,
+                        "acquire_parse",
+                        "error",
+                        f"定向论文检索或解析失败：{str(exc)[:300]}",
+                        loop_status="error",
+                    )
+                    update_autopilot_task(
+                        run_id,
+                        status="blocked",
+                        blocked_reason="Targeted evidence expansion failed.",
+                    )
+                    return {"run_id": run_id, "status": state["status"], "research_loop": state}
+                persist_loop_stage(
+                    record,
+                    "acquire_parse",
+                    "limited",
+                    "补充检索失败；按策略保留证据缺口并继续实验规划。",
+                    details={"message": str(exc)[:500]},
+                    loop_status="running",
+                )
+    record = load_run_record(run_id) or record
+    evidence_gate = (
+        record.research_outcome.get("evidence_gate")
+        if isinstance(record.research_outcome, dict)
+        else {}
+    )
+    if (
+        (not isinstance(evidence_gate, dict) or evidence_gate.get("status") != "passed")
+        and not policy.get("continue_on_limited_evidence")
+    ):
+        state = persist_loop_stage(
+            record,
+            "ground",
+            "awaiting_input",
+            "证据门仍未通过。请补充论文，或显式确认在保留证据缺口的前提下继续。",
+            details={"evidence_gate": evidence_gate},
+            loop_status="awaiting_input",
+        )
+        update_autopilot_task(
+            run_id,
+            status="blocked",
+            blocked_reason="Evidence gate did not pass and limited-evidence continuation was not approved.",
+            result_ref={"status": state["status"], "current_stage": "ground"},
+        )
+        return {"run_id": run_id, "status": state["status"], "research_loop": state}
+
+    if not policy.get("auto_plan"):
+        state = persist_loop_stage(
+            record,
+            "plan",
+            "awaiting_input",
+            "自动实验规划已关闭；请由研究者完善可证伪指标与执行方案后继续。",
+            loop_status="awaiting_input",
+        )
+        update_autopilot_task(
+            run_id,
+            status="blocked",
+            blocked_reason="Experiment planning is in manual mode.",
+        )
+        return {"run_id": run_id, "status": state["status"], "research_loop": state}
+    persist_loop_stage(
+        record,
+        "plan",
+        "running",
+        "正在把获胜假设、证据引用和可证伪阈值整理为结构化 ExperimentProtocol。",
+        loop_status="running",
+    )
+    evaluation = dict(policy.get("evaluation") or {})
+    protocol = build_experiment_protocol(
+        winner,
+        winner.get("evidence_packet") if isinstance(winner.get("evidence_packet"), dict) else {},
+        policy,
+        metric_path=evaluation.get("metric_path"),
+        operator=evaluation.get("operator"),
+        threshold=evaluation.get("threshold"),
+    )
+    record = load_run_record(run_id) or record
+    record.hypotheses[winner_index]["experiment_protocol"] = protocol
+    record.research_loop["experiment_protocol"] = protocol
+    knowledge_base.save_project_artifact(
+        project_id=run_id,
+        run_id=run_id,
+        artifact_type="experiment_plan",
+        target_ref={
+            "hypothesis_index": winner_index,
+            "hypothesis_id": winner.get("hypothesis_id"),
+        },
+        title=str(protocol.get("title") or "Experiment protocol"),
+        payload=protocol,
+    )
+    persist_loop_stage(
+        record,
+        "plan",
+        "complete",
+        "结构化实验协议已保存，并绑定到获胜假设及其证据快照。",
+        details={"hypothesis_index": winner_index},
+        loop_status="running",
+    )
+
+    compute = dict(policy.get("compute") or {})
+    existing_execution = (
+        dict(record.research_loop.get("execution") or {})
+        if isinstance(record.research_loop.get("execution"), dict)
+        else {}
+    )
+    has_execution_intent = bool(existing_execution.get("job_id"))
+    has_durable_execution = bool(
+        existing_execution.get("job_id") and existing_execution.get("result_id")
+    )
+    if has_execution_intent:
+        if existing_execution.get("protocol_id") not in {None, protocol.get("protocol_id")}:
+            raise ValueError("Durable execution protocol mismatch; refusing to attach a result to a new protocol.")
+        if existing_execution.get("hypothesis_index") not in {None, winner_index}:
+            raise ValueError("Durable execution hypothesis mismatch; refusing to reinterpret the job.")
+    if not has_execution_intent and (
+        not policy.get("auto_execute") or compute.get("kind") in {None, "", "none"}
+    ):
+        state = persist_loop_stage(
+            record,
+            "execute",
+            "awaiting_input",
+            "实验协议已就绪；请选择受限本地 Python 或已登记 SSH 计算目标。",
+            loop_status="awaiting_input",
+        )
+        update_autopilot_task(
+            run_id,
+            status="blocked",
+            blocked_reason="Experiment protocol is ready; a compute target is required.",
+            result_ref={"status": state["status"], "current_stage": state.get("current_stage")},
+        )
+        return {"run_id": run_id, "status": state["status"], "research_loop": state}
+
+    if not has_execution_intent and protocol.get("status") != "preregistered":
+        state = persist_loop_stage(
+            record,
+            "execute",
+            "awaiting_input",
+            "自动执行前必须先填写 metric_path、operator 和 threshold，形成预注册判定规则。",
+            details={"protocol_status": protocol.get("status")},
+            loop_status="awaiting_input",
+        )
+        update_autopilot_task(
+            run_id,
+            status="blocked",
+            blocked_reason="A preregistered metric threshold is required before compute execution.",
+            result_ref={"status": state["status"], "protocol_id": protocol.get("protocol_id")},
+        )
+        return {"run_id": run_id, "status": state["status"], "research_loop": state}
+
+    required_scope = execution_scope(compute)
+    if not has_execution_intent and not exact_grant(
+        policy,
+        required_scope,
+        compute_target=compute,
+    ):
+        record.research_loop["pending_approvals"] = [
+            {
+                "scope": required_scope,
+                "stage": "execute",
+                "reason": "Mission-scoped approval is required for this compute target.",
+                "server_id": compute.get("server_id"),
+            }
+        ]
+        state = persist_loop_stage(
+            record,
+            "execute",
+            "awaiting_approval",
+            f"计算任务已准备，但缺少限定授权：{required_scope}。",
+            details={"required_scope": required_scope, "compute_kind": compute.get("kind")},
+            loop_status="awaiting_approval",
+        )
+        update_autopilot_task(
+            run_id,
+            status="blocked",
+            blocked_reason=f"Awaiting mission-scoped approval: {required_scope}",
+            result_ref={"status": state["status"], "required_scope": required_scope},
+        )
+        return {"run_id": run_id, "status": state["status"], "research_loop": state}
+
+    if not has_execution_intent:
+        policy = consume_autopilot_grant(
+            record,
+            policy,
+            str(required_scope),
+            server_id=str(compute.get("server_id") or "") or None,
+        )
+        record = load_run_record(run_id) or record
+        execution_job_id = autopilot_execution_job_id(record, protocol)
+        record.research_loop["execution"] = {
+            "job_id": execution_job_id,
+            "executor": compute.get("kind"),
+            "status": "prepared",
+            "protocol_id": protocol.get("protocol_id"),
+            "hypothesis_index": winner_index,
+            "hypothesis_id": winner.get("hypothesis_id"),
+            "boundary": "A persisted execution intent is not evidence that the command ran.",
+        }
+        persist_loop_stage(
+            record,
+            "execute",
+            "running",
+            f"已锁定执行意图，准备通过 {compute.get('kind')} 运行预注册实验。",
+            details={"job_id": execution_job_id, "protocol_id": protocol.get("protocol_id")},
+            loop_status="running",
+        )
+        existing_execution = dict(record.research_loop["execution"])
+        has_execution_intent = True
+
+    if has_durable_execution:
+        job = knowledge_base.get_background_job(str(existing_execution["job_id"])) or {}
+        stored_result = knowledge_base.get_tool_result(str(existing_execution["result_id"])) or {}
+        result_payload = stored_result.get("content") if isinstance(stored_result.get("content"), dict) else {}
+        result_ref = {key: value for key, value in stored_result.items() if key != "content"}
+        if not job or not result_payload:
+            raise ValueError("Durable experiment references are incomplete; refusing to repeat compute automatically.")
+    else:
+        execution_job_id = str(existing_execution["job_id"])
+        existing_job = knowledge_base.get_background_job(execution_job_id)
+        if existing_job and existing_job.get("result_ref", {}).get("tool_result", {}).get("result_id"):
+            recovered_result_id = str(existing_job["result_ref"]["tool_result"]["result_id"])
+            stored_result = knowledge_base.get_tool_result(recovered_result_id) or {}
+            result_payload = (
+                stored_result.get("content")
+                if isinstance(stored_result.get("content"), dict)
+                else {}
+            )
+            result_ref = {key: value for key, value in stored_result.items() if key != "content"}
+            job = existing_job
+            if not result_payload:
+                raise ValueError("The durable job references a missing result; refusing to repeat compute.")
+        elif existing_job and existing_job.get("status") != "queued":
+            state = persist_loop_stage(
+                record,
+                "execute",
+                "awaiting_human",
+                (
+                    "执行意图已经离开 queued 状态，但没有可核验的结果引用。"
+                    "为避免重复运行本地或远程命令，系统已停止自动重试。"
+                ),
+                details={
+                    "job_id": execution_job_id,
+                    "job_status": existing_job.get("status"),
+                    "recovery": "Inspect the registered server/job artifacts, then attach or rerun explicitly.",
+                },
+                loop_status="awaiting_human",
+            )
+            update_autopilot_task(
+                run_id,
+                status="blocked",
+                blocked_reason="Execution outcome is uncertain; automatic replay is disabled.",
+                result_ref={"status": state["status"], "job_id": execution_job_id},
+            )
+            return {"run_id": run_id, "status": state["status"], "research_loop": state}
+        else:
+            record = load_run_record(run_id) or record
+            record.research_loop["execution"]["status"] = "running"
+            persist_loop_stage(
+                record,
+                "execute",
+                "running",
+                f"正在通过 {compute.get('kind')} 执行预注册实验。",
+                details={"job_id": execution_job_id},
+                loop_status="running",
+            )
+            job, result_payload, result_ref = await execute_autopilot_compute(
+                record,
+                hypothesis_index=winner_index,
+                policy=policy,
+                protocol=protocol,
+                job_id=execution_job_id,
+            )
+        record = load_run_record(run_id) or record
+        record.research_loop["execution"] = {
+            "job_id": job.get("job_id"),
+            "executor": compute.get("kind"),
+            "status": result_payload.get("status"),
+            "returncode": result_payload.get("returncode"),
+            "result_id": result_ref.get("result_id"),
+            "artifacts": result_payload.get("artifacts") or {},
+            "protocol_id": protocol.get("protocol_id"),
+            "hypothesis_index": winner_index,
+            "hypothesis_id": winner.get("hypothesis_id"),
+            "boundary": "Execution completion is not a scientific verdict.",
+        }
+        persist_loop_stage(
+            record,
+            "execute",
+            "complete" if result_payload.get("status") == "complete" else "error",
+            f"计算任务结束，returncode={result_payload.get('returncode')}。",
+            loop_status="running",
+        )
+
+    try:
+        if result_payload.get("status") != "complete":
+            raise AutopilotValidationError(
+                f"Execution ended with status={result_payload.get('status')}; no scientific verdict was inferred."
+            )
+        evaluation_result = evaluate_experiment_result(protocol, result_payload.get("result_json") or {})
+    except AutopilotValidationError as exc:
+        evaluation_result = {
+            "protocol_id": protocol.get("protocol_id"),
+            "verdict": "inconclusive",
+            "relationship": "insufficient",
+            "rationale": str(exc),
+            "confidence": 0.0,
+            "scientific_boundary": protocol.get("scientific_boundary"),
+        }
+    record = load_run_record(run_id) or record
+    record.research_loop["interpretation"] = evaluation_result
+    verdict = str(evaluation_result.get("verdict") or "inconclusive")
+    existing_evidence_id = str(record.research_loop.get("interpretation_evidence_id") or "")
+    can_auto_interpret = (
+        bool(existing_evidence_id)
+        or (
+            bool(policy.get("auto_interpret"))
+            and verdict in {"support", "contradict"}
+            and exact_grant(policy, "experiment.feedback")
+        )
+    )
+    if not can_auto_interpret:
+        pending = [] if verdict == "inconclusive" else [
+            {
+                "scope": "experiment.feedback",
+                "stage": "review",
+                "reason": "Adopt the preregistered metric comparison as scientific evidence.",
+            }
+        ]
+        record.research_loop["pending_approvals"] = pending
+        state = persist_loop_stage(
+            record,
+            "review",
+            "awaiting_human",
+            str(evaluation_result.get("rationale") or "实验结果需要研究者解释。"),
+            details={"proposed_verdict": verdict, "job_id": job.get("job_id")},
+            loop_status="awaiting_human",
+        )
+        update_autopilot_task(
+            run_id,
+            status="blocked",
+            blocked_reason="Experiment result requires human scientific interpretation.",
+            result_ref={"status": state["status"], "job_id": job.get("job_id")},
+        )
+        return {"run_id": run_id, "status": state["status"], "research_loop": state}
+
+    feedback_request = ExperimentFeedbackRequest(
+        job_id=str(job["job_id"]),
+        hypothesis_index=winner_index,
+        verdict=verdict,
+        rationale=str(evaluation_result.get("rationale") or "Pre-registered metric threshold evaluated."),
+        rerank=False,
+        approval=ToolWorkflowApproval(
+            confirmed=True,
+            scope="experiment.feedback",
+            reason="mission-scoped autopilot grant with pre-registered metric threshold",
+        ),
+    )
+    if existing_evidence_id:
+        packet = record.hypotheses[winner_index].get("evidence_packet") or {}
+        evidence_item = next(
+            (
+                dict(item)
+                for item in (packet.get("items") or [])
+                if isinstance(item, dict) and item.get("evidence_id") == existing_evidence_id
+            ),
+            {"evidence_id": existing_evidence_id},
+        )
+    else:
+        policy = consume_autopilot_grant(record, policy, "experiment.feedback")
+        record = load_run_record(run_id) or record
+        evidence_item = apply_experiment_feedback_to_record(
+            record,
+            feedback_request,
+            job,
+            source_channel="policy_evaluated_experiment",
+            relationship_confidence=float(evaluation_result.get("confidence") or 0.9),
+            persist_loop_marker=True,
+        )
+    feedback = FeedbackItem(
+        target_type="experiment",
+        target_ref={
+            "hypothesis_index": winner_index,
+            "job_id": job.get("job_id"),
+            "evidence_id": evidence_item.get("evidence_id"),
+        },
+        feedback_type="accept" if verdict == "support" else "reject",
+        text=f"Pre-registered experiment verdict={verdict}. {feedback_request.rationale}",
+    )
+    feedback_id = f"feedback_autopilot_{hashlib.sha256(str(job['job_id']).encode('utf-8')).hexdigest()[:20]}"
+    knowledge_base.store_feedback_item(
+        feedback_id=feedback_id,
+        run_id=run_id,
+        target_type=feedback.target_type,
+        target_ref=feedback.target_ref,
+        feedback_type=feedback.feedback_type,
+        text=feedback.text,
+        source="research_autopilot",
+    )
+    record = load_run_record(run_id) or record
+    record.research_loop["feedback_id"] = feedback_id
+    persist_loop_stage(
+        record,
+        "review",
+        "complete",
+        f"预注册指标产生 {verdict} 结论，并已写回结构化实验证据。",
+        details={"evidence_id": evidence_item.get("evidence_id")},
+        loop_status="running",
+    )
+
+    if policy.get("auto_rerank"):
+        starting_hypotheses = [
+            str(hypothesis.get("text") or "").strip()
+            for hypothesis in record.hypotheses
+            if isinstance(hypothesis, dict) and str(hypothesis.get("text") or "").strip()
+        ]
+        existing_child = find_autopilot_rerank_child(run_id, str(job["job_id"]))
+        if existing_child:
+            rerank_run: Dict[str, Any] = {"run_id": existing_child.run_id, "recovered": True}
+        else:
+            rerank_run = await continue_run(
+                run_id,
+                ContinueRunRequest(
+                    demo_mode=record.request.demo_mode,
+                    literature_review=record.request.literature_review,
+                    initial_hypotheses=min(8, max(1, len(starting_hypotheses))),
+                    iterations=0,
+                    starting_hypotheses=starting_hypotheses[:8],
+                    user_feedback=[feedback],
+                    refinement_mode="revise_hypotheses",
+                    memory_scope=record.request.memory_scope,
+                    library_id=record.request.library_id,
+                    auto_discover_papers=False,
+                    auto_ingest_papers=False,
+                ),
+            )
+        record = load_run_record(run_id) or record
+        record.research_loop["rerank_run_id"] = rerank_run.get("run_id")
+        state = persist_loop_stage(
+            record,
+            "rerank",
+            "running",
+            "实验反馈已进入 continuation run；系统会在完成前核验实验级证据的假设 lineage。",
+            details={"rerank_run_id": rerank_run.get("run_id")},
+            loop_status="reranking",
+        )
+        update_autopilot_task(
+            run_id,
+            status="running",
+            result_ref={"status": state["status"], "rerank_run_id": rerank_run.get("run_id")},
+        )
+        return {"run_id": run_id, "status": state["status"], "rerank_run": rerank_run}
+
+    state = persist_loop_stage(
+        record,
+        "outcome",
+        "complete",
+        "实验解释、证据快照和 ResearchOutcome 已更新。",
+        loop_status="complete",
+    )
+    update_autopilot_task(run_id, status="done", result_ref={"status": "complete"})
+    return {"run_id": run_id, "status": state["status"], "research_loop": state}
+
+
+def finalize_parent_autopilot_rerank(record: RunRecord) -> None:
+    parent_run_id = record.request.parent_run_id
+    if not parent_run_id:
+        return
+    parent = load_run_record(parent_run_id)
+    if not parent or parent.research_loop.get("rerank_run_id") != record.run_id:
+        return
+    if record.status == "complete":
+        expected_evidence_id = str(parent.research_loop.get("interpretation_evidence_id") or "")
+        inherited_matches = [
+            item
+            for hypothesis in record.hypotheses
+            if isinstance(hypothesis, dict)
+            for item in ((hypothesis.get("evidence_packet") or {}).get("items") or [])
+            if isinstance(item, dict) and item.get("evidence_id") == expected_evidence_id
+        ]
+        lineage_verified = bool(
+            expected_evidence_id
+            and any(item.get("lineage_status") == "exact" for item in inherited_matches)
+        )
+        parent.research_loop["rerank_outcome"] = {
+            "run_id": record.run_id,
+            "winner_id": record.research_outcome.get("winner_id"),
+            "winner_index": record.research_outcome.get("winner_index"),
+            "evidence_snapshot_id": record.research_outcome.get("evidence_snapshot_id"),
+            "status": record.research_outcome.get("status"),
+            "experimental_lineage_verified": lineage_verified,
+            "expected_evidence_id": expected_evidence_id,
+        }
+        if not lineage_verified:
+            state = persist_loop_stage(
+                parent,
+                "rerank",
+                "awaiting_human",
+                (
+                    "Continuation Review/Elo 已完成，但获胜实验的证据 lineage 未能精确映射到修订后的假设。"
+                    "系统不会把相似文本自动当作同一科学命题。"
+                ),
+                details={
+                    "rerank_run_id": record.run_id,
+                    "expected_evidence_id": expected_evidence_id,
+                    "matching_items": len(inherited_matches),
+                },
+                loop_status="awaiting_human",
+            )
+            update_autopilot_task(
+                parent_run_id,
+                status="blocked",
+                blocked_reason="Rerank completed, but experimental evidence lineage requires review.",
+                result_ref={"status": state["status"], "rerank_run_id": record.run_id},
+            )
+            return
+        parent.research_loop = update_loop_stage(
+            parent.research_loop,
+            "rerank",
+            "complete",
+            summary="Continuation Review/Elo completed with exact experimental-evidence lineage.",
+            details={"rerank_run_id": record.run_id},
+        )
+        persist_loop_stage(
+            parent,
+            "outcome",
+            "complete",
+            "闭环完成：论文证据、预注册实验、结果解释与重新排名均已留下可追溯记录。",
+            details={"rerank_run_id": record.run_id},
+            loop_status="complete",
+        )
+        update_autopilot_task(
+            parent_run_id,
+            status="done",
+            result_ref={"status": "complete", "rerank_run_id": record.run_id},
+        )
+    elif record.status == "error":
+        persist_loop_stage(
+            parent,
+            "rerank",
+            "error",
+            record.error or "Continuation reranking failed.",
+            details={"rerank_run_id": record.run_id},
+            loop_status="error",
+        )
+        update_autopilot_task(
+            parent_run_id,
+            status="blocked",
+            blocked_reason=record.error or "Continuation reranking failed.",
+        )
+
+
 async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[str, Any]:
     run_id = str(item.get("run_id") or item.get("arguments", {}).get("run_id") or "").strip()
     if not run_id:
@@ -8948,6 +10177,9 @@ async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[s
                 result_ref={"run_id": run_id, "status": record.status},
             )
         raise RuntimeError(record.error or f"Run ended with status {record.status}")
+    finalize_parent_autopilot_rerank(record)
+    if record.request.autopilot and normalize_policy(record.request.autopilot).get("mode") != "manual":
+        enqueue_research_autopilot(record, record.request.autopilot)
     for research_task in knowledge_base.list_research_tasks(
         run_id=run_id,
         task_type="scheduled_workflow",
@@ -8955,7 +10187,7 @@ async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[s
     ):
         knowledge_base.update_research_task(
             str(research_task["task_id"]),
-            status="completed",
+            status="done",
             result_ref={
                 "run_id": run_id,
                 "status": record.status,
@@ -8968,7 +10200,10 @@ async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[s
 def build_worker_runtime() -> ResearchWorkerRuntime:
     return ResearchWorkerRuntime(
         store=knowledge_base,
-        handlers={"workflow.open_coscientist_run": execute_open_coscientist_run_work_item},
+        handlers={
+            "workflow.open_coscientist_run": execute_open_coscientist_run_work_item,
+            AUTOPILOT_WORKFLOW: execute_research_autopilot_work_item,
+        },
         schedule_handler=dispatch_due_research_schedules,
         owner=WORKER_OWNER,
         concurrency=WORKER_CONCURRENCY,
@@ -12123,30 +13358,35 @@ async def enqueue_code_analysis_workflow(
     return {"job": job}
 
 
-def attach_experiment_execution_result(
+def attach_compute_execution_result(
     *,
-    request: ExperimentBackgroundJobRequest,
+    run_id: Optional[str],
+    hypothesis_index: Optional[int],
     job_id: str,
     result_payload: Dict[str, Any],
     result_ref: Dict[str, Any],
+    executor: str,
+    manifest: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Attach raw experiment provenance without interpreting scientific meaning."""
-    if request.run_id is None or request.hypothesis_index is None:
+    if run_id is None or hypothesis_index is None:
         return
-    record = load_run_record(request.run_id)
-    if not record or request.hypothesis_index >= len(record.hypotheses):
+    record = load_run_record(run_id)
+    if not record or hypothesis_index >= len(record.hypotheses):
         return
-    hypothesis = record.hypotheses[request.hypothesis_index]
+    hypothesis = record.hypotheses[hypothesis_index]
     experiment_runs = hypothesis.get("experiment_runs")
     experiment_runs = experiment_runs if isinstance(experiment_runs, list) else []
     experiment_runs.append(
         {
             "job_id": job_id,
+            "executor": executor,
             "status": result_payload.get("status"),
             "returncode": result_payload.get("returncode"),
             "duration_seconds": result_payload.get("duration_seconds"),
             "result_ref": result_ref,
             "artifacts": result_payload.get("artifacts") or [],
+            "manifest": manifest or {},
             "interpretation_status": "awaiting_human_interpretation",
             "boundary": (
                 "Successful execution only proves the script ran. It does not support or contradict "
@@ -12160,10 +13400,32 @@ def attach_experiment_execution_result(
         record,
         "Experiment",
         "Experiment result awaiting interpretation",
-        f"Background experiment {job_id} finished and is attached to hypothesis {request.hypothesis_index + 1}.",
+        f"{executor} experiment {job_id} finished and is attached to hypothesis {hypothesis_index + 1}.",
         "complete",
     )
     persist_run_record(record)
+
+
+def attach_experiment_execution_result(
+    *,
+    request: ExperimentBackgroundJobRequest,
+    job_id: str,
+    result_payload: Dict[str, Any],
+    result_ref: Dict[str, Any],
+) -> None:
+    attach_compute_execution_result(
+        run_id=request.run_id,
+        hypothesis_index=request.hypothesis_index,
+        job_id=job_id,
+        result_payload=result_payload,
+        result_ref=result_ref,
+        executor="local_python",
+        manifest={
+            "script_path": request.script_path,
+            "args": request.args,
+            "timeout_seconds": request.timeout_seconds,
+        },
+    )
 
 
 async def run_experiment_background_job(
@@ -13187,7 +14449,7 @@ async def dispatch_research_schedule(
             run_id=run_id,
             title=f"Scheduled: {schedule['title']}",
             task_type="scheduled_workflow",
-            status="in_progress",
+            status="running",
             priority=2,
             phase=schedule.get("phase") or "workflow",
             target_ref={
@@ -14757,6 +16019,14 @@ async def get_tool_result(result_id: str) -> Dict[str, Any]:
 
 @app.post("/api/runs")
 async def create_run(request: RunRequest) -> Dict[str, str]:
+    if request.autopilot:
+        try:
+            request.autopilot = validate_autopilot_policy_for_persistence(request.autopilot)
+        except AutopilotValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_autopilot_policy", "message": str(exc)},
+            ) from exc
     if request.max_references < request.min_references:
         raise HTTPException(
             status_code=422,
@@ -14907,6 +16177,183 @@ async def continue_run(run_id: str, request: ContinueRunRequest) -> Dict[str, st
     return response
 
 
+@app.post("/api/runs/{run_id}/autopilot")
+async def start_research_autopilot(
+    run_id: str,
+    request: ResearchAutopilotRequest,
+) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if record.status != "complete":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "autopilot_requires_completed_run",
+                "message": "研究主流程完成后才能进入证据—实验—重排闭环。",
+            },
+        )
+    if record.research_loop:
+        loop_status = str(record.research_loop.get("status") or "ready")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "autopilot_already_exists",
+                "message": (
+                    f"这个 run 已有状态为 {loop_status} 的研究闭环。"
+                    "等待态请调用 resume，awaiting_human 请提交实验解释；完成态请创建 continuation run。"
+                ),
+            },
+        )
+    try:
+        result = enqueue_research_autopilot(record, request.policy)
+    except (ValueError, AutopilotValidationError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_autopilot_policy", "message": str(exc)},
+        ) from exc
+    return {
+        "run_id": run_id,
+        "research_loop": _public_snapshot_value(result["research_loop"]),
+        "work_item": summarize_worker_item(result["work_item"]),
+    }
+
+
+@app.get("/api/runs/{run_id}/autopilot")
+async def get_research_autopilot(run_id: str) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {
+        "run_id": run_id,
+        "research_loop": _public_snapshot_value(record.research_loop),
+        "work_items": [
+            summarize_worker_item(item)
+            for item in knowledge_base.list_work_items(
+                run_id=run_id,
+                workflow_name=AUTOPILOT_WORKFLOW,
+                limit=10,
+            )
+        ],
+    }
+
+
+@app.post("/api/runs/{run_id}/autopilot/resume")
+async def resume_research_autopilot(
+    run_id: str,
+    request: ResearchAutopilotResumeRequest,
+) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    status = str(record.research_loop.get("status") or "")
+    if status == "awaiting_human":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "scientific_interpretation_required",
+                "message": "实验已经执行；请通过 experiment-feedback 接口确认 support、contradict 或 inconclusive，避免重复运行实验。",
+            },
+        )
+    if status not in {"awaiting_input", "awaiting_approval", "waiting_approval", "paused", "error"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "autopilot_not_resumable",
+                "message": f"当前闭环状态 {status or 'absent'} 不需要恢复。",
+            },
+        )
+    merged = dict(record.research_loop.get("policy") or {})
+    requested_grants = [dict(grant) for grant in request.grants if isinstance(grant, dict)]
+    replacement_keys = {
+        (str(grant.get("scope") or ""), str(grant.get("server_id") or ""))
+        for grant in requested_grants
+    }
+    retained_grants = [
+        grant
+        for grant in (merged.get("grants") or [])
+        if (
+            str(grant.get("scope") or ""),
+            str(grant.get("server_id") or ""),
+        ) not in replacement_keys
+    ]
+    merged["grants"] = [*retained_grants, *requested_grants]
+    if request.compute is not None:
+        merged["compute"] = request.compute
+        merged["auto_execute"] = True
+    if request.evaluation is not None:
+        merged["evaluation"] = request.evaluation
+    if request.continue_on_limited_evidence is not None:
+        merged["continue_on_limited_evidence"] = request.continue_on_limited_evidence
+    if request.auto_interpret is not None:
+        merged["auto_interpret"] = request.auto_interpret
+    if request.auto_rerank is not None:
+        merged["auto_rerank"] = request.auto_rerank
+    history = list(record.research_loop.get("approval_history") or [])
+    for grant in requested_grants:
+        history.append(
+            {
+                "scope": grant.get("scope"),
+                "server_id": grant.get("server_id"),
+                "status": "granted" if grant.get("confirmed") else "denied",
+                "reason": str(grant.get("reason") or "")[:500],
+                "resolved_at": time.time(),
+                "source": "autopilot_resume",
+            }
+        )
+    record.research_loop["approval_history"] = history[-100:]
+    try:
+        result = enqueue_research_autopilot(record, merged, resume=True)
+    except (ValueError, AutopilotValidationError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_autopilot_resume", "message": str(exc)},
+        ) from exc
+    return {
+        "run_id": run_id,
+        "research_loop": _public_snapshot_value(result["research_loop"]),
+        "work_item": summarize_worker_item(result["work_item"]),
+    }
+
+
+@app.post("/api/runs/{run_id}/autopilot/pause")
+async def pause_research_autopilot(run_id: str) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    loop_status = str(record.research_loop.get("status") or "")
+    if loop_status not in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "autopilot_not_pausable",
+                "message": f"当前闭环状态 {loop_status or 'absent'} 不处于可暂停的安全推进阶段。",
+            },
+        )
+    active = knowledge_base.list_work_items(
+        run_id=run_id,
+        workflow_name=AUTOPILOT_WORKFLOW,
+        limit=10,
+    )
+    running = [item for item in active if item.get("status") in {"leased", "running"}]
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "autopilot_compute_already_running",
+                "message": "当前 worker 已进入执行阶段；暂停不会安全终止远程进程，请等待本次 job 结束后再决定是否继续。",
+            },
+        )
+    for item in active:
+        if item.get("status") in {"queued", "retrying", "blocked"}:
+            knowledge_base.cancel_work_item(str(item["work_item_id"]), reason="Paused by researcher")
+    record.research_loop["status"] = "paused"
+    record.updated_at = time.time()
+    persist_run_record(record)
+    update_autopilot_task(run_id, status="blocked", blocked_reason="Paused by researcher")
+    return {"run_id": run_id, "research_loop": _public_snapshot_value(record.research_loop)}
+
+
 @app.post("/api/runs/{run_id}/experiment-feedback")
 async def record_experiment_feedback(
     run_id: str,
@@ -14997,6 +16444,56 @@ async def record_experiment_feedback(
                 "boundary": "Experiment feedback was saved; reranking can be retried after runtime repair.",
             }
 
+    loop_execution = record.research_loop.get("execution") if isinstance(record.research_loop, dict) else {}
+    if isinstance(loop_execution, dict) and loop_execution.get("job_id") == request.job_id:
+        persist_loop_stage(
+            record,
+            "review",
+            "complete",
+            f"研究者已将实验结果标记为 {request.verdict}，证据包和 ResearchOutcome 已刷新。",
+            details={"evidence_id": evidence_item.get("evidence_id"), "job_id": request.job_id},
+            loop_status="running",
+        )
+        if rerank_run:
+            record = load_run_record(run_id) or record
+            record.research_loop["rerank_run_id"] = rerank_run.get("run_id")
+            persist_loop_stage(
+                record,
+                "rerank",
+                "running",
+                "人工解释已进入 continuation Review/Elo。",
+                details={"rerank_run_id": rerank_run.get("run_id")},
+                loop_status="reranking",
+            )
+            update_autopilot_task(
+                run_id,
+                status="running",
+                result_ref={"status": "reranking", "rerank_run_id": rerank_run.get("run_id")},
+            )
+        elif rerank_error:
+            persist_loop_stage(
+                record,
+                "rerank",
+                "error",
+                "实验解释已保存，但重新排名启动失败，可在修复运行环境后恢复。",
+                details={"rerank_error": rerank_error},
+                loop_status="error",
+            )
+            update_autopilot_task(
+                run_id,
+                status="blocked",
+                blocked_reason="Experiment feedback saved; reranking failed to start.",
+            )
+        else:
+            state = persist_loop_stage(
+                record,
+                "outcome",
+                "complete",
+                "实验解释和证据结果已写回；本次闭环在不重新排名的情况下完成。",
+                loop_status="complete",
+            )
+            update_autopilot_task(run_id, status="done", result_ref={"status": state["status"]})
+
     return {
         "run_id": run_id,
         "hypothesis_index": request.hypothesis_index,
@@ -15009,11 +16506,11 @@ async def record_experiment_feedback(
 
 
 @app.get("/api/runs/{run_id}")
-async def get_run(run_id: str) -> RunRecord:
+async def get_run(run_id: str) -> Dict[str, Any]:
     record = load_run_record(run_id)
     if not record:
         raise HTTPException(status_code=404, detail="Run not found")
-    return record
+    return _public_snapshot_value(run_record_payload(record))
 
 
 @app.post("/api/runs/{run_id}/feedback")

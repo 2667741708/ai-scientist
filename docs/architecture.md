@@ -2,6 +2,9 @@
 
 Open Coscientist uses LangGraph to orchestrate 8-10 specialized AI agents in a multi-stage workflow. Each agent is implemented as a node that processes and updates shared state.
 
+The durable evidence-to-experiment controller that runs after this graph is documented in
+[Research Autopilot](research-autopilot.md).
+
 ## Workflow Graph
 
 The workflow consists of specialized nodes that handle different aspects of hypothesis generation and refinement:

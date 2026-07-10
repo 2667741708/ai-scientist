@@ -45,6 +45,8 @@ import type {
   ResearchSchedulesResponse,
   ResearchScheduleTickResponse,
   ResearchOutcomeResponse,
+  ResearchAutopilotPolicy,
+  ResearchLoopState,
   ResearchSkillsResponse,
   ResearchTasksResponse,
   RunCheckpointsResponse,
@@ -715,6 +717,43 @@ export async function recordExperimentFeedback(runId: string, request: Experimen
   return postJson<ExperimentFeedbackResponse>(
     `/api/runs/${encodeURIComponent(runId)}/experiment-feedback`,
     request,
+  );
+}
+
+export async function startResearchAutopilot(runId: string, policy: ResearchAutopilotPolicy = {}) {
+  return postJson<{ run_id: string; research_loop: ResearchLoopState; work_item?: Record<string, unknown> }>(
+    `/api/runs/${encodeURIComponent(runId)}/autopilot`,
+    { policy },
+  );
+}
+
+export async function getResearchAutopilot(runId: string) {
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/autopilot`);
+  if (!response.ok) throw new Error(`research_autopilot_failed_${response.status}`);
+  return (await response.json()) as { run_id: string; research_loop: ResearchLoopState };
+}
+
+export async function resumeResearchAutopilot(
+  runId: string,
+  request: {
+    grants?: ResearchAutopilotPolicy["grants"];
+    compute?: ResearchAutopilotPolicy["compute"];
+    evaluation?: ResearchAutopilotPolicy["evaluation"];
+    continue_on_limited_evidence?: boolean;
+    auto_interpret?: boolean;
+    auto_rerank?: boolean;
+  },
+) {
+  return postJson<{ run_id: string; research_loop: ResearchLoopState }>(
+    `/api/runs/${encodeURIComponent(runId)}/autopilot/resume`,
+    request,
+  );
+}
+
+export async function pauseResearchAutopilot(runId: string) {
+  return postJson<{ run_id: string; research_loop: ResearchLoopState }>(
+    `/api/runs/${encodeURIComponent(runId)}/autopilot/pause`,
+    {},
   );
 }
 
