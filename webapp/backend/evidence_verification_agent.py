@@ -230,6 +230,57 @@ class EvidenceVerificationAgent:
         core = " ".join(keywords[:12]) or hypothesis_text[:240]
         return f"{core} contradictory negative result failed replication no effect"
 
+    def classify_evidence_items(
+        self,
+        *,
+        hypothesis_text: str,
+        evidence_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Classify each retrieved item without claiming that lexical overlap proves truth."""
+        hypothesis_terms = set(_terms(hypothesis_text))
+        classified: List[Dict[str, Any]] = []
+        for item in evidence_items:
+            text = _first_text(
+                item,
+                ("text_preview", "preview", "evidence_summary", "experiment_data_summary", "summary"),
+            )
+            item_terms = set(_terms(f"{_first_text(item, ('title', 'chunk_title'))} {text}"))
+            overlap = hypothesis_terms.intersection(item_terms)
+            coverage = len(overlap) / max(1, len(hypothesis_terms))
+            has_counter_marker = any(marker in text.lower() for marker in NEGATIVE_MARKERS)
+            strong_source = (
+                item.get("source_reliability") in {"parsed_fulltext", "experiment_run"}
+                or item.get("support_level") == "experimental_data"
+            )
+            if not text.strip() or coverage < 0.08:
+                relationship = "irrelevant"
+                confidence = 0.7 if not text.strip() else 0.55
+                rationale = "The chunk has insufficient lexical overlap with the hypothesis claim."
+            elif has_counter_marker:
+                relationship = "contradict"
+                confidence = min(0.9, 0.55 + coverage)
+                rationale = "The chunk overlaps the claim and contains a negative-result marker."
+            elif strong_source and coverage >= 0.2:
+                relationship = "support"
+                confidence = min(0.9, 0.5 + coverage)
+                rationale = "A strong-source chunk overlaps the hypothesis claim."
+            else:
+                relationship = "insufficient"
+                confidence = min(0.75, 0.35 + coverage)
+                rationale = "The chunk is relevant but too weak or incomplete to count as support."
+            classified.append(
+                {
+                    **item,
+                    "relationship": relationship,
+                    "relationship_confidence": round(confidence, 2),
+                    "relationship_rationale": rationale,
+                    "matched_terms": sorted(overlap)[:12],
+                    "claim_coverage": round(coverage, 3),
+                    "possible_counter_evidence": has_counter_marker,
+                }
+            )
+        return classified
+
     def external_packets_from_mcp_payload(
         self,
         *,

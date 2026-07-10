@@ -30,12 +30,24 @@ export type Hypothesis = {
   win_count?: number;
   loss_count?: number;
   citation_map?: Record<string, unknown>;
-  grounding_status?: "ungrounded" | "citation_mismatch" | "limited_fulltext" | "provenance_checked" | "knowledge_base_supported";
+  grounding_status?: "ungrounded" | "citation_mismatch" | "limited_fulltext" | "provenance_checked" | "knowledge_base_supported" | "contradicted";
   citation_support_levels?: Record<string, string>;
   citation_source_reliability?: Record<string, string>;
   knowledge_base_support?: KnowledgeSupportItem[];
   experimental_support_summaries?: KnowledgeSupportItem[];
   evidence_packet?: EvidencePacket;
+  evidence_relationship_counts?: Record<string, number>;
+  experiment_runs?: Array<{
+    job_id: string;
+    status?: string;
+    result_ref?: Record<string, unknown>;
+    artifacts?: string[];
+    interpretation_status?: "awaiting_human_interpretation" | "complete";
+    verdict?: "support" | "contradict" | "inconclusive";
+    rationale?: string;
+    evidence_id?: string;
+    boundary?: string;
+  }>;
 };
 
 export type EvidencePacket = {
@@ -47,6 +59,7 @@ export type EvidencePacket = {
   parsed_fulltext_count: number;
   experimental_data_count: number;
   weak_support_count?: number;
+  relationship_counts?: Record<string, number>;
   items: KnowledgeSupportItem[];
   boundary?: string;
 };
@@ -66,6 +79,8 @@ export type ResearchOutcome = {
     minimum_evidence_count?: number;
     retrieved_evidence_count?: number;
     strong_evidence_count?: number;
+    supporting_evidence_count?: number;
+    contradicting_evidence_count?: number;
     reasons?: string[];
     boundary?: string;
   };
@@ -392,6 +407,8 @@ export type TournamentItemViewModel = {
 
 export type KnowledgeSupportItem = {
   paper_id?: string;
+  evidence_id?: string;
+  parse_run_id?: string;
   title?: string;
   chunk_id?: string;
   section_type?: string;
@@ -401,6 +418,9 @@ export type KnowledgeSupportItem = {
   experiment_data_summary?: string;
   text_preview?: string;
   source_reliability?: string;
+  relationship?: "support" | "contradict" | "irrelevant" | "insufficient" | "relevant" | string;
+  relationship_confidence?: number;
+  relationship_rationale?: string;
 };
 
 export type StatusBadgeItem = {
@@ -1172,8 +1192,27 @@ export type ExperimentBackgroundJobRequest = {
   args?: string[];
   phase?: string;
   run_id?: string;
+  hypothesis_index?: number;
   timeout_seconds?: number;
   approval: ToolWorkflowApproval;
+};
+
+export type ExperimentFeedbackRequest = {
+  job_id: string;
+  hypothesis_index: number;
+  verdict: "support" | "contradict" | "inconclusive";
+  rationale: string;
+  rerank?: boolean;
+  approval: ToolWorkflowApproval;
+};
+
+export type ExperimentFeedbackResponse = {
+  run_id: string;
+  hypothesis_index: number;
+  evidence_item: KnowledgeSupportItem;
+  research_outcome: ResearchOutcome;
+  rerank_run?: { run_id: string; work_item_id: string; parent_run_id?: string } | null;
+  rerank_error?: Record<string, unknown> | null;
 };
 
 export type SshTrainingServer = {

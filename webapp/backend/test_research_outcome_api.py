@@ -59,6 +59,7 @@ def test_research_outcome_persists_winner_and_exact_evidence_refs() -> None:
                                 "title": "Calibration under shift",
                                 "support_level": "experimental_data",
                                 "source_reliability": "parsed_fulltext",
+                                "relationship": "support",
                                 "text_preview": "Calibration error decreased on held-out shifts.",
                             }
                         ],

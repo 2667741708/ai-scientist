@@ -1685,8 +1685,14 @@ class KnowledgeBaseStore:
         agent_trace = record.get("agent_trace") if isinstance(record.get("agent_trace"), list) else []
 
         with self._connection() as connection:
+            # Tool calls emitted by background workflows have no trace_event_id and
+            # must survive run snapshot rewrites. Only trace-derived calls are
+            # rebuilt below together with research_agent_trace.
+            connection.execute(
+                "DELETE FROM research_tool_calls WHERE run_id = ? AND trace_event_id IS NOT NULL",
+                (run_id,),
+            )
             for table in (
-                "research_tool_calls",
                 "research_agent_trace",
                 "hypothesis_evidence_links",
                 "research_hypotheses",

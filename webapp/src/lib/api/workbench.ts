@@ -11,6 +11,8 @@ import type {
   CommandPermissionResponse,
   ContinueRunRequest,
   ExperimentBackgroundJobRequest,
+  ExperimentFeedbackRequest,
+  ExperimentFeedbackResponse,
   FeedbackItem,
   FileSnapshotRequest,
   FileSnapshotResponse,
@@ -707,6 +709,13 @@ export async function executeCodeAnalysisWorkflow(request: CodeAnalysisRequest) 
 
 export async function enqueueExperimentBackgroundJob(request: ExperimentBackgroundJobRequest) {
   return postJson<{ job: BackgroundJob }>("/api/tools/workflows/experiment-job", request);
+}
+
+export async function recordExperimentFeedback(runId: string, request: ExperimentFeedbackRequest) {
+  return postJson<ExperimentFeedbackResponse>(
+    `/api/runs/${encodeURIComponent(runId)}/experiment-feedback`,
+    request,
+  );
 }
 
 export async function enqueueTerminalCommandJob(request: TerminalCommandJobRequest) {

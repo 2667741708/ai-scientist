@@ -22,7 +22,18 @@ def persist_test_run(studio, run_id: str) -> None:
         status="complete",
         created_at=1.0,
         updated_at=1.0,
-        request=studio.RunRequest(research_goal="Validate restricted experiment background job"),
+        request=studio.RunRequest(
+            research_goal="Validate restricted experiment background job",
+            demo_mode=True,
+            literature_review=False,
+        ),
+        hypotheses=[
+            {
+                "text": "The metric job output supports a reproducible benchmark result.",
+                "elo_rating": 1200,
+                "evidence_packet": {"status": "absent", "items": [], "item_count": 0},
+            }
+        ],
     )
     studio.persist_run_record(record)
 
@@ -51,6 +62,7 @@ def test_experiment_background_job_requires_approval_and_persists_result() -> No
             "/api/tools/workflows/experiment-job",
             json={
                 "run_id": "run_experiment_job",
+                "hypothesis_index": 0,
                 "script_path": "metric_job.py",
                 "args": ["2", "3"],
             },
@@ -61,6 +73,7 @@ def test_experiment_background_job_requires_approval_and_persists_result() -> No
             "/api/tools/workflows/experiment-job",
             json={
                 "run_id": "run_experiment_job",
+                "hypothesis_index": 0,
                 "phase": "experiment_execution",
                 "script_path": "metric_job.py",
                 "args": ["2", "3"],
@@ -84,14 +97,64 @@ def test_experiment_background_job_requires_approval_and_persists_result() -> No
         assert loaded_result.json()["content"]["result_json"] == {"total": 5, "n": 2}
         assert loaded_result.json()["content"]["stdout"] == "experiment ready\n"
 
+        attached_run = client.get("/api/runs/run_experiment_job")
+        experiment_runs = attached_run.json()["hypotheses"][0]["experiment_runs"]
+        assert experiment_runs[0]["job_id"] == job_id
+        assert experiment_runs[0]["interpretation_status"] == "awaiting_human_interpretation"
+
+        no_feedback_approval = client.post(
+            "/api/runs/run_experiment_job/experiment-feedback",
+            json={
+                "job_id": job_id,
+                "hypothesis_index": 0,
+                "verdict": "support",
+                "rationale": "The expected metric total was reproduced.",
+                "rerank": True,
+            },
+        )
+        assert no_feedback_approval.status_code == 428
+
+        feedback = client.post(
+            "/api/runs/run_experiment_job/experiment-feedback",
+            json={
+                "job_id": job_id,
+                "hypothesis_index": 0,
+                "verdict": "support",
+                "rationale": "The expected metric total was reproduced.",
+                "rerank": True,
+                "approval": {
+                    "confirmed": True,
+                    "scope": "experiment.feedback",
+                    "reason": "human reviewed the experiment output",
+                },
+            },
+        )
+        assert feedback.status_code == 200, feedback.text
+        assert feedback.json()["evidence_item"]["relationship"] == "support"
+        assert feedback.json()["rerank_error"] is None
+        rerank_run = feedback.json()["rerank_run"]
+        assert rerank_run["parent_run_id"] == "run_experiment_job"
+        continued = client.get(f"/api/runs/{rerank_run['run_id']}")
+        assert continued.status_code == 200
+        assert continued.json()["request"]["parent_run_id"] == "run_experiment_job"
+
+        interpreted_run = client.get("/api/runs/run_experiment_job").json()
+        packet = interpreted_run["hypotheses"][0]["evidence_packet"]
+        assert packet["relationship_counts"]["support"] == 1
+        assert packet["experimental_data_count"] == 1
+
         tool_calls = client.get("/api/runs/run_experiment_job/tool-calls")
         assert tool_calls.status_code == 200
-        assert any(item["tool_name"] == "experiment.background_job" for item in tool_calls.json()["tool_calls"])
+        assert any(
+            item["tool_name"] == "experiment.background_job"
+            for item in tool_calls.json()["tool_calls"]
+        ), tool_calls.json()
 
         repeated = client.post(
             "/api/tools/workflows/experiment-job",
             json={
                 "run_id": "run_experiment_job",
+                "hypothesis_index": 0,
                 "phase": "experiment_execution",
                 "script_path": "metric_job.py",
                 "args": ["2", "3"],

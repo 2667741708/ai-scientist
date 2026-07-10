@@ -32,12 +32,19 @@ _EVIDENCE_ITEM_FIELDS = (
     "support_level",
     "source_reliability",
     "relationship",
+    "relationship_confidence",
+    "relationship_rationale",
+    "matched_terms",
+    "claim_coverage",
     "score",
     "evidence_summary",
     "experiment_data_summary",
     "text_preview",
     "url",
     "evidence_path",
+    "source_channel",
+    "job_id",
+    "result_id",
 )
 
 
@@ -70,6 +77,9 @@ def _packet_snapshot_id(items: List[Dict[str, Any]]) -> str:
                 "parse_run_id",
                 "support_level",
                 "source_reliability",
+                "relationship",
+                "relationship_confidence",
+                "relationship_rationale",
                 "text_preview",
             )
             if item.get(key) not in (None, "")
@@ -102,6 +112,10 @@ def normalize_evidence_packet(
         for item in items
         if item.get("support_level") in {"metadata", "abstract", "unknown", None}
     )
+    relationship_counts = {
+        relationship: sum(1 for item in items if item.get("relationship") == relationship)
+        for relationship in ("support", "contradict", "irrelevant", "insufficient", "relevant")
+    }
     return {
         "status": str(payload.get("status") or ("ready" if items else "absent")),
         "query": str(payload.get("query") or hypothesis.text),
@@ -111,6 +125,7 @@ def normalize_evidence_packet(
         "parsed_fulltext_count": parsed_fulltext_count,
         "experimental_data_count": experimental_data_count,
         "weak_support_count": weak_count,
+        "relationship_counts": relationship_counts,
         "items": items,
         "boundary": (
             "Retrieved chunks are relevance candidates, not automatically supporting evidence. "
@@ -222,7 +237,10 @@ def format_hypothesis_with_evidence(hypothesis: Hypothesis) -> str:
         lines.append(
             f"E{index}: title={title}; support_level={item.get('support_level') or 'unknown'}; "
             f"source_reliability={item.get('source_reliability') or 'unknown'}; "
-            f"relationship={item.get('relationship') or 'relevant'}; excerpt={preview or 'unavailable'}"
+            f"relationship={item.get('relationship') or 'relevant'}; "
+            f"relationship_confidence={item.get('relationship_confidence') or 'unscored'}; "
+            f"rationale={_compact_text(item.get('relationship_rationale'), 220) or 'not classified'}; "
+            f"excerpt={preview or 'unavailable'}"
         )
     return (
         f"{hypothesis.text}\n\n"

@@ -98,6 +98,7 @@ function getExpertFeedbackBadge(run: RunRecord): StatusBadgeItem {
 }
 
 function getGroundingBadge(status: string | undefined): StatusBadgeItem {
+  if (status === "contradicted") return { label: "发现反证", tone: "error" };
   if (status === "provenance_checked") return { label: "引用已核验", tone: "ok" };
   if (status === "knowledge_base_supported") return { label: "知识库支撑", tone: "ok" };
   if (status === "limited_fulltext") return { label: "全文不足", tone: "warning" };

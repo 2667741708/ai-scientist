@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -480,7 +481,17 @@ class ExperimentBackgroundJobRequest(BaseModel):
     args: List[str] = Field(default_factory=list, max_length=50)
     phase: str = Field(default="experiment_execution", min_length=2, max_length=80)
     run_id: Optional[str] = Field(default=None, max_length=80)
+    hypothesis_index: Optional[int] = Field(default=None, ge=0, le=200)
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    approval: ToolWorkflowApproval = Field(default_factory=ToolWorkflowApproval)
+
+
+class ExperimentFeedbackRequest(BaseModel):
+    job_id: str = Field(..., min_length=3, max_length=120)
+    hypothesis_index: int = Field(..., ge=0, le=200)
+    verdict: Literal["support", "contradict", "inconclusive"]
+    rationale: str = Field(..., min_length=3, max_length=4000)
+    rerank: bool = True
     approval: ToolWorkflowApproval = Field(default_factory=ToolWorkflowApproval)
 
 
@@ -5820,6 +5831,14 @@ def apply_citation_provenance_qa(record: RunRecord) -> None:
             for item in kb_support
             if item.get("experiment_data_summary")
         ]
+        relationship_counts = {
+            relationship: sum(
+                1
+                for item in kb_support
+                if isinstance(item, dict) and item.get("relationship") == relationship
+            )
+            for relationship in ("support", "contradict", "irrelevant", "insufficient")
+        }
         strongest_levels.update(support_levels.values())
         if experiment_summaries:
             strongest_levels.add("experimental_data")
@@ -5838,6 +5857,9 @@ def apply_citation_provenance_qa(record: RunRecord) -> None:
                 hypothesis["literature_grounding"] = (
                     f"{grounding}\n\nGrounding limitation: no resolvable citation_map sources were returned."
                 ).strip()
+            elif relationship_counts["contradict"]:
+                has_limited_support = True
+                hypothesis["grounding_status"] = "contradicted"
             elif orphaned:
                 has_limited_support = True
                 hypothesis["grounding_status"] = "citation_mismatch"
@@ -5857,6 +5879,7 @@ def apply_citation_provenance_qa(record: RunRecord) -> None:
             hypothesis["citation_source_reliability"] = source_reliability
             hypothesis["knowledge_base_support"] = kb_support
             hypothesis["experimental_support_summaries"] = experiment_summaries
+            hypothesis["evidence_relationship_counts"] = relationship_counts
 
         hypothesis_reports.append(
             {
@@ -5870,6 +5893,7 @@ def apply_citation_provenance_qa(record: RunRecord) -> None:
                 "knowledge_base_support_count": len(kb_support),
                 "experimental_support_count": len(experiment_summaries),
                 "supporting_chunks": kb_support,
+                "relationship_counts": relationship_counts,
             }
         )
 
@@ -7992,10 +8016,21 @@ def build_research_outcome(record: RunRecord) -> Dict[str, Any]:
         {},
     )
     minimum_evidence = int(record.request.min_references or 0)
+    support_count = sum(
+        1
+        for item in packet_items
+        if isinstance(item, dict) and item.get("relationship") == "support"
+    )
+    contradiction_count = sum(
+        1
+        for item in packet_items
+        if isinstance(item, dict) and item.get("relationship") == "contradict"
+    )
     strong_count = sum(
         1
         for item in packet_items
         if isinstance(item, dict)
+        and item.get("relationship") == "support"
         and (
             item.get("source_reliability") == "parsed_fulltext"
             or item.get("support_level") == "experimental_data"
@@ -8004,6 +8039,10 @@ def build_research_outcome(record: RunRecord) -> Dict[str, Any]:
     reasons: List[str] = []
     if len(packet_items) < minimum_evidence:
         reasons.append("below_minimum_evidence_count")
+    if support_count < minimum_evidence:
+        reasons.append("below_minimum_supporting_evidence_count")
+    if contradiction_count:
+        reasons.append("contradictory_evidence_requires_review")
     if record.request.literature_review and strong_count == 0:
         reasons.append("no_parsed_fulltext_or_experimental_evidence")
     if provenance.get("orphaned_citations"):
@@ -8047,6 +8086,8 @@ def build_research_outcome(record: RunRecord) -> Dict[str, Any]:
             "minimum_evidence_count": minimum_evidence,
             "retrieved_evidence_count": len(packet_items),
             "strong_evidence_count": strong_count,
+            "supporting_evidence_count": support_count,
+            "contradicting_evidence_count": contradiction_count,
             "reasons": reasons,
             "boundary": (
                 "A passed gate means provenance requirements were met for ranking. "
@@ -8062,6 +8103,125 @@ def build_research_outcome(record: RunRecord) -> Dict[str, Any]:
         "tournament_matchups": record.tournament_matchups,
         "experiment_plan": winner.get("experiment"),
     }
+
+
+def refresh_run_evidence_snapshot(record: RunRecord) -> None:
+    packets = [
+        hypothesis.get("evidence_packet")
+        for hypothesis in record.hypotheses
+        if isinstance(hypothesis, dict) and isinstance(hypothesis.get("evidence_packet"), dict)
+    ]
+    packet_ids = sorted(str(packet.get("snapshot_id") or "") for packet in packets)
+    digest = hashlib.sha256("|".join(packet_ids).encode("utf-8")).hexdigest()[:16]
+    relationship_counts = {
+        relationship: sum(
+            int((packet.get("relationship_counts") or {}).get(relationship, 0))
+            for packet in packets
+        )
+        for relationship in ("support", "contradict", "irrelevant", "insufficient", "relevant")
+    }
+    record.evidence_snapshot = {
+        "snapshot_id": f"snapshot_{digest}",
+        "status": "ready" if any(int(packet.get("item_count") or 0) for packet in packets) else "limited",
+        "hypothesis_count": len(record.hypotheses),
+        "packet_count": len(packets),
+        "evidence_item_count": sum(int(packet.get("item_count") or 0) for packet in packets),
+        "parsed_fulltext_count": sum(
+            int(packet.get("parsed_fulltext_count") or 0) for packet in packets
+        ),
+        "experimental_data_count": sum(
+            int(packet.get("experimental_data_count") or 0) for packet in packets
+        ),
+        "relationship_counts": relationship_counts,
+        "packet_snapshot_ids": packet_ids,
+        "boundary": "Snapshot includes approved experiment interpretations and literature evidence packets.",
+    }
+
+
+def apply_experiment_feedback_to_record(
+    record: RunRecord,
+    request: ExperimentFeedbackRequest,
+    job: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Attach a human-approved experiment interpretation as structured evidence."""
+    if request.hypothesis_index >= len(record.hypotheses):
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    hypothesis = record.hypotheses[request.hypothesis_index]
+    experiment_runs = hypothesis.get("experiment_runs")
+    experiment_runs = experiment_runs if isinstance(experiment_runs, list) else []
+    matching_run = next(
+        (item for item in experiment_runs if isinstance(item, dict) and item.get("job_id") == request.job_id),
+        None,
+    )
+    if matching_run is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "experiment_not_attached_to_hypothesis",
+                "message": "这个实验任务没有绑定到所选假设，不能写入科学解释。",
+            },
+        )
+    relationship = "insufficient" if request.verdict == "inconclusive" else request.verdict
+    result_ref = job.get("result_ref") if isinstance(job.get("result_ref"), dict) else {}
+    tool_result_ref = result_ref.get("tool_result") if isinstance(result_ref.get("tool_result"), dict) else {}
+    evidence_item = {
+        "evidence_id": f"experiment:{request.job_id}",
+        "chunk_id": f"experiment:{request.job_id}",
+        "title": f"Experiment result {request.job_id}",
+        "support_level": "experimental_data",
+        "source_reliability": "experiment_run",
+        "relationship": relationship,
+        "relationship_confidence": 1.0,
+        "relationship_rationale": request.rationale,
+        "text_preview": (
+            f"Human interpretation: {request.rationale} "
+            f"Execution status: {job.get('status')}; result_ref: {tool_result_ref.get('result_id') or 'stored'}."
+        ),
+        "experiment_data_summary": request.rationale,
+        "source_channel": "approved_experiment_feedback",
+        "job_id": request.job_id,
+        "result_id": tool_result_ref.get("result_id"),
+    }
+    packet = hypothesis.get("evidence_packet")
+    packet = packet if isinstance(packet, dict) else {}
+    items = [item for item in (packet.get("items") or []) if isinstance(item, dict)]
+    items = [item for item in items if item.get("evidence_id") != evidence_item["evidence_id"]]
+    items.append(evidence_item)
+
+    from open_coscientist.models import Hypothesis
+    from open_coscientist.nodes.evidence_grounding import normalize_evidence_packet
+
+    hypothesis["evidence_packet"] = normalize_evidence_packet(
+        {
+            "status": "ready",
+            "query": packet.get("query") or hypothesis.get("text"),
+            "library_id": packet.get("library_id") or record.request.library_id,
+            "items": items,
+        },
+        hypothesis=Hypothesis(text=str(hypothesis.get("text") or "")),
+    )
+    matching_run.update(
+        {
+            "interpretation_status": "complete",
+            "verdict": request.verdict,
+            "rationale": request.rationale,
+            "evidence_id": evidence_item["evidence_id"],
+        }
+    )
+    hypothesis["experiment_runs"] = experiment_runs
+    refresh_run_evidence_snapshot(record)
+    apply_citation_provenance_qa(record)
+    record.research_outcome = build_research_outcome(record)
+    record.updated_at = time.time()
+    add_event(
+        record,
+        "Experiment",
+        "Experiment interpretation recorded",
+        f"Experiment {request.job_id} was marked {request.verdict} for hypothesis {request.hypothesis_index + 1}.",
+        "complete",
+    )
+    persist_run_record(record)
+    return evidence_item
 
 
 def demo_hypotheses(goal: str) -> List[Dict[str, Any]]:
@@ -8417,6 +8577,10 @@ def build_knowledge_base_evidence_resolver(record: RunRecord):
             hypothesis,
             limit=max(6, int(record.request.max_references or 0)),
             library_id=record.request.library_id,
+        )
+        items = evidence_verifier.classify_evidence_items(
+            hypothesis_text=str(hypothesis.get("text") or ""),
+            evidence_items=items,
         )
         return {
             "status": "ready" if items else "absent",
@@ -11959,6 +12123,49 @@ async def enqueue_code_analysis_workflow(
     return {"job": job}
 
 
+def attach_experiment_execution_result(
+    *,
+    request: ExperimentBackgroundJobRequest,
+    job_id: str,
+    result_payload: Dict[str, Any],
+    result_ref: Dict[str, Any],
+) -> None:
+    """Attach raw experiment provenance without interpreting scientific meaning."""
+    if request.run_id is None or request.hypothesis_index is None:
+        return
+    record = load_run_record(request.run_id)
+    if not record or request.hypothesis_index >= len(record.hypotheses):
+        return
+    hypothesis = record.hypotheses[request.hypothesis_index]
+    experiment_runs = hypothesis.get("experiment_runs")
+    experiment_runs = experiment_runs if isinstance(experiment_runs, list) else []
+    experiment_runs.append(
+        {
+            "job_id": job_id,
+            "status": result_payload.get("status"),
+            "returncode": result_payload.get("returncode"),
+            "duration_seconds": result_payload.get("duration_seconds"),
+            "result_ref": result_ref,
+            "artifacts": result_payload.get("artifacts") or [],
+            "interpretation_status": "awaiting_human_interpretation",
+            "boundary": (
+                "Successful execution only proves the script ran. It does not support or contradict "
+                "the hypothesis until an approved scientific interpretation is recorded."
+            ),
+        }
+    )
+    hypothesis["experiment_runs"] = experiment_runs[-20:]
+    record.updated_at = time.time()
+    add_event(
+        record,
+        "Experiment",
+        "Experiment result awaiting interpretation",
+        f"Background experiment {job_id} finished and is attached to hypothesis {request.hypothesis_index + 1}.",
+        "complete",
+    )
+    persist_run_record(record)
+
+
 async def run_experiment_background_job(
     job_id: str,
     request: ExperimentBackgroundJobRequest,
@@ -11969,6 +12176,7 @@ async def run_experiment_background_job(
         "script_path": request.script_path,
         "args": request.args,
         "timeout_seconds": request.timeout_seconds,
+        "hypothesis_index": request.hypothesis_index,
     }
     try:
         result = await asyncio.to_thread(
@@ -12004,6 +12212,12 @@ async def run_experiment_background_job(
                     "approval": request.approval.model_dump(),
                 },
             )
+        attach_experiment_execution_result(
+            request=request,
+            job_id=job_id,
+            result_payload=result_payload,
+            result_ref=result_ref,
+        )
         knowledge_base.update_background_job(
             job_id,
             status=result.status,
@@ -12049,6 +12263,10 @@ async def enqueue_experiment_background_job(
     )
     if request.run_id and not load_run_record(request.run_id):
         raise HTTPException(status_code=404, detail="Run not found")
+    if request.run_id and request.hypothesis_index is not None:
+        record = load_run_record(request.run_id)
+        if not record or request.hypothesis_index >= len(record.hypotheses):
+            raise HTTPException(status_code=404, detail="Hypothesis not found")
     try:
         guardrail = validate_experiment_script(request.script_path, experiment_root=EXPERIMENT_ROOT)
     except ExperimentRunnerError as exc:
@@ -12064,6 +12282,7 @@ async def enqueue_experiment_background_job(
         "script_path": request.script_path,
         "args": request.args,
         "timeout_seconds": request.timeout_seconds,
+        "hypothesis_index": request.hypothesis_index,
         "approval_scope": request.approval.scope,
     }
     if request.run_id:
@@ -14686,6 +14905,107 @@ async def continue_run(run_id: str, request: ContinueRunRequest) -> Dict[str, st
     response = await create_run(continued_request)
     response["parent_run_id"] = run_id
     return response
+
+
+@app.post("/api/runs/{run_id}/experiment-feedback")
+async def record_experiment_feedback(
+    run_id: str,
+    request: ExperimentFeedbackRequest,
+) -> Dict[str, Any]:
+    approval = require_tool_workflow_approval(
+        request.approval,
+        expected_scope="experiment.feedback",
+    )
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    job = knowledge_base.get_background_job(request.job_id)
+    if not job or job.get("run_id") != run_id:
+        raise HTTPException(status_code=404, detail="Experiment job not found for this run")
+    if job.get("status") not in {"complete", "error"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "experiment_job_not_terminal",
+                "message": "实验尚未结束，不能提前写入科学解释。",
+            },
+        )
+    if job.get("status") == "error" and request.verdict != "inconclusive":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "failed_execution_cannot_support_claim",
+                "message": "执行失败只能标记为 inconclusive，不能作为支持或反驳假设的科学证据。",
+            },
+        )
+
+    evidence_item = apply_experiment_feedback_to_record(record, request, job)
+    feedback_type = {
+        "support": "accept",
+        "contradict": "reject",
+        "inconclusive": "critique",
+    }[request.verdict]
+    feedback = FeedbackItem(
+        target_type="experiment",
+        target_ref={
+            "hypothesis_index": request.hypothesis_index,
+            "job_id": request.job_id,
+            "evidence_id": evidence_item["evidence_id"],
+        },
+        feedback_type=feedback_type,
+        text=f"Experiment verdict={request.verdict}. {request.rationale}",
+    )
+    knowledge_base.store_feedback_item(
+        feedback_id=None,
+        run_id=run_id,
+        target_type=feedback.target_type,
+        target_ref=feedback.target_ref,
+        feedback_type=feedback.feedback_type,
+        text=feedback.text,
+        source="experiment_feedback",
+    )
+
+    rerank_run: Optional[Dict[str, str]] = None
+    rerank_error: Optional[Dict[str, Any]] = None
+    if request.rerank:
+        starting_hypotheses = [
+            str(hypothesis.get("text") or "").strip()
+            for hypothesis in record.hypotheses
+            if isinstance(hypothesis, dict) and str(hypothesis.get("text") or "").strip()
+        ]
+        try:
+            rerank_run = await continue_run(
+                run_id,
+                ContinueRunRequest(
+                    demo_mode=record.request.demo_mode,
+                    literature_review=record.request.literature_review,
+                    initial_hypotheses=min(8, max(1, len(starting_hypotheses))),
+                    iterations=0,
+                    starting_hypotheses=starting_hypotheses[:8],
+                    user_feedback=[feedback],
+                    refinement_mode="revise_hypotheses",
+                    memory_scope=record.request.memory_scope,
+                    library_id=record.request.library_id,
+                    auto_discover_papers=False,
+                    auto_ingest_papers=False,
+                ),
+            )
+        except HTTPException as exc:
+            rerank_error = {
+                "status_code": exc.status_code,
+                "detail": exc.detail,
+                "boundary": "Experiment feedback was saved; reranking can be retried after runtime repair.",
+            }
+
+    return {
+        "run_id": run_id,
+        "hypothesis_index": request.hypothesis_index,
+        "approval": approval,
+        "evidence_item": _public_snapshot_value(evidence_item),
+        "research_outcome": _public_snapshot_value(record.research_outcome),
+        "rerank_run": rerank_run,
+        "rerank_error": rerank_error,
+    }
 
 
 @app.get("/api/runs/{run_id}")
