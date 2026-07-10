@@ -1,0 +1,58 @@
+services:
+  coscientist-api:
+    image: python:3.12-slim
+    working_dir: /workspace/webapp
+    command: >
+      sh -lc "python -m pip install --no-cache-dir -e /workspace &&
+      python -m pip install --no-cache-dir -r backend/requirements.txt &&
+      python -m uvicorn backend.app:app --host 0.0.0.0 --port 8787"
+    ports:
+      - "${COSCIENTIST_API_PORT:-8787}:8787"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      COSCIENTIST_KNOWLEDGE_BASE_DIR: /workspace/.coscientist_cache/knowledge_base
+      COSCIENTIST_RAG_EMBEDDING_PROVIDER: "${COSCIENTIST_RAG_EMBEDDING_PROVIDER:-hash}"
+      COSCIENTIST_RAG_EMBEDDING_MODEL: "${COSCIENTIST_RAG_EMBEDDING_MODEL:-hash-local}"
+      COSCIENTIST_RAG_EMBEDDING_BASE_URL: "${COSCIENTIST_RAG_EMBEDDING_BASE_URL:-}"
+      COSCIENTIST_RAG_EMBEDDING_ENDPOINT: "${COSCIENTIST_RAG_EMBEDDING_ENDPOINT:-}"
+      COSCIENTIST_RAG_EMBEDDING_API_KEY: "${COSCIENTIST_RAG_EMBEDDING_API_KEY:-}"
+      COSCIENTIST_RAG_RERANK_PROVIDER: "${COSCIENTIST_RAG_RERANK_PROVIDER:-openai-compatible}"
+      COSCIENTIST_RAG_RERANK_MODEL: "${COSCIENTIST_RAG_RERANK_MODEL:-}"
+      COSCIENTIST_RAG_RERANK_BASE_URL: "${COSCIENTIST_RAG_RERANK_BASE_URL:-}"
+      COSCIENTIST_RAG_RERANK_ENDPOINT: "${COSCIENTIST_RAG_RERANK_ENDPOINT:-}"
+      COSCIENTIST_RAG_RERANK_API_KEY: "${COSCIENTIST_RAG_RERANK_API_KEY:-}"
+      COSCIENTIST_RAG_CHUNK_TOKEN_NUM: "${COSCIENTIST_RAG_CHUNK_TOKEN_NUM:-512}"
+      COSCIENTIST_RAG_CHUNK_DELIMITER: '${COSCIENTIST_RAG_CHUNK_DELIMITER:-\n!?。；！？}'
+      COSCIENTIST_RAG_CHUNK_OVERLAP_PERCENT: "${COSCIENTIST_RAG_CHUNK_OVERLAP_PERCENT:-0}"
+      COSCIENTIST_RAG_VECTOR_WEIGHT: "${COSCIENTIST_RAG_VECTOR_WEIGHT:-0.3}"
+      COSCIENTIST_RAG_SIMILARITY_THRESHOLD: "${COSCIENTIST_RAG_SIMILARITY_THRESHOLD:-0.05}"
+      COSCIENTIST_RAG_CANDIDATE_MULTIPLIER: "${COSCIENTIST_RAG_CANDIDATE_MULTIPLIER:-8}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
+      MIMO_API_KEY: "${MIMO_API_KEY:-}"
+    volumes:
+      - ..:/workspace
+    restart: unless-stopped
+
+  coscientist-web:
+    image: node:22-bookworm-slim
+    working_dir: /workspace/webapp
+    command: >
+      sh -lc "npm install &&
+      npm run dev -- --host 0.0.0.0 --port 8001 --strictPort"
+    ports:
+      - "${COSCIENTIST_WEB_PORT:-8001}:8001"
+    environment:
+      VITE_API_BASE: "${VITE_API_BASE:-http://127.0.0.1:8787}"
+    volumes:
+      - ..:/workspace
+      - web_node_modules:/workspace/webapp/node_modules
+    depends_on:
+      - coscientist-api
+    restart: unless-stopped
+
+volumes:
+  web_node_modules:

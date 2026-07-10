@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>研究工具布局 A - 任务流工作台</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f9;
+        --surface: #ffffff;
+        --surface-soft: #f2f5f8;
+        --surface-strong: #e8edf4;
+        --text: #17202a;
+        --muted: #657184;
+        --subtle: #8a96a8;
+        --border: #dfe5ed;
+        --primary: #2f6fed;
+        --primary-soft: #e8f0ff;
+        --teal: #0f8f7f;
+        --teal-soft: #e5f6f2;
+        --amber: #a96600;
+        --amber-soft: #fff4df;
+        --danger: #bc2f32;
+        --danger-soft: #ffe9e9;
+        --shadow: 0 12px 34px rgba(23, 32, 42, 0.08);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        min-width: 320px;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-columns: 232px minmax(0, 1fr) 320px;
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        background: var(--surface);
+        border-right: 1px solid var(--border);
+        padding: 20px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+      }
+
+      .brand {
+        display: grid;
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+      }
+
+      .brand-mark,
+      .nav-icon,
+      .tool-icon {
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        background: var(--primary-soft);
+        color: var(--primary);
+        font-weight: 800;
+      }
+
+      .brand-mark {
+        width: 36px;
+        height: 36px;
+      }
+
+      .brand-title {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.2;
+      }
+
+      .brand-subtitle,
+      .section-label,
+      .caption,
+      .mini-label {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .nav-group {
+        display: grid;
+        gap: 6px;
+      }
+
+      .nav-item,
+      .project-child {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        padding: 6px 8px;
+        border-radius: 8px;
+        color: #394559;
+        text-decoration: none;
+      }
+
+      .nav-item.active {
+        background: var(--primary-soft);
+        color: var(--primary);
+        font-weight: 700;
+      }
+
+      .nav-icon {
+        width: 28px;
+        height: 28px;
+        background: var(--surface-soft);
+        color: #536178;
+        font-size: 13px;
+      }
+
+      .nav-item.active .nav-icon {
+        background: #dbe8ff;
+        color: var(--primary);
+      }
+
+      .project {
+        border-top: 1px solid var(--border);
+        padding-top: 14px;
+      }
+
+      .project-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 10px 8px 8px;
+        font-weight: 700;
+        font-size: 13px;
+      }
+
+      .pill,
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        min-height: 24px;
+        padding: 0 9px;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .pill.ok {
+        color: var(--teal);
+        background: var(--teal-soft);
+        border-color: #b9e4dc;
+      }
+
+      .pill.warn {
+        color: var(--amber);
+        background: var(--amber-soft);
+        border-color: #ffd99a;
+      }
+
+      .main {
+        min-width: 0;
+        padding: 28px 32px 40px;
+        overflow: auto;
+      }
+
+      .page-kicker {
+        color: var(--primary);
+        font-size: 12px;
+        font-weight: 800;
+        margin: 0 0 8px;
+      }
+
+      .page-title {
+        margin: 0;
+        font-size: 32px;
+        line-height: 1.15;
+        letter-spacing: 0;
+      }
+
+      .page-copy {
+        max-width: 760px;
+        margin: 10px 0 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .workbench {
+        margin-top: 24px;
+        display: grid;
+        gap: 16px;
+      }
+
+      .task-panel,
+      .band,
+      .list-panel,
+      .context-panel {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+      }
+
+      .task-panel {
+        padding: 22px;
+        display: grid;
+        gap: 18px;
+      }
+
+      .task-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: start;
+      }
+
+      .eyebrow {
+        margin: 0 0 6px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .task-title {
+        margin: 0;
+        font-size: 24px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .task-copy {
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .primary-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .button {
+        min-height: 40px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0 14px;
+        background: var(--surface);
+        color: var(--text);
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      .button.primary {
+        color: #fff;
+        border-color: var(--primary);
+        background: var(--primary);
+      }
+
+      .button:hover,
+      .tool-row:hover {
+        border-color: #b9c8dd;
+        background: #f8fbff;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric {
+        min-height: 72px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-soft);
+        padding: 12px;
+      }
+
+      .metric strong {
+        display: block;
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .metric span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .content-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+        gap: 16px;
+      }
+
+      .list-panel {
+        padding: 18px;
+        min-width: 0;
+      }
+
+      .panel-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .panel-title h2,
+      .context-panel h2 {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.3;
+      }
+
+      .step-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 30px minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        min-height: 66px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .step-index {
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        color: var(--primary);
+        background: var(--primary-soft);
+        font-weight: 900;
+      }
+
+      .step h3,
+      .tool-copy h3,
+      .drawer-title,
+      .card-title {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.35;
+      }
+
+      .step p,
+      .tool-copy p,
+      .card-copy {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .tool-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .tool-row {
+        width: 100%;
+        min-height: 58px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 10px 12px;
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .tool-row.active {
+        border-color: #abc4ff;
+        background: var(--primary-soft);
+      }
+
+      .tool-icon {
+        width: 34px;
+        height: 34px;
+        font-size: 13px;
+      }
+
+      .right-rail {
+        border-left: 1px solid var(--border);
+        background: #fbfcfe;
+        padding: 22px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .context-panel {
+        padding: 16px;
+        box-shadow: none;
+      }
+
+      .context-stack {
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .mini-card {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        background: var(--surface);
+      }
+
+      .drawer {
+        border: 1px solid #abc4ff;
+        background: #f8fbff;
+      }
+
+      .drawer-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .drawer-body {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .data-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        border-top: 1px solid var(--border);
+        padding-top: 10px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .data-row strong {
+        color: var(--text);
+      }
+
+      .hide-mobile {
+        display: block;
+      }
+
+      @media (max-width: 1180px) {
+        .shell {
+          grid-template-columns: 220px minmax(0, 1fr);
+        }
+
+        .right-rail {
+          display: none;
+        }
+      }
+
+      @media (max-width: 860px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          display: none;
+        }
+
+        .main {
+          padding: 22px 16px;
+        }
+
+        .task-head,
+        .content-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 520px) {
+        .page-title {
+          font-size: 26px;
+        }
+
+        .metrics {
+          grid-template-columns: 1fr;
+        }
+
+        .step,
+        .tool-row {
+          grid-template-columns: 30px minmax(0, 1fr);
+        }
+
+        .hide-mobile,
+        .status-pill {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <div class="brand-mark">OC</div>
+          <div>
+            <h1 class="brand-title">开放共研</h1>
+            <p class="brand-subtitle">研究工作台</p>
+          </div>
+        </div>
+
+        <nav class="nav-group">
+          <a class="nav-item" href="#"><span class="nav-icon">+</span><span>新建项目</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">问</span><span>项目 AI</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">列</span><span>任务队列</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">库</span><span>资料库</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">搜</span><span>搜索</span></a>
+        </nav>
+
+        <section class="project">
+          <p class="section-label">置顶</p>
+          <div class="project-title">
+            <span>帮我解释三个候选假设</span>
+            <span class="pill warn">错误</span>
+          </div>
+          <a class="project-child" href="#"><span class="nav-icon">论</span><span>论文</span><span class="caption">0</span></a>
+          <a class="project-child" href="#"><span class="nav-icon">假</span><span>假设</span><span class="caption">0</span></a>
+          <a class="project-child" href="#"><span class="nav-icon">实</span><span>实验</span><span class="caption">0</span></a>
+          <a class="project-child" href="#"><span class="nav-icon">报</span><span>报告</span><span class="caption">0</span></a>
+        </section>
+
+        <section class="project">
+          <p class="section-label">专家与运行</p>
+          <a class="nav-item active" href="#"><span class="nav-icon">工</span><span>研究工具</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">出</span><span>研究产出</span></a>
+        </section>
+      </aside>
+
+      <main class="main">
+        <p class="page-kicker">方案 A</p>
+        <h1 class="page-title">任务流工作台</h1>
+        <p class="page-copy">
+          把中间页面改成“当前研究下一步”，证据采集、工具命令和复核能力都围绕一个任务流出现。默认不铺满系统模块，只保留可执行动作和可检查状态。
+        </p>
+
+        <section class="workbench" aria-label="任务流工作台">
+          <div class="task-panel">
+            <div class="task-head">
+              <div>
+                <p class="eyebrow">当前任务</p>
+                <h2 class="task-title">先确认资料，再采集证据</h2>
+                <p class="task-copy">
+                  当前项目需要补齐文献来源、PDF 解析和外部反证检索。完成这些步骤后，候选假设才进入可审查状态。
+                </p>
+              </div>
+              <div class="primary-actions">
+                <button class="button primary">采集证据</button>
+                <button class="button">回查历史</button>
+                <button class="button">资料入库</button>
+              </div>
+            </div>
+
+            <div class="metrics" aria-label="证据状态">
+              <div class="metric"><strong>19</strong><span>资料条目</span></div>
+              <div class="metric"><strong>15</strong><span>已解析片段</span></div>
+              <div class="metric"><strong>4</strong><span>待处理任务</span></div>
+              <div class="metric"><strong>0</strong><span>后台任务</span></div>
+            </div>
+          </div>
+
+          <div class="content-grid">
+            <section class="list-panel" aria-labelledby="next-step-title">
+              <div class="panel-title">
+                <h2 id="next-step-title">下一步建议</h2>
+                <span class="pill ok">文献服务可达</span>
+              </div>
+              <div class="step-list">
+                <article class="step">
+                  <span class="step-index">1</span>
+                  <div>
+                    <h3>实现细粒度 PDF section chunking</h3>
+                    <p>先修复解析粒度，再让证据链进入可审查状态。</p>
+                  </div>
+                  <span class="status-pill">待处理</span>
+                </article>
+                <article class="step">
+                  <span class="step-index">2</span>
+                  <div>
+                    <h3>实现外部文献反证检索策略</h3>
+                    <p>把候选假设和外部来源做支持、有限、反驳判断。</p>
+                  </div>
+                  <span class="status-pill">待处理</span>
+                </article>
+                <article class="step">
+                  <span class="step-index">3</span>
+                  <div>
+                    <h3>恢复并验证外部文献服务可用性</h3>
+                    <p>服务不可用时，结论只能标记为 limited 或 ungrounded。</p>
+                  </div>
+                  <span class="status-pill">待处理</span>
+                </article>
+              </div>
+            </section>
+
+            <section class="list-panel" aria-labelledby="tools-title">
+              <div class="panel-title">
+                <h2 id="tools-title">按需工具</h2>
+                <span class="caption">点击后在右侧查看</span>
+              </div>
+              <div class="tool-list">
+                <button class="tool-row active" data-tool="模板">
+                  <span class="tool-icon">模</span>
+                  <span class="tool-copy"><h3>模板</h3><p>研究方法、证据复核和实验设计检查清单。</p></span>
+                  <span class="status-pill">4 项</span>
+                </button>
+                <button class="tool-row" data-tool="权限">
+                  <span class="tool-icon">权</span>
+                  <span class="tool-copy"><h3>权限</h3><p>查看本地命令和远程任务的执行边界。</p></span>
+                  <span class="status-pill">需确认</span>
+                </button>
+                <button class="tool-row" data-tool="本地">
+                  <span class="tool-icon">本</span>
+                  <span class="tool-copy"><h3>本地</h3><p>提交本地工具命令，结果进入审计记录。</p></span>
+                  <span class="status-pill">管理员</span>
+                </button>
+                <button class="tool-row" data-tool="远训">
+                  <span class="tool-icon">远</span>
+                  <span class="tool-copy"><h3>远训</h3><p>选择服务器发起远程训练或验证任务。</p></span>
+                  <span class="status-pill">3 台</span>
+                </button>
+                <button class="tool-row" data-tool="复核">
+                  <span class="tool-icon">复</span>
+                  <span class="tool-copy"><h3>复核</h3><p>创建定期证据复核，不自动执行外部实验。</p></span>
+                  <span class="status-pill">可计划</span>
+                </button>
+                <button class="tool-row" data-tool="审查">
+                  <span class="tool-icon">审</span>
+                  <span class="tool-copy"><h3>审查</h3><p>把假设拆给多个评审角色形成审查计划。</p></span>
+                  <span class="status-pill">2 角色</span>
+                </button>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <aside class="right-rail" aria-label="右侧上下文">
+        <section class="context-panel">
+          <p class="mini-label">当前上下文</p>
+          <h2>帮我解释一下这 3 个候选假设是什么可以吗</h2>
+          <div class="context-stack">
+            <div class="mini-card">
+              <p class="mini-label">运行</p>
+              <p class="card-title">error</p>
+            </div>
+            <div class="mini-card">
+              <p class="mini-label">假设</p>
+              <p class="card-title">0 条候选假设</p>
+            </div>
+            <div class="mini-card">
+              <p class="mini-label">状态</p>
+              <p class="card-title">可检查</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="context-panel drawer" aria-live="polite">
+          <div class="drawer-head">
+            <div>
+              <p class="mini-label">按需工具</p>
+              <h2 class="drawer-title" id="drawerTitle">模板</h2>
+            </div>
+            <span class="pill ok" id="drawerState">可查看</span>
+          </div>
+          <div class="drawer-body" id="drawerBody">
+            <p class="card-copy">展示 4 个研究方法模板，用于证据 grounding、可证伪性复核、实验设计和引用 provenance QA。</p>
+            <div class="data-row"><span>默认用途</span><strong>方法参考</strong></div>
+            <div class="data-row"><span>执行方式</span><strong>按需应用</strong></div>
+          </div>
+        </section>
+
+        <section class="context-panel">
+          <p class="mini-label">快速入口</p>
+          <div class="context-stack">
+            <button class="button">搜索与问答</button>
+            <button class="button">查看产出</button>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <script>
+      const details = {
+        模板: {
+          state: "可查看",
+          copy: "展示 4 个研究方法模板，用于证据 grounding、可证伪性复核、实验设计和引用 provenance QA。",
+          rows: [
+            ["默认用途", "方法参考"],
+            ["执行方式", "按需应用"],
+          ],
+        },
+        权限: {
+          state: "需确认",
+          copy: "查看命令执行策略和权限模式，修改策略前必须确认管理员身份和执行边界。",
+          rows: [
+            ["当前模式", "full_access"],
+            ["保护项", "本地命令 / SSH"],
+          ],
+        },
+        本地: {
+          state: "管理员",
+          copy: "提交本地命令任务，完成后把 stdout、return code 和审计结果写入工具记录。",
+          rows: [
+            ["任务类型", "terminal.command"],
+            ["结果归档", "本地审计记录"],
+          ],
+        },
+        远训: {
+          state: "可选择",
+          copy: "选择可用 SSH 服务器，发起远程训练、验证或资源探测任务，输出进入同一任务队列。",
+          rows: [
+            ["服务器", "c201-4090 / c201-5080 / d437"],
+            ["执行边界", "预确认命令"],
+          ],
+        },
+        复核: {
+          state: "可计划",
+          copy: "创建周期性研究复核计划，tick 后只生成 ready task，不静默执行外部实验。",
+          rows: [
+            ["产物", "复核任务"],
+            ["默认动作", "等待人工确认"],
+          ],
+        },
+        审查: {
+          state: "可委派",
+          copy: "把一个研究目标拆分给方法、证据、实验等角色，生成可追踪的多角色审查计划。",
+          rows: [
+            ["角色", "证据审查 / 实验审查"],
+            ["状态", "planned"],
+          ],
+        },
+      };
+
+      const drawerTitle = document.getElementById("drawerTitle");
+      const drawerState = document.getElementById("drawerState");
+      const drawerBody = document.getElementById("drawerBody");
+
+      document.querySelectorAll(".tool-row").forEach((row) => {
+        row.addEventListener("click", () => {
+          document.querySelectorAll(".tool-row").forEach((item) => item.classList.remove("active"));
+          row.classList.add("active");
+          const key = row.dataset.tool;
+          const detail = details[key];
+          drawerTitle.textContent = key;
+          drawerState.textContent = detail.state;
+          drawerBody.innerHTML = `
+            <p class="card-copy">${detail.copy}</p>
+            ${detail.rows.map(([label, value]) => `<div class="data-row"><span>${label}</span><strong>${value}</strong></div>`).join("")}
+          `;
+        });
+      });
+    </script>
+  </body>
+</html>

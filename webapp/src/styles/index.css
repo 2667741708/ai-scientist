@@ -3,5 +3,6 @@
 @import "./layout.css";
 @import "./components.css";
 @import "./overlays.css";
+@import "./desktop-terminal.css";
 @import "./responsive.css";
 @import "./redesign.css";

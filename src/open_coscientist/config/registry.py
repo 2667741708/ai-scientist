@@ -86,6 +86,7 @@ class ToolRegistry:
         config_path: Optional[str] = None,
         disabled_tools: Optional[List[str]] = None,
         skip_user_config: bool = False,
+        workflow_tool_policy: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """
         Initialize the tool registry.
@@ -94,11 +95,13 @@ class ToolRegistry:
             config_path: Optional path to custom YAML config (overrides defaults)
             disabled_tools: Optional list of tool IDs to disable
             skip_user_config: If True, don't load user config from ~/.coscientist/
+            workflow_tool_policy: Optional per-workflow allow/deny policy.
         """
         self._config: Optional[ToolsConfig] = None
         self._custom_config_path = config_path
         self._disabled_tools = set(disabled_tools or [])
         self._skip_user_config = skip_user_config
+        self._workflow_tool_policy = workflow_tool_policy or {}
 
         # load config on init
         self._load_config()
@@ -291,12 +294,64 @@ class ToolRegistry:
         enabled_ids = []
         for tool_id in tool_ids:
             tool = self.get_tool(tool_id)
-            if tool and tool.enabled:
+            if tool and tool.enabled and self._workflow_policy_allows(workflow_name, tool_id, tool):
                 enabled_ids.append(tool_id)
             elif tool_id:  # only warn if tool_id is not empty
-                logger.debug(f"tool '{tool_id}' in workflow '{workflow_name}' is disabled or missing")
+                logger.debug(
+                    f"tool '{tool_id}' in workflow '{workflow_name}' is disabled, missing, or policy-denied"
+                )
 
         return enabled_ids
+
+    def get_workflow_tool_policy(self) -> Dict[str, Dict[str, Any]]:
+        """Return the active per-workflow tool policy."""
+        return self._workflow_tool_policy
+
+    def audit_workflow_tool_policy(self) -> Dict[str, Any]:
+        """Return policy-visible workflow tool allowlists for observability."""
+        workflows: Dict[str, Any] = {}
+        for workflow_name in sorted(self.config.workflows):
+            workflows[workflow_name] = {
+                "policy": self._workflow_tool_policy.get(workflow_name, {}),
+                "enabled_tools_after_policy": self.get_tools_for_workflow(workflow_name),
+            }
+        return {"workflows": workflows}
+
+    def _workflow_policy_allows(
+        self,
+        workflow_name: str,
+        tool_id: str,
+        tool: ToolConfig,
+    ) -> bool:
+        policy = self._workflow_tool_policy.get(workflow_name) or {}
+        if not policy:
+            return True
+
+        denied_tools = set(policy.get("denied_tools") or [])
+        if tool_id in denied_tools or tool.mcp_tool_name in denied_tools:
+            return False
+
+        allowed_tools = set(policy.get("allowed_tools") or [])
+        if allowed_tools and tool_id not in allowed_tools and tool.mcp_tool_name not in allowed_tools:
+            return False
+
+        denied_categories = set(policy.get("denied_categories") or [])
+        if tool.category in denied_categories:
+            return False
+
+        allowed_categories = set(policy.get("allowed_categories") or [])
+        if allowed_categories and tool.category not in allowed_categories:
+            return False
+
+        denied_source_types = set(policy.get("denied_source_types") or [])
+        if tool.source_type in denied_source_types:
+            return False
+
+        allowed_source_types = set(policy.get("allowed_source_types") or [])
+        if allowed_source_types and tool.source_type not in allowed_source_types:
+            return False
+
+        return True
 
     def get_workflow(self, workflow_name: str) -> Optional[WorkflowConfig]:
         """Get a workflow configuration by name."""
@@ -351,19 +406,27 @@ class ToolRegistry:
             if e.enabled and (workflow == "all" or e.workflow == workflow)
         ]
 
-    def get_server_configs_for_langchain(self) -> Dict[str, Dict[str, str]]:
+    def get_server_configs_for_langchain(self) -> Dict[str, Dict[str, Any]]:
         """
         Get server configs in format expected by langchain MultiServerMCPClient.
 
         Returns:
-            Dict of {server_id: {"transport": ..., "url": ...}}
+            Dict of enabled MCP server configs. HTTP servers include url/headers;
+            stdio servers include command/args/env.
         """
-        result = {}
+        result: Dict[str, Dict[str, Any]] = {}
         for server_id, server in self.get_enabled_servers().items():
-            result[server_id] = {
-                "transport": server.transport,
-                "url": server.url,
-            }
+            config: Dict[str, Any] = {"transport": server.transport}
+            if server.transport == "stdio":
+                config["command"] = server.command
+                config["args"] = server.args
+                if server.env:
+                    config["env"] = server.env
+            else:
+                config["url"] = server.url
+                if server.headers:
+                    config["headers"] = server.headers
+            result[server_id] = config
         return result
 
 

@@ -3,6 +3,7 @@ import type { RagEvidenceResult, ToolWorkflowApproval } from "./workbench";
 export type ResearchChatIntent =
   | "ask_project_ai"
   | "discover_capabilities"
+  | "summarize_project_artifacts"
   | "start_research_run"
   | "explain_current_run"
   | "inspect_hypothesis"
@@ -16,6 +17,8 @@ export type ResearchChatIntent =
   | "verify_evidence_with_literature"
   | "run_terminal_command"
   | "run_ssh_training_command"
+  | "snapshot_local_file"
+  | "register_project_tool"
   | "design_experiment"
   | "draft_report"
   | "search_session_history"
@@ -46,7 +49,8 @@ export type ResearchChatCapability = {
     | "experiment"
     | "report"
     | "history"
-    | "runtime_tools";
+    | "runtime_tools"
+    | "tool_management";
   executionMode: "read_only" | "approval_required" | "unsupported";
   approvalScope?: string;
   requiredInputs: Array<{
@@ -68,7 +72,9 @@ export type ResearchChatCapability = {
     | "session_search"
     | "public_web_search"
     | "local_terminal_audit"
-    | "remote_ssh_audit";
+    | "remote_ssh_audit"
+    | "local_file_snapshot"
+    | "tool_registry_draft";
   availability?: {
     available: boolean;
     status: "ready" | "limited" | "unavailable" | string;
@@ -93,12 +99,16 @@ export type ResearchChatActionProposal = {
     | "mcp.literature_review"
     | "web.search_public"
     | "terminal.command"
-    | "ssh.training_command";
+    | "ssh.training_command"
+    | "file.source_snapshot"
+    | "tool.register_draft";
   executionTarget:
     | "workflow.start_run"
     | "workflow.pdf_parse"
     | "workflow.web_extract"
     | "workflow.web_search"
+    | "workflow.file_snapshot"
+    | "workflow.tool_register_draft"
     | "workflow.terminal_command"
     | "workflow.ssh_training_command"
     | "workflow.evidence_literature_verification"
@@ -175,6 +185,7 @@ export type ResearchChatResult = {
   capabilityGroups?: Record<string, ResearchChatCapability[]>;
   capabilities?: ResearchChatCapability[];
   sections?: string[];
+  artifactCounts?: Record<string, number | string | null>;
   hypothesisPreview?: string;
   hypotheses?: Array<{
     index: number;
@@ -187,6 +198,21 @@ export type ResearchChatResult = {
     reviewSummary?: string;
     groundingStatus?: string | null;
   }>;
+  experiments?: Array<{
+    index: number;
+    hypothesisIndex?: number;
+    title: string;
+    experimentPlan?: string;
+    falsificationTests?: string[];
+    source_channel?: string;
+  }>;
+  reports?: Array<{
+    title: string;
+    summary?: string;
+    sections?: string[];
+    source_channel?: string;
+  }>;
+  papers?: EvidenceVerificationItem[];
   items?: EvidenceVerificationItem[];
   supportingEvidence?: EvidenceVerificationItem[];
   possibleCounterEvidence?: EvidenceVerificationItem[];
@@ -222,6 +248,8 @@ export type ResearchChatResult = {
     runEvidenceLinksCount?: number;
     runEvidenceRetrievalsCount?: number;
   };
+  evidenceSourceExplanation?: string;
+  rankingCaveat?: string;
   nextActions?: string[];
   groundingBoundary?: string;
   status?: string;

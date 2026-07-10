@@ -7,6 +7,7 @@ export type DetailTab =
   | "evidence"
   | "tournament"
   | "metrics";
+export type HypothesisPanelTab = DetailTab | "translation" | "ai" | "report";
 export type Language = "en" | "zh";
 
 export type TimelineEvent = {
@@ -140,6 +141,10 @@ export type RunRequest = {
   refinement_mode?: "new_run" | "continue_from_run" | "revise_hypotheses";
   memory_scope?: "current_run" | "project" | "library" | "global";
   library_id?: string | null;
+  auto_discover_papers?: boolean;
+  auto_ingest_papers?: boolean;
+  paper_discovery_limit?: number;
+  paper_ingest_limit?: number;
 };
 
 export type ContinueRunRequest = {
@@ -159,6 +164,10 @@ export type ContinueRunRequest = {
   refinement_mode?: "new_run" | "continue_from_run" | "revise_hypotheses";
   memory_scope?: "current_run" | "project" | "library" | "global" | null;
   library_id?: string | null;
+  auto_discover_papers?: boolean | null;
+  auto_ingest_papers?: boolean | null;
+  paper_discovery_limit?: number | null;
+  paper_ingest_limit?: number | null;
 };
 
 export type RunRecord = {
@@ -175,6 +184,58 @@ export type RunRecord = {
   citation_provenance_qa?: Record<string, unknown>;
   expert_feedback?: Record<string, unknown>;
   error?: string;
+};
+
+export type ProjectArtifactType = "hypothesis" | "evidence_link" | "experiment_plan";
+
+export type ProjectArtifact = {
+  artifact_id: string;
+  project_id: string;
+  run_id: string;
+  artifact_type: ProjectArtifactType;
+  target_ref: Record<string, unknown>;
+  title: string;
+  payload: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+};
+
+export type WorkbenchRunSummary = {
+  run_id: string;
+  status: RunStatus;
+  created_at: number;
+  updated_at: number;
+  research_goal: string;
+  model_name: string;
+  demo_mode: boolean;
+  literature_review: boolean;
+  hypothesis_count: number;
+  evidence_count: number;
+  error?: string | null;
+};
+
+export type WorkbenchSnapshot = {
+  schema_version: "workbench.snapshot.v1";
+  project: {
+    id: string;
+    title: string;
+    research_goal: string;
+    status: RunStatus;
+    mode: "demo" | "live";
+  } | null;
+  current_run: RunRecord | null;
+  runs: WorkbenchRunSummary[];
+  papers: KnowledgePaper[];
+  artifacts: ProjectArtifact[];
+  capabilities: Record<string, boolean>;
+  evidence_boundary:
+    | "no_run"
+    | "synthetic_demo"
+    | "literature_grounded_with_provenance_review"
+    | "literature_requested_but_evidence_pending"
+    | "ungrounded_model_output";
+  literature_mcp: LiteratureMcpStatus;
+  ragflow_knowledge: RagflowKnowledgeStatus;
 };
 
 export type CheckpointMetadata = {
@@ -224,6 +285,7 @@ export type Health = {
   has_mimo_key?: boolean;
   has_local_agent_key: boolean;
   local_agent_provider?: string;
+  ragflow_knowledge?: RagflowKnowledgeStatus;
   providers?: Record<string, ProviderStatus>;
 };
 
@@ -344,6 +406,7 @@ export type HypothesisCardViewModel = {
   citationSupportItems: SummaryItem[];
   knowledgeSupportItems: SummaryItem[];
   experimentSupportItems: SummaryItem[];
+  evidenceDiagnostics: SummaryItem[];
   referenceRangeLabel: string;
   raw: Hypothesis;
 };
@@ -360,10 +423,14 @@ export type TranslationRequest = {
   text: string;
   explanation?: string;
   experiment?: string;
+  target_language?: string;
+  provider?: "auto" | "microsoft" | "model";
 };
 
 export type TranslationResponse = {
   translation: string;
+  provider?: string;
+  target_language?: string;
 };
 
 export type PaperIngestRequest = {
@@ -502,6 +569,44 @@ export type RagEvidenceResult = {
   evidence_path?: string | null;
   evidence_id?: string | null;
   score: number;
+  term_similarity?: number;
+  vector_similarity?: number;
+  rerank_score?: number;
+  retrieval_method?: "sqlite_fts" | "vector" | "hybrid_fts_vector" | string;
+  embedding_model?: string;
+  rerank_error?: string;
+};
+
+export type RagflowKnowledgeStatus = {
+  mode: "sqlite_fts" | "hybrid_vector" | "hybrid_vector_rerank" | string;
+  chunking: {
+    strategy: string;
+    chunk_token_num: number;
+    delimiter: string;
+    overlapped_percent: number;
+  };
+  embedding: {
+    enabled: boolean;
+    provider: string;
+    model?: string | null;
+    endpoint_configured: boolean;
+    indexed_chunks: number;
+    total_chunks: number;
+    dimensions: number[];
+  };
+  reranker: {
+    enabled: boolean;
+    provider: string;
+    model?: string | null;
+    endpoint_configured: boolean;
+  };
+  retrieval: {
+    doc_store: string;
+    vector_similarity_weight: number;
+    full_text_weight: number;
+    similarity_threshold: number;
+    candidate_multiplier: number;
+  };
 };
 
 export type RagSearchResponse = {
@@ -511,6 +616,7 @@ export type RagSearchResponse = {
   parse_item_key?: string | null;
   support_level?: string | null;
   results: RagEvidenceResult[];
+  ragflow?: RagflowKnowledgeStatus;
   database_path: string;
 };
 
@@ -555,6 +661,8 @@ export type PdfParseResponse = {
   experimental_chunks_count: number;
   knowledge_base_ingested: boolean;
   rag_search_ready: boolean;
+  embedding_index_status?: Record<string, unknown>;
+  ragflow?: RagflowKnowledgeStatus;
   status: PaperParseItemStatus;
   items: PaperParseItem[];
   source_reliability: string;
@@ -612,6 +720,13 @@ export type LiteratureLibraryCreateRequest = {
   description?: string;
 };
 
+export type RagflowReindexResponse = {
+  status: "complete" | "warning" | string;
+  paper_count: number;
+  results: Array<Record<string, unknown>>;
+  ragflow: RagflowKnowledgeStatus;
+};
+
 export type LiteratureDiscoveryCandidate = {
   candidate_id: string;
   title: string;
@@ -628,6 +743,22 @@ export type LiteratureDiscoveryCandidate = {
   can_parse_pdf: boolean;
   status: "ready_to_parse" | "landing_page_only" | "metadata_only";
   tool_id: string;
+  discovery_query?: string;
+  discovery_call_id?: string;
+  pdf_discovery?: {
+    status: "ready" | "limited" | "failed" | string;
+    tool_id?: string;
+    mcp_tool_name?: string;
+    pdf_urls?: string[];
+  };
+  auto_ingest?: {
+    status: "ingested" | "limited" | "failed" | "pending" | string;
+    paper_id?: string | null;
+    parse_run_id?: string | null;
+    chunks_count?: number | null;
+    rag_search_ready?: boolean | null;
+    message?: string;
+  };
 };
 
 export type LiteratureDiscoveryRequest = {
@@ -635,7 +766,26 @@ export type LiteratureDiscoveryRequest = {
   library_id?: string;
   preferred_source?: "auto" | "all" | "arxiv" | "pubmed" | "scholar";
   max_results?: number;
+  planning_mode?: "llm" | "rules";
+  model_name?: string;
+  auto_discover_pdf_links?: boolean;
+  auto_ingest_pdfs?: boolean;
+  auto_ingest_limit?: number;
   approval: ToolWorkflowApproval;
+};
+
+export type LiteratureDiscoveryPlanner = {
+  mode: "llm" | "rules" | string;
+  model_name?: string | null;
+  intent_summary?: string;
+  reason?: string;
+  domain?: string;
+  fallback_used?: boolean;
+  tool_queries?: Array<{
+    tool_id: string;
+    query: string;
+    rationale?: string;
+  }>;
 };
 
 export type LiteratureDiscoveryResponse = {
@@ -645,22 +795,34 @@ export type LiteratureDiscoveryResponse = {
   message: string;
   mcp: LiteratureMcpStatus;
   tool?: {
+    call_id?: string;
     tool_id: string;
     mcp_tool_name: string;
     display_name: string;
+    query?: string;
+    rationale?: string;
   };
   tools?: Array<{
+    call_id?: string;
     tool_id: string;
     mcp_tool_name: string;
     display_name: string;
+    query?: string;
+    rationale?: string;
   }>;
   source_statuses?: Array<{
+    call_id?: string;
     tool_id: string;
     mcp_tool_name: string;
     display_name: string;
+    query?: string;
+    rationale?: string;
     status: "ready" | "limited" | "failed" | string;
     message: string;
   }>;
+  planner?: LiteratureDiscoveryPlanner;
+  pdf_discovery?: Array<Record<string, unknown>>;
+  auto_ingest?: Array<Record<string, unknown>>;
   candidates: LiteratureDiscoveryCandidate[];
 };
 

@@ -550,14 +550,14 @@ export function ResearchCommandCenter({
           placeholder="例如：研究目标：为某机制生成可证伪假设，并使用已入库文献作为证据"
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
               event.preventDefault();
               event.currentTarget.form?.requestSubmit();
             }
           }}
         />
         <div className="research-chat-composer-actions">
-          <span>{state === "awaiting_confirmation" ? "请先处理确认卡片，或继续补充上下文。" : "Enter 发送，Shift+Enter 换行。"}</span>
+          <span>{state === "awaiting_confirmation" ? "请先处理确认卡片，或继续补充上下文。" : "Enter 换行，Ctrl+Enter 发送。"}</span>
           <button className={classNames("button-primary", busy && "is-loading")} type="submit" disabled={!input.trim() || busy || isBusy} aria-busy={busy}>
             {busy ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
             {busy ? "处理中" : "发送"}
@@ -1053,6 +1053,11 @@ function proposalPreviewFacts(proposal: ResearchChatActionProposal) {
   if (constraintCount > 0) facts.push(`${constraintCount} 条约束`);
   if (preview.parent_run_id) facts.push("基于历史运行继续");
   if (preview.memory_scope) facts.push(`上下文范围：${formatBackendText(String(preview.memory_scope))}`);
+  if (preview.auto_discover_papers) {
+    const discoveryLimit = Number(preview.paper_discovery_limit ?? 0);
+    const ingestLimit = Number(preview.paper_ingest_limit ?? 0);
+    facts.push(`自动检索${discoveryLimit > 0 ? ` ${discoveryLimit} 篇候选` : "论文"}${preview.auto_ingest_papers ? `，入库最多 ${ingestLimit || 4} 篇` : ""}`);
+  }
   return facts;
 }
 

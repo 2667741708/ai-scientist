@@ -8,6 +8,7 @@ and JSON parsing.
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import warnings
@@ -17,6 +18,7 @@ from jsonschema.exceptions import ValidationError
 import litellm
 
 from .cache import get_cache
+from .schema_sanitizer import sanitize_response_schema, sanitize_tools_for_model
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,120 @@ logger = logging.getLogger(__name__)
 # these occur when LiteLLM response objects (Pydantic models) are serialized
 # and have mismatched field counts between streaming/non-streaming responses
 warnings.filterwarnings("ignore", message=r".*Pydantic serializer warnings.*", category=UserWarning)
+
+
+def supports_response_format(model_name: str) -> bool:
+    """Return whether the provider currently accepts OpenAI-style response_format."""
+    normalized = model_name.lower()
+    if normalized.startswith("deepseek/") or is_mimo_model(model_name):
+        return False
+    return True
+
+
+def is_deepseek_model(model_name: str) -> bool:
+    return model_name.lower().startswith("deepseek/")
+
+
+def is_mimo_model(model_name: str) -> bool:
+    normalized = model_name.lower()
+    return (
+        normalized.startswith("openai/mimo-")
+        or normalized.startswith("mimo/")
+        or normalized.startswith("xiaomi/")
+    )
+
+
+def mimo_completion_overrides(model_name: str) -> Dict[str, Any]:
+    """Return LiteLLM OpenAI-compatible transport overrides for MiMo models."""
+    if not is_mimo_model(model_name):
+        return {}
+
+    normalized = model_name.lower()
+    if normalized.startswith("openai/"):
+        transport_model = model_name
+    elif normalized.startswith("mimo/"):
+        transport_model = f"openai/{model_name.split('/', 1)[1]}"
+    elif normalized.startswith("xiaomi/"):
+        transport_model = f"openai/{model_name.split('/', 1)[1]}"
+    else:
+        transport_model = model_name
+
+    api_key = (
+        os.getenv("MIMO_API_KEY")
+        or os.getenv("XIAOMI_MIMO_API_KEY")
+        or os.getenv("MIMOCODE_API_KEY")
+    )
+    overrides: Dict[str, Any] = {
+        "model": transport_model,
+        "api_base": os.getenv("MIMO_API_BASE", "https://api.xiaomimimo.com/v1"),
+        "extra_body": {
+            "thinking": {
+                "type": os.getenv("MIMO_THINKING_TYPE", "disabled"),
+            }
+        },
+    }
+    if api_key:
+        overrides["api_key"] = api_key
+    return overrides
+
+
+def transport_resilience_overrides(model_name: str) -> Dict[str, Any]:
+    """Provider-specific transport options that reduce transient HTTP decode failures."""
+    if not is_deepseek_model(model_name):
+        return {}
+    # DeepSeek's OpenAI-compatible endpoint can occasionally close a compressed
+    # response before the brotli stream is complete. Requesting identity encoding
+    # avoids httpx/brotli decode failures when the server honors the header.
+    return {"extra_headers": {"Accept-Encoding": "identity"}}
+
+
+def is_transient_transport_error(error: Exception) -> bool:
+    message = str(error).lower()
+    transient_markers = (
+        "decompression error",
+        "incomplete compressed stream",
+        "server disconnected",
+        "connection reset",
+        "connection aborted",
+        "remote protocol error",
+        "readerror",
+        "writeerror",
+        "timeout",
+        "temporarily unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "service unavailable",
+    )
+    return any(marker in message for marker in transient_markers)
+
+
+def append_prompt_json_contract(
+    prompt: str,
+    json_schema: Optional[Dict[str, Any]] = None,
+    force_json: bool = False,
+) -> str:
+    """Add a prompt-level JSON contract for providers without response_format support."""
+    if not json_schema and not force_json:
+        return prompt
+
+    lines = [
+        "",
+        "---",
+        "JSON OUTPUT CONTRACT:",
+        "Return only one valid JSON object. Do not include markdown fences, prose, comments, or trailing commas.",
+        "Use double-quoted JSON strings and escape embedded newlines or quotes as required by JSON.",
+    ]
+
+    if json_schema:
+        schema_body = json_schema.get("schema", json_schema)
+        lines.extend(
+            [
+                "The JSON object must satisfy this JSON Schema:",
+                json.dumps(schema_body, ensure_ascii=False),
+            ]
+        )
+
+    return prompt + "\n".join(lines)
 
 
 def attempt_json_repair(
@@ -53,6 +169,45 @@ def attempt_json_repair(
     except json.JSONDecodeError:
         # JSON is malformed, proceed with repair strategies
         pass
+
+    def escape_unescaped_control_chars_in_strings(s: str) -> str:
+        """Escape literal control characters that models sometimes emit inside JSON strings."""
+        repaired: List[str] = []
+        in_string = False
+        escaped = False
+        for char in s:
+            if in_string:
+                if escaped:
+                    repaired.append(char)
+                    escaped = False
+                    continue
+                if char == "\\":
+                    repaired.append(char)
+                    escaped = True
+                    continue
+                if char == '"':
+                    repaired.append(char)
+                    in_string = False
+                    continue
+                if char == "\n":
+                    repaired.append("\\n")
+                    continue
+                if char == "\r":
+                    repaired.append("\\r")
+                    continue
+                if char == "\t":
+                    repaired.append("\\t")
+                    continue
+                if ord(char) < 0x20:
+                    repaired.append(f"\\u{ord(char):04x}")
+                    continue
+                repaired.append(char)
+                continue
+
+            repaired.append(char)
+            if char == '"':
+                in_string = True
+        return "".join(repaired)
 
     def close_truncated_json(s: str) -> str:
         """Try to close truncated JSON by adding missing braces/brackets."""
@@ -110,12 +265,18 @@ def attempt_json_repair(
     minor_repairs = [
         # Remove trailing commas before closing braces/brackets
         lambda s: json.loads(re.sub(r",(\s*[}\]])", r"\1", s)),
+        # Escape literal newlines/tabs inside JSON strings, common in prompt-only JSON mode
+        lambda s: json.loads(escape_unescaped_control_chars_in_strings(s)),
+        lambda s: json.loads(
+            re.sub(r",(\s*[}\]])", r"\1", escape_unescaped_control_chars_in_strings(s))
+        ),
     ]
 
     # Major repairs (indicate truncation/incomplete, only on final retry)
     major_repairs = [
         # Close unterminated strings and truncated JSON (most common Gemini issue)
         lambda s: json.loads(close_truncated_json(s)),
+        lambda s: json.loads(close_truncated_json(escape_unescaped_control_chars_in_strings(s))),
         # Remove trailing commas AND close truncated JSON
         lambda s: json.loads(close_truncated_json(re.sub(r",(\s*[}\]])", r"\1", s))),
         # Aggressively remove incomplete trailing content and close JSON
@@ -227,6 +388,7 @@ async def call_llm(
     temperature: float = 0.7,
     force_json: bool = False,
     json_schema: Optional[Dict[str, Any]] = None,
+    transport_attempts: int = 3,
 ) -> str:
     """
     Call an LLM via litellm and return the response.
@@ -254,6 +416,11 @@ async def call_llm(
             f"(gemini 3 requires temp >= 1.0 to avoid degraded performance)"
         )
 
+    response_format_supported = supports_response_format(model_name)
+    transport_schema = sanitize_response_schema(json_schema, model_name=model_name)
+    if not response_format_supported and (json_schema or force_json):
+        prompt = append_prompt_json_contract(prompt, json_schema=transport_schema, force_json=force_json)
+
     # Check cache first
     cache = get_cache()
     cached_response = cache.get(
@@ -265,63 +432,82 @@ async def call_llm(
 
     logger.debug(f"cache miss for prompt: {prompt[:200]}{'...' if len(prompt) > 200 else ''}")
 
-    try:
-        # Build completion args
-        completion_args = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "drop_params": True,
-        }
+    last_error: Optional[Exception] = None
+    for transport_attempt in range(1, max(1, transport_attempts) + 1):
+        try:
+            # Build completion args
+            completion_args = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "drop_params": True,
+            }
+            completion_args.update(transport_resilience_overrides(model_name))
+            completion_args.update(mimo_completion_overrides(model_name))
 
-        # Try to add response_format based on schema or force_json
-        if json_schema:
-            try:
-                completion_args["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": json_schema,
-                }
-            except Exception as e:
-                # Some models/providers don't support json_schema, fall back to json_object
-                logger.warning(f"JSON schema not supported, falling back to json_object: {e}")
+            # Try to add response_format based on schema or force_json.
+            # Some providers, including DeepSeek's current API, reject this parameter,
+            # so those models rely on the prompt-level JSON contract above.
+            if transport_schema and response_format_supported:
+                try:
+                    completion_args["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": transport_schema,
+                    }
+                except Exception as e:
+                    # Some models/providers don't support json_schema, fall back to json_object
+                    logger.warning(f"JSON schema not supported, falling back to json_object: {e}")
+                    try:
+                        completion_args["response_format"] = {"type": "json_object"}
+                    except Exception:
+                        # Some models/providers don't support this either, silently continue
+                        pass
+            elif force_json and response_format_supported:
                 try:
                     completion_args["response_format"] = {"type": "json_object"}
                 except Exception:
-                    # Some models/providers don't support this either, silently continue
+                    # Some models/providers don't support this, silently continue
                     pass
-        elif force_json:
-            try:
-                completion_args["response_format"] = {"type": "json_object"}
-            except Exception:
-                # Some models/providers don't support this, silently continue
-                pass
 
-        response = await litellm.acompletion(**completion_args)
+            response = await litellm.acompletion(**completion_args)
 
-        content = response.choices[0].message.content
+            content = response.choices[0].message.content
 
-        if content is None or not content.strip():
-            logger.error(f"LLM returned None or empty content. Response: {response}")
-            raise ValueError(f"LLM returned None or empty content. Model: {model_name}")
+            if content is None or not content.strip():
+                logger.error(f"LLM returned None or empty content. Response: {response}")
+                raise ValueError(f"LLM returned None or empty content. Model: {model_name}")
 
-        # Cache the response (only reached if content is valid)
-        cache.set(
-            prompt,
-            model_name,
-            temperature,
-            max_tokens,
-            {"text": content},
-            json_schema=json_schema,
-            force_json=force_json,
-        )
+            # Cache the response (only reached if content is valid)
+            cache.set(
+                prompt,
+                model_name,
+                temperature,
+                max_tokens,
+                {"text": content},
+                json_schema=json_schema,
+                force_json=force_json,
+            )
 
-        return content
+            return content
 
-    except Exception as e:
-        logger.error(f"LLM call failed: {e}")
-        logger.error(f"Model: {model_name}, max_tokens: {max_tokens}")
-        raise
+        except Exception as e:
+            last_error = e
+            logger.error(f"LLM call failed: {e}")
+            logger.error(f"Model: {model_name}, max_tokens: {max_tokens}")
+            if transport_attempt < max(1, transport_attempts) and is_transient_transport_error(e):
+                delay = min(1.5 * transport_attempt, 5.0)
+                logger.warning(
+                    "Transient LLM transport error on attempt "
+                    f"{transport_attempt}/{transport_attempts}; retrying in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"LLM call failed without response. Model: {model_name}")
 
 
 async def call_llm_json(
@@ -622,6 +808,8 @@ async def call_llm_with_tools(
             f"(gemini 3 requires temp >= 1.0 to avoid degraded performance)"
         )
 
+    transport_tools = sanitize_tools_for_model(tools, model_name=model_name) or []
+
     # Check cache first
     cache = get_cache()
     cached_response = cache.get(prompt, model_name, temperature, max_tokens, tools=tools)
@@ -638,14 +826,16 @@ async def call_llm_with_tools(
 
         try:
             # Call LLM with tools
-            response = await litellm.acompletion(
-                model=model_name,
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                drop_params=True,
-            )
+            completion_args = {
+                "model": model_name,
+                "messages": messages,
+                "tools": transport_tools,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "drop_params": True,
+            }
+            completion_args.update(mimo_completion_overrides(model_name))
+            response = await litellm.acompletion(**completion_args)
 
             message = response.choices[0].message
 

@@ -10,8 +10,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -47,6 +47,19 @@ htmlcov/
 .coscientist_prompts/
 open_coscientist_states/
 *.log
+.auth/
+
+# Local Studio runtime state and generated evidence. Keep these out of source
+# control: they can contain model outputs, local paths, terminal logs, PDFs,
+# recordings, and developer-only test artifacts.
+/artifacts/
+/webapp/.knowledge_base/
+/webapp/.codex/
+/webapp/artifacts/
+/webapp/test-results/
+/webapp/*-smoke.png
+/webapp/*-debug*.png
+/webapp/redesign-qa-screenshot.png
 
 # Logs directory
 logs/

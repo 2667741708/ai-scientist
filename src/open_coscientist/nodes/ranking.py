@@ -5,8 +5,10 @@ Ranking node - Elo-based pairwise comparison of hypotheses.
 import asyncio
 import hashlib
 import logging
-import random
+import math
+import re
 from copy import deepcopy
+from itertools import combinations
 from typing import Any, Dict, List, Tuple
 
 from ..constants import (
@@ -25,6 +27,109 @@ logger = logging.getLogger(__name__)
 
 # Semaphore to limit concurrent LLM calls (avoid rate limits)
 _ranking_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+
+
+def hypothesis_identifier(hypothesis: Hypothesis) -> str:
+    """Return a stable audit identifier for a hypothesis."""
+    digest = hashlib.sha1(hypothesis.text.encode("utf-8")).hexdigest()[:10].upper()
+    return f"HYP-{digest}"
+
+
+def confidence_to_score(confidence_level: str | None) -> float:
+    """Convert the judge's qualitative confidence into a compact audit score."""
+    normalized = (confidence_level or "").strip().lower()
+    if normalized == "high":
+        return 0.85
+    if normalized == "medium":
+        return 0.6
+    if normalized == "low":
+        return 0.35
+    return 0.0
+
+
+def _hypothesis_newness_score(hypothesis: Hypothesis) -> float:
+    """Approximate the paper's newer-hypothesis priority with local metadata."""
+    method = (hypothesis.generation_method or "").lower()
+    if hypothesis.evolution_history or "evol" in method or "new" in method:
+        return 1.0
+    if hypothesis.debate_id is not None:
+        return 0.5
+    return 0.0
+
+
+def _token_similarity(text_a: str, text_b: str) -> float:
+    tokens_a = set(re.findall(r"[A-Za-z0-9_]+", text_a.lower()))
+    tokens_b = set(re.findall(r"[A-Za-z0-9_]+", text_b.lower()))
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+def _similarity_priority(hypothesis_a: Hypothesis, hypothesis_b: Hypothesis) -> float:
+    cluster_a = hypothesis_a.similarity_cluster_id
+    cluster_b = hypothesis_b.similarity_cluster_id
+    if cluster_a and cluster_b and cluster_a == cluster_b:
+        return 2.0
+    return _token_similarity(hypothesis_a.text, hypothesis_b.text)
+
+
+def _top_ranked_cutoff(hypothesis_count: int) -> int:
+    return max(2, min(5, math.ceil(hypothesis_count * 0.4)))
+
+
+def _comparison_mode(
+    hypothesis_a: Hypothesis,
+    hypothesis_b: Hypothesis,
+    index_by_object: Dict[int, int],
+    hypothesis_count: int,
+) -> Tuple[str, int]:
+    top_cutoff = _top_ranked_cutoff(hypothesis_count)
+    if (
+        index_by_object[id(hypothesis_a)] < top_cutoff
+        and index_by_object[id(hypothesis_b)] < top_cutoff
+    ):
+        return "debate", 3
+    return "single_turn", 0
+
+
+def _pair_priority(
+    hypothesis_a: Hypothesis,
+    hypothesis_b: Hypothesis,
+    index_by_object: Dict[int, int],
+    hypothesis_count: int,
+) -> Dict[str, float]:
+    index_a = index_by_object[id(hypothesis_a)]
+    index_b = index_by_object[id(hypothesis_b)]
+    top_ranked = ((hypothesis_count - index_a) + (hypothesis_count - index_b)) / (
+        2 * hypothesis_count
+    )
+    newer = (_hypothesis_newness_score(hypothesis_a) + _hypothesis_newness_score(hypothesis_b)) / 2
+    proximity = _similarity_priority(hypothesis_a, hypothesis_b)
+    return {
+        "proximity": round(proximity, 3),
+        "newer_hypotheses": round(newer, 3),
+        "top_ranked": round(top_ranked, 3),
+    }
+
+
+def _pair_sort_key(
+    pair: Tuple[Hypothesis, Hypothesis],
+    index_by_object: Dict[int, int],
+    hypothesis_count: int,
+    seed_string: str,
+) -> Tuple[float, float, float, str]:
+    hypothesis_a, hypothesis_b = pair
+    priority = _pair_priority(hypothesis_a, hypothesis_b, index_by_object, hypothesis_count)
+    pair_seed = "|".join(
+        sorted([hypothesis_identifier(hypothesis_a), hypothesis_identifier(hypothesis_b)])
+    )
+    tiebreaker = hashlib.md5(f"{seed_string}:{pair_seed}".encode()).hexdigest()
+    return (
+        -priority["proximity"],
+        -priority["newer_hypotheses"],
+        -priority["top_ranked"],
+        tiebreaker,
+    )
 
 
 def _short_ranking_guidance(value: Any, limit: int = 220) -> str:
@@ -107,6 +212,68 @@ def augment_ranking_supervisor_guidance(
     augmented["research_goal_analysis"] = goal_analysis
     return augmented
 
+
+def calculate_tournament_rounds(hypothesis_count: int) -> int:
+    """Choose a bounded tournament size while keeping small pools exhaustive."""
+    if hypothesis_count < 2:
+        return 0
+    total_unique_pairs = hypothesis_count * (hypothesis_count - 1) // 2
+    if hypothesis_count <= 6:
+        return total_unique_pairs
+    return min(total_unique_pairs, max(hypothesis_count, hypothesis_count * 2))
+
+
+def build_tournament_pairings(
+    hypotheses: List[Hypothesis],
+    seed_string: str,
+    max_rounds: int | None = None,
+) -> List[Tuple[Hypothesis, Hypothesis]]:
+    """
+    Build deterministic tournament pairings that match the paper-derived priorities.
+
+    The scheduler prefers similar, newer, and top-ranked hypotheses, while ensuring every
+    hypothesis competes at least once when the tournament budget allows it.
+    """
+    if len(hypotheses) < 2:
+        return []
+
+    index_by_object = {id(hypothesis): index for index, hypothesis in enumerate(hypotheses)}
+    total_unique_pairs = len(hypotheses) * (len(hypotheses) - 1) // 2
+    rounds = max_rounds or calculate_tournament_rounds(len(hypotheses))
+    rounds = min(rounds, total_unique_pairs)
+
+    candidate_pairs = list(combinations(hypotheses, 2))
+    candidate_pairs.sort(
+        key=lambda pair: _pair_sort_key(pair, index_by_object, len(hypotheses), seed_string)
+    )
+
+    selected_pairs: List[Tuple[Hypothesis, Hypothesis]] = []
+    selected_keys: set[Tuple[str, str]] = set()
+    covered: set[int] = set()
+
+    def add_pair(pair: Tuple[Hypothesis, Hypothesis]) -> None:
+        key = tuple(sorted([hypothesis_identifier(pair[0]), hypothesis_identifier(pair[1])]))
+        if key in selected_keys or len(selected_pairs) >= rounds:
+            return
+        selected_pairs.append(pair)
+        selected_keys.add(key)
+        covered.add(id(pair[0]))
+        covered.add(id(pair[1]))
+
+    for pair in candidate_pairs:
+        if len(covered) == len(hypotheses):
+            break
+        if id(pair[0]) not in covered or id(pair[1]) not in covered:
+            add_pair(pair)
+
+    for pair in candidate_pairs:
+        if len(selected_pairs) >= rounds:
+            break
+        add_pair(pair)
+
+    return selected_pairs
+
+
 def calculate_elo_update(
     winner_elo: int, loser_elo: int, k_factor: int = ELO_K_FACTOR
 ) -> Tuple[int, int]:
@@ -141,6 +308,8 @@ async def judge_matchup(
     run_id: str | None = None,
     matchup_index: int | None = None,
     tool_registry: Any | None = None,
+    comparison_mode: str = "single_turn",
+    debate_turns_requested: int = 0,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Have LLM judge which hypothesis is superior.
@@ -214,6 +383,8 @@ async def judge_matchup(
         reflection_notes_a=reflection_notes_a,
         reflection_notes_b=reflection_notes_b,
         tool_registry=tool_registry,
+        comparison_mode=comparison_mode,
+        debate_turns_requested=debate_turns_requested,
     )
 
     # save prompt to disk for debugging
@@ -232,6 +403,8 @@ async def judge_matchup(
                 "prompt_length_chars": len(prompt),
                 "has_reflection_a": bool(reflection_notes_a),
                 "has_reflection_b": bool(reflection_notes_b),
+                "comparison_mode": comparison_mode,
+                "debate_turns_requested": debate_turns_requested,
             },
         )
 
@@ -267,7 +440,8 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
     judges which hypothesis is superior. Elo ratings are updated after each
     matchup to reflect relative quality.
 
-    Tournament rounds = len(hypotheses) * 1 (can be adjusted)
+    Tournament rounds are unique pairwise comparisons. Small pools are exhaustive;
+    larger pools are bounded while prioritizing similar, newer, and top-ranked hypotheses.
 
     deterministic seeding: the random pairings are seeded using research_goal
     and current_iteration to ensure cache consistency across runs. this allows
@@ -319,10 +493,6 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
         if hyp.elo_rating == INITIAL_ELO_RATING:  # Default value from dataclass
             hyp.elo_rating = INITIAL_ELO_RATING
 
-    # Calculate number of tournament rounds
-    tournament_rounds = len(hypotheses) * 1
-    logger.info(f"Running {tournament_rounds} tournament rounds")
-
     # Get supervisor guidance and tool registry from state
     supervisor_guidance = augment_ranking_supervisor_guidance(
         state.get("supervisor_guidance"),
@@ -330,17 +500,18 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
     )
     tool_registry = state.get("tool_registry")
 
-    # Set deterministic random seed based on research goal and iteration
-    # this ensures same inputs produce same tournament pairings for cache consistency
-    # use hashlib instead of hash() for deterministic results across python processes
+    # Set deterministic pair scheduling context based on research goal and iteration.
+    # This ensures same inputs produce same tournament pairings for cache consistency.
     research_goal = state["research_goal"]
     current_iteration = state.get("current_iteration", 0)
     seed_string = f"{research_goal}_{current_iteration}"
-    seed = int(hashlib.md5(seed_string.encode()).hexdigest()[:8], 16)
-    random.seed(seed)
 
-    # Prepare all random pairwise matchups and judge them in parallel
-    pairings = [tuple(random.sample(hypotheses, 2)) for _ in range(tournament_rounds)]
+    # Prepare prioritized, non-duplicated pairwise matchups and judge them in parallel
+    pairings = build_tournament_pairings(hypotheses, seed_string=seed_string)
+    tournament_rounds = len(pairings)
+    logger.info(f"Running {tournament_rounds} tournament rounds")
+    index_by_object = {id(hypothesis): index for index, hypothesis in enumerate(hypotheses)}
+
     results = await asyncio.gather(
         *[
             judge_matchup(
@@ -352,6 +523,8 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
                 run_id=state.get("run_id"),
                 matchup_index=i,
                 tool_registry=tool_registry,
+                comparison_mode=_comparison_mode(a, b, index_by_object, len(hypotheses))[0],
+                debate_turns_requested=_comparison_mode(a, b, index_by_object, len(hypotheses))[1],
             )
             for i, (a, b) in enumerate(pairings)
         ]
@@ -361,8 +534,13 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
     llm_calls = tournament_rounds
     matchup_details = []
 
-    for (hyp_a, hyp_b), (winner, response) in zip(pairings, results):
+    for matchup_number, ((hyp_a, hyp_b), (winner, response)) in enumerate(
+        zip(pairings, results), start=1
+    ):
         winner_hyp, loser_hyp = (hyp_a, hyp_b) if winner == "a" else (hyp_b, hyp_a)
+        loser = "b" if winner == "a" else "a"
+        old_a_elo = hyp_a.elo_rating
+        old_b_elo = hyp_b.elo_rating
         old_winner_elo = winner_hyp.elo_rating
         old_loser_elo = loser_hyp.elo_rating
 
@@ -386,17 +564,58 @@ async def ranking_node(state: WorkflowState) -> Dict[str, Any]:
         if not reasoning:
             reasoning = "No reasoning provided"
 
+        hypothesis_a_id = hypothesis_identifier(hyp_a)
+        hypothesis_b_id = hypothesis_identifier(hyp_b)
+        winner_id = hypothesis_identifier(winner_hyp)
+        loser_id = hypothesis_identifier(loser_hyp)
+        confidence_level = response.get("confidence_level", "Unknown")
+        comparison_mode, debate_turns_requested = _comparison_mode(
+            hyp_a, hyp_b, index_by_object, len(hypotheses)
+        )
+        priority = _pair_priority(hyp_a, hyp_b, index_by_object, len(hypotheses))
+        after_a_elo = new_winner_elo if winner == "a" else new_loser_elo
+        after_b_elo = new_winner_elo if winner == "b" else new_loser_elo
+
         matchup_details.append(
             {
+                "matchup_id": f"matchup-{matchup_number:03d}",
+                "round": matchup_number,
                 "hypothesis_a": hyp_a.text[:200] + "..." if len(hyp_a.text) > 200 else hyp_a.text,
                 "hypothesis_b": hyp_b.text[:200] + "..." if len(hyp_b.text) > 200 else hyp_b.text,
+                "hypothesis_a_id": hypothesis_a_id,
+                "hypothesis_b_id": hypothesis_b_id,
                 "winner": winner,
+                "loser": loser,
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+                "winner_label": "Hypothesis A" if winner == "a" else "Hypothesis B",
+                "loser_label": "Hypothesis B" if winner == "a" else "Hypothesis A",
                 "reasoning": reasoning,
-                "confidence": response.get("confidence_level", "Unknown"),
+                "confidence": confidence_level,
+                "confidence_level": confidence_level,
+                "confidence_score": confidence_to_score(confidence_level),
+                "comparison_mode": comparison_mode,
+                "debate_turns_requested": debate_turns_requested,
+                "pairing_priority": priority,
+                "before_elo": {
+                    hypothesis_a_id: old_a_elo,
+                    hypothesis_b_id: old_b_elo,
+                },
+                "after_elo": {
+                    hypothesis_a_id: after_a_elo,
+                    hypothesis_b_id: after_b_elo,
+                },
+                "elo_delta": {
+                    winner_id: new_winner_elo - old_winner_elo,
+                    loser_id: new_loser_elo - old_loser_elo,
+                },
                 "winner_elo_before": old_winner_elo,
                 "winner_elo_after": new_winner_elo,
+                "winner_elo_delta": new_winner_elo - old_winner_elo,
                 "loser_elo_before": old_loser_elo,
                 "loser_elo_after": new_loser_elo,
+                "loser_elo_delta": new_loser_elo - old_loser_elo,
+                "debate_trace": response.get("debate_trace", []),
             }
         )
 

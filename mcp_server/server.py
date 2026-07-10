@@ -1,8 +1,8 @@
 """
 Open Coscientist literature review mcp server
 
-Reference implementation using fastmcp for pubmed literature review tools.
-Pubmed-only implementation for biomedical research.
+Reference implementation using fastmcp for literature review tools.
+Includes PubMed/PMC, arXiv, and best-effort public Google Scholar search.
 """
 
 import os
@@ -32,6 +32,20 @@ logging.getLogger('mcp_server').setLevel(log_level)
 
 from mcp_server.tools.lit_review.search_pubmed import check_pubmed_available, search_pubmed
 from mcp_server.tools.lit_review.pubmed_search_with_fulltext import pubmed_search_with_fulltext
+from mcp_server.tools.lit_review.academic_search import (
+    find_pdf_links,
+    generate_queries_hypotheses,
+    read_pdf,
+    read_url,
+    search_arxiv,
+    search_google_scholar,
+)
+from mcp_server.tools.lit_review.source_artifacts import (
+    download_arxiv_source,
+    download_github_repository,
+    find_github_repository_links,
+    read_downloaded_source_file,
+)
 from mcp_server.tools.indra_cogex import (
     query_gene_disease_network,
     query_gene_codependents,
@@ -57,6 +71,16 @@ mcp = FastMCP("open-coscientist-lit-review")
 mcp.tool(check_pubmed_available,       name="check_pubmed_available")
 mcp.tool(search_pubmed,                name="search_pubmed")
 mcp.tool(pubmed_search_with_fulltext,  name="pubmed_search_with_fulltext")
+mcp.tool(search_arxiv,                 name="search_arxiv")
+mcp.tool(search_google_scholar,        name="search_google_scholar")
+mcp.tool(read_url,                     name="read_url")
+mcp.tool(read_pdf,                     name="read_pdf")
+mcp.tool(find_pdf_links,               name="find_pdf_links")
+mcp.tool(generate_queries_hypotheses,  name="generate_queries_hypotheses")
+mcp.tool(download_arxiv_source,        name="download_arxiv_source")
+mcp.tool(download_github_repository,   name="download_github_repository")
+mcp.tool(find_github_repository_links, name="find_github_repository_links")
+mcp.tool(read_downloaded_source_file,  name="read_downloaded_source_file")
 
 # register INDRA CoGex knowledge graph tools
 mcp.tool(query_gene_disease_network,    name="query_gene_disease_network")
@@ -91,6 +115,16 @@ async def root():
             "check_pubmed_available",
             "search_pubmed",
             "pubmed_search_with_fulltext",
+            "search_arxiv",
+            "search_google_scholar",
+            "read_url",
+            "read_pdf",
+            "find_pdf_links",
+            "generate_queries_hypotheses",
+            "download_arxiv_source",
+            "download_github_repository",
+            "find_github_repository_links",
+            "read_downloaded_source_file",
             "query_gene_disease_network",
             "query_gene_codependents",
             "query_drug_info",
@@ -104,6 +138,10 @@ async def root():
             "ENTREZ_EMAIL": entrez_email_present,
         },
         "integrations": {
+            "arxiv": "https://export.arxiv.org/api/query",
+            "arxiv_source": "https://arxiv.org/e-print/{arxiv_id}",
+            "google_scholar": "https://scholar.google.com/scholar",
+            "github": "https://codeload.github.com/{owner}/{repo}/zip/{ref}",
             "indra_cogex": os.getenv("INDRA_COGEX_URL", "https://discovery.indra.bio"),
         }
     })

@@ -10,7 +10,9 @@ Supports both single-server (legacy) and multi-server configurations.
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import time
+from contextvars import ContextVar, Token
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -19,6 +21,32 @@ if TYPE_CHECKING:
     from .config import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+MCPToolCallObserver = Callable[[Dict[str, Any]], None]
+_mcp_tool_call_observer: ContextVar[Optional[MCPToolCallObserver]] = ContextVar(
+    "mcp_tool_call_observer",
+    default=None,
+)
+
+
+def set_mcp_tool_call_observer(observer: Optional[MCPToolCallObserver]) -> Token:
+    """Set a context-local MCP tool-call observer and return a reset token."""
+    return _mcp_tool_call_observer.set(observer)
+
+
+def reset_mcp_tool_call_observer(token: Token) -> None:
+    """Reset the context-local MCP tool-call observer."""
+    _mcp_tool_call_observer.reset(token)
+
+
+def _emit_mcp_tool_call_event(event: Dict[str, Any]) -> None:
+    observer = _mcp_tool_call_observer.get()
+    if observer is None:
+        return
+    try:
+        observer(event)
+    except Exception as exc:
+        logger.warning("MCP tool-call observer failed: %s", exc)
 
 
 class MCPToolClient:
@@ -143,19 +171,46 @@ class MCPToolClient:
 
         logger.debug(f"calling mcp tool: {tool_name} with args: {kwargs}")
 
-        result = await self._tools_dict[tool_name].ainvoke(kwargs)
+        started_at = time.time()
+        try:
+            result = await self._tools_dict[tool_name].ainvoke(kwargs)
 
-        # wrap to support earlier/recent langchain versions
-        if isinstance(result, list) and len(result) > 0:
-            if isinstance(result[0], dict) and "text" in result[0]:
-                result = result[0]["text"]
+            # wrap to support earlier/recent langchain versions
+            if isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], dict) and "text" in result[0]:
+                    result = result[0]["text"]
 
-        logger.debug(
-            f"mcp tool result for {tool_name}: "
-            f"{str(result)[:200]}{'...' if len(str(result)) > 200 else ''}"
-        )
-
-        return result
+            logger.debug(
+                f"mcp tool result for {tool_name}: "
+                f"{str(result)[:200]}{'...' if len(str(result)) > 200 else ''}"
+            )
+            _emit_mcp_tool_call_event(
+                {
+                    "tool_name": tool_name,
+                    "arguments": kwargs,
+                    "status": "complete",
+                    "result": result,
+                    "result_preview": str(result)[:700],
+                    "result_size": len(str(result).encode("utf-8")),
+                    "duration_seconds": round(time.time() - started_at, 4),
+                    "server": self.get_server_for_tool(tool_name),
+                    "call_path": "call_tool",
+                }
+            )
+            return result
+        except Exception as exc:
+            _emit_mcp_tool_call_event(
+                {
+                    "tool_name": tool_name,
+                    "arguments": kwargs,
+                    "status": "error",
+                    "error": str(exc),
+                    "duration_seconds": round(time.time() - started_at, 4),
+                    "server": self.get_server_for_tool(tool_name),
+                    "call_path": "call_tool",
+                }
+            )
+            raise
 
     async def execute_tool_call(self, tool_call) -> Dict[str, Any]:
         """
@@ -175,19 +230,48 @@ class MCPToolClient:
 
         logger.debug(f"executing mcp tool: {tool_name} with args: {tool_args}")
 
-        # execute using the original MCP tool
-        result = await self._tools_dict[tool_name].ainvoke(tool_args)
+        started_at = time.time()
+        try:
+            # execute using the original MCP tool
+            result = await self._tools_dict[tool_name].ainvoke(tool_args)
 
-        logger.debug(
-            f"mcp tool result for {tool_name}: {str(result)[:200]}{'...' if len(str(result)) > 200 else ''}"
-        )
-
-        return {
-            "role": "tool",
-            "name": tool_name,
-            "tool_call_id": tool_call.id,
-            "content": result,  # MCP tools return strings (often JSON)
-        }
+            logger.debug(
+                f"mcp tool result for {tool_name}: {str(result)[:200]}{'...' if len(str(result)) > 200 else ''}"
+            )
+            _emit_mcp_tool_call_event(
+                {
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "complete",
+                    "result": result,
+                    "result_preview": str(result)[:700],
+                    "result_size": len(str(result).encode("utf-8")),
+                    "duration_seconds": round(time.time() - started_at, 4),
+                    "server": self.get_server_for_tool(tool_name),
+                    "tool_call_id": tool_call.id,
+                    "call_path": "execute_tool_call",
+                }
+            )
+            return {
+                "role": "tool",
+                "name": tool_name,
+                "tool_call_id": tool_call.id,
+                "content": result,  # MCP tools return strings (often JSON)
+            }
+        except Exception as exc:
+            _emit_mcp_tool_call_event(
+                {
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "status": "error",
+                    "error": str(exc),
+                    "duration_seconds": round(time.time() - started_at, 4),
+                    "server": self.get_server_for_tool(tool_name),
+                    "tool_call_id": tool_call.id,
+                    "call_path": "execute_tool_call",
+                }
+            )
+            raise
 
     def get_tools(
         self, whitelist: Optional[List[str]] = None

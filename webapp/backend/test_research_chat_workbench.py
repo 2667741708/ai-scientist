@@ -97,6 +97,8 @@ def planner_json(
             "search_session_history": "history.session_search",
             "run_terminal_command": "runtime.terminal_command",
             "run_ssh_training_command": "runtime.ssh_training_command",
+            "snapshot_local_file": "file.source_snapshot",
+            "register_project_tool": "tool.register_draft",
         }.get(intent)
     if requires_confirmation is None:
         requires_confirmation = execution_mode == "approval_required"
@@ -709,6 +711,160 @@ def test_research_chat_can_propose_and_confirm_command_workflows() -> None:
             studio.call_research_chat_planner_llm = original_planner
 
 
+def test_research_chat_can_propose_file_snapshot_and_register_tool_draft() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        studio = load_studio(tmp)
+        source_root = Path(tmp) / "source"
+        source_root.mkdir()
+        source_file = source_root / "notes.py"
+        source_file.write_text(
+            "\n".join(
+                [
+                    "def evidence_note():",
+                    "    return 'local source snapshot evidence'",
+                    "",
+                    "VALUE = evidence_note()",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        original_source_root = studio.SOURCE_EVIDENCE_ROOT
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.SOURCE_EVIDENCE_ROOT = source_root
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json(
+                "snapshot_local_file",
+                execution_mode="approval_required",
+                grounding_boundary="local_file_snapshot",
+                inputs={"source_path": "notes.py", "start_line": 1, "line_count": 2},
+            ),
+            planner_json(
+                "register_project_tool",
+                execution_mode="approval_required",
+                grounding_boundary="tool_registry_draft",
+                inputs={
+                    "tool_name": "search_local_notes",
+                    "description": "Search project-local note snippets after a reviewed adapter is implemented.",
+                    "toolset": "project_custom",
+                    "phases": ["evidence_audit"],
+                    "risk_level": "read",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "description": "Search query"}},
+                        "required": ["query"],
+                    },
+                },
+            ),
+        )
+        client = TestClient(studio.app)
+        try:
+            capabilities = client.get("/api/research-chat/capabilities")
+            assert capabilities.status_code == 200, capabilities.text
+            intents = {item["intent"] for item in capabilities.json()["capabilities"]}
+            assert {"snapshot_local_file", "register_project_tool"}.issubset(intents)
+
+            snapshot_turn = client.post(
+                "/api/research-chat/turn",
+                json={"message": "读取本地文件快照：notes.py", "context": {"mode": "workspace", "language": "zh"}},
+            )
+            assert snapshot_turn.status_code == 200, snapshot_turn.text
+            snapshot_proposal = snapshot_turn.json()["assistant_message"]["proposal"]
+            assert snapshot_proposal["intent"] == "snapshot_local_file"
+            assert snapshot_proposal["approvalScope"] == "file.source_snapshot"
+            assert snapshot_proposal["executionTarget"] == "workflow.file_snapshot"
+
+            snapshot_confirmed = client.post(
+                f"/api/research-chat/actions/{snapshot_proposal['actionId']}/confirm",
+                json={"approval": {"confirmed": True, "scope": "file.source_snapshot", "reason": "test source snapshot"}},
+            )
+            assert snapshot_confirmed.status_code == 200, snapshot_confirmed.text
+            snapshot_result = snapshot_confirmed.json()["assistant_message"]["result"]
+            assert snapshot_result["intent"] == "snapshot_local_file"
+            assert snapshot_result["relativePath"] == "notes.py"
+            assert snapshot_result["lineCount"] == 2
+            assert snapshot_result["resultRef"]["result_id"]
+
+            register_turn = client.post(
+                "/api/research-chat/turn",
+                json={
+                    "message": "注册工具 tool_name: search_local_notes description: Search project notes",
+                    "context": {"mode": "workspace", "language": "zh"},
+                },
+            )
+            assert register_turn.status_code == 200, register_turn.text
+            register_proposal = register_turn.json()["assistant_message"]["proposal"]
+            assert register_proposal["intent"] == "register_project_tool"
+            assert register_proposal["approvalScope"] == "tool.register_draft"
+            assert register_proposal["executionTarget"] == "workflow.tool_register_draft"
+
+            register_confirmed = client.post(
+                f"/api/research-chat/actions/{register_proposal['actionId']}/confirm",
+                json={"approval": {"confirmed": True, "scope": "tool.register_draft", "reason": "test project tool draft"}},
+            )
+            assert register_confirmed.status_code == 200, register_confirmed.text
+            register_result = register_confirmed.json()["assistant_message"]["result"]
+            assert register_result["intent"] == "register_project_tool"
+            assert register_result["registeredToolName"] == "project.search_local_notes"
+            assert register_result["executionStatus"] == "schema_registered_only"
+
+            registry = client.get("/api/tools/registry", params={"toolset": "project_custom"})
+            assert registry.status_code == 200, registry.text
+            project_tools = registry.json()["tools"]
+            registered = next(item for item in project_tools if item["name"] == "project.search_local_notes")
+            assert registered["availability"]["available"] is False
+            assert registered["availability"]["mode"] == "registered_draft"
+            assert registered["input_schema"]["required"] == ["query"]
+        finally:
+            studio.SOURCE_EVIDENCE_ROOT = original_source_root
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
+
+
+def test_research_chat_auto_approves_safe_actions_when_policy_allows() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        studio = load_studio(tmp)
+        source_root = Path(tmp) / "source"
+        source_root.mkdir()
+        (source_root / "safe_note.py").write_text("ANSWER = 'auto approved snapshot'\n", encoding="utf-8")
+        original_source_root = studio.SOURCE_EVIDENCE_ROOT
+        original_has_key = studio.has_model_provider_key
+        original_planner = studio.call_research_chat_planner_llm
+        studio.SOURCE_EVIDENCE_ROOT = source_root
+        studio.set_command_permission_policy(studio.KB_ROOT, "approve_safe")
+        studio.has_model_provider_key = lambda model_name: True
+        studio.call_research_chat_planner_llm = planner_sequence(
+            planner_json(
+                "snapshot_local_file",
+                execution_mode="approval_required",
+                grounding_boundary="local_file_snapshot",
+                inputs={"source_path": "safe_note.py", "start_line": 1, "line_count": 1},
+            )
+        )
+        client = TestClient(studio.app)
+        try:
+            response = client.post(
+                "/api/research-chat/turn",
+                json={"message": "读取本地文件快照：safe_note.py", "context": {"mode": "workspace", "language": "zh"}},
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["state"] == "complete"
+            assistant = payload["assistant_message"]
+            assert assistant["kind"] == "result_summary"
+            assert "proposal" not in assistant
+            result = assistant["result"]
+            assert result["intent"] == "snapshot_local_file"
+            assert result["relativePath"] == "safe_note.py"
+            assert result["autoApproval"]["mode"] == "approve_safe"
+            assert result["autoApproval"]["risk"]["risk_level"] == "safe"
+        finally:
+            studio.SOURCE_EVIDENCE_ROOT = original_source_root
+            studio.has_model_provider_key = original_has_key
+            studio.call_research_chat_planner_llm = original_planner
+
+
 def test_literature_capability_uses_registered_mcp_tool() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         studio = load_studio(tmp)
@@ -873,6 +1029,8 @@ def test_literature_discovery_search_engine_can_query_all_public_sources() -> No
                 "library_id": "library_default",
                 "preferred_source": "all",
                 "max_results": 6,
+                "planning_mode": "rules",
+                "auto_discover_pdf_links": False,
                 "approval": {
                     "confirmed": True,
                     "scope": "mcp.literature_review",

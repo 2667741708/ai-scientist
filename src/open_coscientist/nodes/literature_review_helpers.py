@@ -119,6 +119,14 @@ def build_article_from_metadata(
     """Build an Article object from MCP response metadata."""
     year = _parse_year_from_metadata(metadata)
     url = _build_article_url(paper_id, metadata, source_name)
+    pdf_links = metadata.get("pdf_links") or []
+    if metadata.get("pdf_url") and metadata["pdf_url"] not in pdf_links:
+        pdf_links = [*pdf_links, metadata["pdf_url"]]
+
+    try:
+        citations = int(metadata.get("citations") or 0)
+    except (TypeError, ValueError):
+        citations = 0
 
     return Article(
         title=metadata.get("title", "unknown"),
@@ -126,12 +134,12 @@ def build_article_from_metadata(
         authors=metadata.get("authors", []),
         year=year,
         venue=metadata.get("publication") or metadata.get("venue"),
-        citations=0,
+        citations=citations,
         abstract=metadata.get("abstract"),
         content=metadata.get("fulltext"),
         source_id=paper_id,
         source=source_name,
-        pdf_links=[],
+        pdf_links=pdf_links,
         used_in_analysis=used_in_analysis,
     )
 

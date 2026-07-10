@@ -12,7 +12,7 @@ authors = [
     {name = "Jataware Corp", email = "info@jataware.com"}
 ]
 license = {text = "Proprietary"}
-keywords = ["mcp", "pubmed", "literature-review"]
+keywords = ["mcp", "pubmed", "arxiv", "google-scholar", "github", "source-artifacts", "literature-review"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -26,6 +26,7 @@ dependencies = [
     "beautifulsoup4~=4.14.3",
     "lxml~=6.0.2",
     "biopython~=1.86",
+    "pdfminer.six>=20240706",
     "python-dotenv~=1.2.1",
     "uvicorn~=0.40.0",
 ]

@@ -371,6 +371,8 @@ def get_ranking_prompt(
     reflection_notes_a: str | None = None,
     reflection_notes_b: str | None = None,
     tool_registry: Optional[Any] = None,
+    comparison_mode: str = "single_turn",
+    debate_turns_requested: int = 0,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Get the ranking (and tournament) comparison prompt and schema."""
     variables = {
@@ -392,6 +394,18 @@ def get_ranking_prompt(
     variables["hypothesis_b_reflection_notes"] = (
         reflection_notes_b or "No reflection notes available."
     )
+    if comparison_mode == "debate":
+        variables["comparison_mode_guidance"] = (
+            "Use the simulated scientific debate mode for this top-ranked matchup. "
+            f"Run {debate_turns_requested or 3} concise turns before the final judgment: "
+            "first summarize both hypotheses, then challenge assumptions and evidence, then decide. "
+            "Return the final winner as JSON and include a compact debate_trace if possible."
+        )
+    else:
+        variables["comparison_mode_guidance"] = (
+            "Use the single-turn comparison mode for this tournament matchup. "
+            "Focus on the decisive difference between the two hypotheses and return the final winner as JSON."
+        )
 
     # inject domain-specific prompt customizations
     variables.update(_get_domain_variables(tool_registry))

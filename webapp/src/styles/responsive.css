@@ -4,6 +4,11 @@
     --side-panel-reserved-width: 352px;
   }
 
+  .app-shell.hypothesis-side-panel-mode {
+    --side-panel-width: 440px;
+    --side-panel-reserved-width: 472px;
+  }
+
   .app-side-panel {
     width: min(var(--side-panel-width), calc(100vw - var(--space-sm) * 2));
   }
@@ -50,6 +55,7 @@
 
   .selected-hypothesis-panel {
     position: static;
+    max-height: none;
   }
 
   .report-selection-panel,
@@ -424,8 +430,17 @@
   .project-hypothesis-actions,
   .next-actions,
   .task-actions,
-  .decision-actions {
+  .decision-actions,
+  .hypothesis-panel-action-grid {
     width: 100%;
+  }
+
+  .hypothesis-panel-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hypothesis-side-tab-list .tab-button {
+    flex: 1 1 calc(33.333% - var(--space-xs));
   }
 
   .detail-nav a,
@@ -445,6 +460,14 @@
   .matchup-brief-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .detail-header-actions {
+    justify-content: stretch;
+  }
+
+  .detail-header-actions button {
+    flex: 1 1 0;
   }
 
   .hypothesis-card-actions .button-ghost {
@@ -518,6 +541,14 @@
     grid-template-columns: 1fr;
   }
 
+  .tool-compact-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .tool-compact-row > svg:last-child {
+    display: none;
+  }
+
   .tool-catalog-disclosure > summary {
     min-height: auto;
     align-items: flex-start;
@@ -550,6 +581,53 @@
     grid-template-columns: 1fr;
     align-items: start;
     padding: var(--space-sm);
+  }
+
+  .remote-workspace-header,
+  .experiment-terminal-header,
+  .experiment-terminal-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .remote-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .remote-workspace-column {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .remote-workspace-column:last-child {
+    border-bottom: 0;
+  }
+
+  .remote-directory-list,
+  .remote-tmux-list {
+    height: 220px;
+  }
+
+  .remote-entry {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .remote-entry small {
+    display: none;
+  }
+
+  .remote-import-row,
+  .remote-browser-actions {
+    flex-direction: column;
+  }
+
+  .experiment-terminal-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .experiment-terminal-host {
+    min-height: 340px;
+    height: 48vh;
   }
 
   .login-copy h1 {

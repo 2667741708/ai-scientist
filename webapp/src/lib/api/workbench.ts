@@ -16,6 +16,8 @@ import type {
   FileSnapshotResponse,
   Health,
   KnowledgePapersResponse,
+  ProjectArtifact,
+  ProjectArtifactType,
   LiteratureCitationRequest,
   LiteratureCitationResponse,
   LiteratureDiscoveryRequest,
@@ -30,6 +32,8 @@ import type {
   PaperParseStatusResponse,
   PaperParseRun,
   PaperParseRunsResponse,
+  RagflowKnowledgeStatus,
+  RagflowReindexResponse,
   RagSearchResponse,
   PdfParseRequest,
   PdfParseResponse,
@@ -43,6 +47,7 @@ import type {
   RunCheckpointsResponse,
   RunRecord,
   RunRequest,
+  WorkbenchSnapshot,
   SessionSearchResponse,
   SessionSearchResultType,
   SshTrainingJobRequest,
@@ -62,6 +67,13 @@ import type {
 import { parseApiError } from "../formatters/workbench";
 import { authHeaders } from "./auth";
 import { getApiBase } from "./client";
+
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  return globalThis["fetch"](input, {
+    ...init,
+    headers: authHeaders(init.headers),
+  });
+}
 
 export type RunMemorySummaryResponse = {
   run_id: string;
@@ -87,20 +99,151 @@ export type RunTraceSummaryResponse = {
   summary: Record<string, unknown>;
 };
 
+export type RunEventPayload = {
+  run_id: string;
+  status: RunRecord["status"];
+  updated_at: number;
+  timeline_count: number;
+  hypothesis_count: number;
+  agent_trace_count: number;
+  record?: RunRecord;
+};
+
+export type ExperimentPlanResponse = {
+  experiment_plan: Record<string, unknown>;
+  artifact: ProjectArtifact;
+  grounding_boundary: "run_audit";
+};
+
+export type RunRecoveryResponse = {
+  run_id: string;
+  status: RunRecord["status"];
+  recovery: {
+    category: string;
+    summary: string;
+    retryable: boolean;
+    next_actions: string[];
+  };
+  queue: Record<string, unknown>;
+  checkpoint_count: number;
+  evidence_boundary: string;
+};
+
+export async function fetchWorkbenchSnapshot({
+  run_id,
+  library_id,
+  paper_limit = 12,
+  run_limit = 8,
+}: {
+  run_id?: string;
+  library_id?: string;
+  paper_limit?: number;
+  run_limit?: number;
+} = {}) {
+  const params = new URLSearchParams({
+    paper_limit: String(paper_limit),
+    run_limit: String(run_limit),
+  });
+  if (run_id) params.set("run_id", run_id);
+  if (library_id) params.set("library_id", library_id);
+  const response = await apiFetch(`${getApiBase()}/api/workbench/snapshot?${params.toString()}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`workbench_snapshot_failed_${response.status}`);
+  return (await response.json()) as WorkbenchSnapshot;
+}
+
+export async function listProjectArtifacts(projectId: string, artifactType?: ProjectArtifactType) {
+  const params = new URLSearchParams();
+  if (artifactType) params.set("artifact_type", artifactType);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await apiFetch(`${getApiBase()}/api/projects/${encodeURIComponent(projectId)}/artifacts${suffix}`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`project_artifacts_failed_${response.status}`);
+  return (await response.json()) as { project_id: string; artifacts: ProjectArtifact[] };
+}
+
+export async function saveProjectArtifact(request: {
+  project_id: string;
+  run_id: string;
+  artifact_type: ProjectArtifactType;
+  target_ref?: Record<string, unknown>;
+  title?: string;
+  payload?: Record<string, unknown>;
+}) {
+  return postJson<{ artifact: ProjectArtifact }>(
+    `/api/projects/${encodeURIComponent(request.project_id)}/artifacts`,
+    {
+      run_id: request.run_id,
+      artifact_type: request.artifact_type,
+      target_ref: request.target_ref ?? {},
+      title: request.title ?? "",
+      payload: request.payload ?? {},
+    },
+  );
+}
+
+export async function createExperimentPlan(projectId: string, runId: string, hypothesisIndex: number) {
+  return postJson<ExperimentPlanResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/experiment-plans`,
+    { run_id: runId, hypothesis_index: hypothesisIndex },
+  );
+}
+
+export async function fetchRunRecovery(runId: string) {
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/recovery`, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`run_recovery_failed_${response.status}`);
+  return (await response.json()) as RunRecoveryResponse;
+}
+
+export function subscribeToRunEvents(
+  runId: string,
+  onRun: (event: RunEventPayload) => void,
+  onError?: (error: unknown) => void,
+) {
+  const controller = new AbortController();
+  const consume = async () => {
+    try {
+      const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/events`, {
+        headers: authHeaders(),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) throw new Error(`run_events_failed_${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!controller.signal.aborted) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
+          const eventName = frame.split("\n").find((line) => line.startsWith("event: "))?.slice(7);
+          if (!data || eventName !== "run") continue;
+          onRun(JSON.parse(data) as RunEventPayload);
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) onError?.(error);
+    }
+  };
+  void consume();
+  return () => controller.abort();
+}
+
 export async function fetchHealth() {
-  const response = await fetch(`${getApiBase()}/api/health`);
+  const response = await apiFetch(`${getApiBase()}/api/health`);
   if (!response.ok) throw new Error(`health_failed_${response.status}`);
   return (await response.json()) as Health;
 }
 
 export async function fetchAgentRegistry() {
-  const response = await fetch(`${getApiBase()}/api/agents/registry`);
+  const response = await apiFetch(`${getApiBase()}/api/agents/registry`);
   if (!response.ok) throw new Error(`agent_registry_failed_${response.status}`);
   return (await response.json()) as AgentRegistryResponse;
 }
 
 export async function startLiteratureService() {
-  const response = await fetch(`${getApiBase()}/api/literature-service/start`, {
+  const response = await apiFetch(`${getApiBase()}/api/literature-service/start`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -112,9 +255,9 @@ export async function startLiteratureService() {
 }
 
 export async function createRun(request: RunRequest) {
-  const response = await fetch(`${getApiBase()}/api/runs`, {
+  const response = await apiFetch(`${getApiBase()}/api/runs`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(request),
   });
   if (!response.ok) {
@@ -132,13 +275,13 @@ export async function continueRun(runId: string, request: ContinueRunRequest) {
 }
 
 export async function fetchRun(runId: string) {
-  const response = await fetch(`${getApiBase()}/api/runs/${runId}`);
+  const response = await apiFetch(`${getApiBase()}/api/runs/${runId}`);
   if (!response.ok) throw new Error(`run_fetch_failed_${response.status}`);
   return (await response.json()) as RunRecord;
 }
 
 export async function fetchRunTrace(runId: string) {
-  const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/trace`);
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/trace`);
   if (!response.ok) throw new Error(`run_trace_failed_${response.status}`);
   return (await response.json()) as RunTraceSummaryResponse;
 }
@@ -149,26 +292,26 @@ export async function postRunFeedback(runId: string, feedback: FeedbackItem) {
 
 export async function listRunFeedback(runId: string, limit = 50) {
   const params = new URLSearchParams({ limit: String(limit) });
-  const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/feedback?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/feedback?${params.toString()}`);
   if (!response.ok) throw new Error(`run_feedback_failed_${response.status}`);
   return (await response.json()) as { feedback: FeedbackItem[]; count: number; run_id: string };
 }
 
 export async function fetchRunMemory(runId: string) {
-  const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/memory`);
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/memory`);
   if (!response.ok) throw new Error(`run_memory_failed_${response.status}`);
   return (await response.json()) as RunMemorySummaryResponse;
 }
 
 export async function fetchRunCheckpoints(runId: string, limit = 20) {
   const params = new URLSearchParams({ limit: String(limit) });
-  const response = await fetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/checkpoints?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/runs/${encodeURIComponent(runId)}/checkpoints?${params.toString()}`);
   if (!response.ok) throw new Error(`run_checkpoints_failed_${response.status}`);
   return (await response.json()) as RunCheckpointsSummaryResponse;
 }
 
 export async function fetchWorkerStatus() {
-  const response = await fetch(`${getApiBase()}/api/worker/status`);
+  const response = await apiFetch(`${getApiBase()}/api/worker/status`);
   if (!response.ok) throw new Error(`worker_status_failed_${response.status}`);
   return (await response.json()) as WorkerStatusResponse;
 }
@@ -205,7 +348,7 @@ function coerceRunSummaryToRecord(summary: Partial<RunRecord> & { run_id: string
 }
 
 export async function fetchRunHistory(limit = 8) {
-  const response = await fetch(`${getApiBase()}/api/runs?limit=${limit}`);
+  const response = await apiFetch(`${getApiBase()}/api/runs?limit=${limit}`);
   if (!response.ok) throw new Error(`runs_fetch_failed_${response.status}`);
   const payload = (await response.json()) as { runs?: Array<Partial<RunRecord> & { run_id: string }> };
   const summaries = (payload.runs ?? []).slice(0, limit).filter((item) => item.run_id);
@@ -216,7 +359,20 @@ export async function fetchRunHistory(limit = 8) {
 }
 
 export async function translateHypothesis(request: TranslationRequest) {
-  const response = await fetch(`${getApiBase()}/api/hypotheses/translate`, {
+  const response = await apiFetch(`${getApiBase()}/api/hypotheses/translate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(parseApiError(body));
+  }
+  return (await response.json()) as TranslationResponse;
+}
+
+export async function translateEvidenceText(request: TranslationRequest) {
+  const response = await apiFetch(`${getApiBase()}/api/evidence/translate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -229,7 +385,7 @@ export async function translateHypothesis(request: TranslationRequest) {
 }
 
 export async function ingestKnowledgePaper(request: PaperIngestRequest) {
-  const response = await fetch(`${getApiBase()}/api/knowledge/papers`, {
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/papers`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...request, source: request.source ?? "user_upload" }),
@@ -242,7 +398,7 @@ export async function ingestKnowledgePaper(request: PaperIngestRequest) {
 }
 
 export async function parseKnowledgePdf(request: PdfParseRequest) {
-  const response = await fetch(`${getApiBase()}/api/knowledge/pdf/parse`, {
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/pdf/parse`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -266,7 +422,7 @@ export async function uploadParseKnowledgePdf(file: File, libraryId?: string) {
   const params = new URLSearchParams();
   if (libraryId) params.set("library_id", libraryId);
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`${getApiBase()}/api/knowledge/pdf/upload-parse${suffix}`, {
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/pdf/upload-parse${suffix}`, {
     method: "POST",
     body,
   });
@@ -281,7 +437,7 @@ export async function listKnowledgePapers({ library_id }: { library_id?: string 
   const params = new URLSearchParams();
   if (library_id) params.set("library_id", library_id);
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`${getApiBase()}/api/knowledge/papers${suffix}`);
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/papers${suffix}`);
   if (!response.ok) throw new Error(`knowledge_papers_failed_${response.status}`);
   return (await response.json()) as KnowledgePapersResponse;
 }
@@ -290,19 +446,19 @@ export async function listPaperParseRuns({ library_id }: { library_id?: string }
   const params = new URLSearchParams();
   if (library_id) params.set("library_id", library_id);
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`${getApiBase()}/api/knowledge/parse-runs${suffix}`);
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/parse-runs${suffix}`);
   if (!response.ok) throw new Error(`parse_runs_failed_${response.status}`);
   return (await response.json()) as PaperParseRunsResponse;
 }
 
 export async function fetchPaperParseRun(parseRunId: string) {
-  const response = await fetch(`${getApiBase()}/api/knowledge/parse-runs/${parseRunId}`);
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/parse-runs/${parseRunId}`);
   if (!response.ok) throw new Error(`parse_run_failed_${response.status}`);
   return (await response.json()) as PaperParseRun;
 }
 
 export async function fetchPaperParseStatus(paperId: string) {
-  const response = await fetch(`${getApiBase()}/api/papers/${encodeURIComponent(paperId)}/parse-status`);
+  const response = await apiFetch(`${getApiBase()}/api/papers/${encodeURIComponent(paperId)}/parse-status`);
   if (!response.ok) throw new Error(`paper_parse_status_failed_${response.status}`);
   return (await response.json()) as PaperParseStatusResponse;
 }
@@ -327,13 +483,23 @@ export async function searchRagEvidence({
   if (library_id) params.set("library_id", library_id);
   if (parse_item_key) params.set("parse_item_key", parse_item_key);
   if (support_level) params.set("support_level", support_level);
-  const response = await fetch(`${getApiBase()}/api/knowledge/rag/search?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/rag/search?${params.toString()}`);
   if (!response.ok) throw new Error(`rag_search_failed_${response.status}`);
   return (await response.json()) as RagSearchResponse;
 }
 
+export async function fetchRagflowKnowledgeStatus() {
+  const response = await apiFetch(`${getApiBase()}/api/knowledge/ragflow/status`);
+  if (!response.ok) throw new Error(`ragflow_status_failed_${response.status}`);
+  return (await response.json()) as RagflowKnowledgeStatus;
+}
+
+export async function reindexRagflowEmbeddings(request: { library_id?: string; paper_id?: string } = {}) {
+  return postJson<RagflowReindexResponse>("/api/knowledge/ragflow/reindex", request);
+}
+
 export async function listLiteratureLibraries() {
-  const response = await fetch(`${getApiBase()}/api/literature-libraries`);
+  const response = await apiFetch(`${getApiBase()}/api/literature-libraries`);
   if (!response.ok) throw new Error(`literature_libraries_failed_${response.status}`);
   return (await response.json()) as LiteratureLibrariesResponse;
 }
@@ -351,7 +517,7 @@ export async function fetchLiteratureCitationBibtex(request: LiteratureCitationR
 }
 
 async function postJson<TResponse>(path: string, payload: unknown, method: "POST" | "PUT" = "POST") {
-  const response = await fetch(`${getApiBase()}${path}`, {
+  const response = await apiFetch(`${getApiBase()}${path}`, {
     method,
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -377,7 +543,7 @@ export async function searchResearchSessions({
   const params = new URLSearchParams({ q, limit: String(limit) });
   if (run_id) params.set("run_id", run_id);
   if (types?.length) params.set("types", types.join(","));
-  const response = await fetch(`${getApiBase()}/api/session-search?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/session-search?${params.toString()}`);
   if (!response.ok) {
     const body = await response.text();
     throw new Error(parseApiError(body));
@@ -400,7 +566,7 @@ export async function listResearchTasks({
   if (run_id) params.set("run_id", run_id);
   if (status) params.set("status", status);
   if (task_type) params.set("task_type", task_type);
-  const response = await fetch(`${getApiBase()}/api/research-tasks?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/research-tasks?${params.toString()}`);
   if (!response.ok) throw new Error(`research_tasks_failed_${response.status}`);
   return (await response.json()) as ResearchTasksResponse;
 }
@@ -409,7 +575,7 @@ export async function listResearchSkills({ phase }: { phase?: string } = {}) {
   const params = new URLSearchParams();
   if (phase) params.set("phase", phase);
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`${getApiBase()}/api/research-skills${suffix}`);
+  const response = await apiFetch(`${getApiBase()}/api/research-skills${suffix}`);
   if (!response.ok) throw new Error(`research_skills_failed_${response.status}`);
   return (await response.json()) as ResearchSkillsResponse;
 }
@@ -429,7 +595,7 @@ export async function listResearchSchedules({
   if (run_id) params.set("run_id", run_id);
   if (status) params.set("status", status);
   if (workflow_name) params.set("workflow_name", workflow_name);
-  const response = await fetch(`${getApiBase()}/api/research-schedules?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/research-schedules?${params.toString()}`);
   if (!response.ok) throw new Error(`research_schedules_failed_${response.status}`);
   return (await response.json()) as ResearchSchedulesResponse;
 }
@@ -457,7 +623,7 @@ export async function listResearchDelegations({
   if (run_id) params.set("run_id", run_id);
   if (status) params.set("status", status);
   if (strategy) params.set("strategy", strategy);
-  const response = await fetch(`${getApiBase()}/api/research-delegations?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/research-delegations?${params.toString()}`);
   if (!response.ok) throw new Error(`research_delegations_failed_${response.status}`);
   return (await response.json()) as ResearchDelegationsResponse;
 }
@@ -475,25 +641,25 @@ export async function listBackgroundJobs({
 } = {}) {
   const params = new URLSearchParams({ limit: String(limit) });
   if (run_id) params.set("run_id", run_id);
-  const response = await fetch(`${getApiBase()}/api/tools/background-jobs?${params.toString()}`);
+  const response = await apiFetch(`${getApiBase()}/api/tools/background-jobs?${params.toString()}`);
   if (!response.ok) throw new Error(`background_jobs_failed_${response.status}`);
   return (await response.json()) as BackgroundJobsResponse;
 }
 
 export async function fetchBackgroundJob(jobId: string) {
-  const response = await fetch(`${getApiBase()}/api/tools/background-jobs/${encodeURIComponent(jobId)}`);
+  const response = await apiFetch(`${getApiBase()}/api/tools/background-jobs/${encodeURIComponent(jobId)}`);
   if (!response.ok) throw new Error(`background_job_failed_${response.status}`);
   return (await response.json()) as BackgroundJob;
 }
 
 export async function fetchToolResult(resultId: string) {
-  const response = await fetch(`${getApiBase()}/api/tools/results/${encodeURIComponent(resultId)}`);
+  const response = await apiFetch(`${getApiBase()}/api/tools/results/${encodeURIComponent(resultId)}`);
   if (!response.ok) throw new Error(`tool_result_failed_${response.status}`);
   return (await response.json()) as ToolResultResponse;
 }
 
 export async function getCommandPermissions() {
-  const response = await fetch(`${getApiBase()}/api/tools/command-permissions`);
+  const response = await apiFetch(`${getApiBase()}/api/tools/command-permissions`);
   if (!response.ok) throw new Error(`command_permissions_failed_${response.status}`);
   return (await response.json()) as CommandPermissionResponse;
 }
@@ -541,7 +707,7 @@ export async function enqueueTerminalCommandJob(request: TerminalCommandJobReque
 }
 
 export async function listSshTrainingServers() {
-  const response = await fetch(`${getApiBase()}/api/tools/ssh/servers`);
+  const response = await apiFetch(`${getApiBase()}/api/tools/ssh/servers`);
   if (!response.ok) throw new Error(`ssh_training_servers_failed_${response.status}`);
   return (await response.json()) as SshTrainingServersResponse;
 }
@@ -551,7 +717,7 @@ export async function enqueueSshTrainingJob(request: SshTrainingJobRequest) {
 }
 
 export async function interpretPaper(request: PaperInterpretRequest) {
-  const response = await fetch(`${getApiBase()}/api/papers/interpret`, {
+  const response = await apiFetch(`${getApiBase()}/api/papers/interpret`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

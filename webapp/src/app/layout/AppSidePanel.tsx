@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { HypothesisSidePanelContent } from "../../features/hypotheses/HypothesisWorkspace";
+import { useProjectRouteRun } from "../../features/runs/useProjectRouteRun";
 import { useWorkbench } from "../../features/runs/workbench-context";
 import { classNames } from "../../lib/formatters/workbench";
 import type { ProjectViewModel } from "../../types/workbench";
@@ -70,8 +72,12 @@ function useActiveLibraryLabel() {
 
 export function AppSidePanel({ open, onClose, onToggle }: SidePanelProps) {
   const location = useLocation();
-  const { currentRun, currentRunId, projects, isBusy } = useWorkbench();
+  const { currentRun, currentRunId, projects, isBusy, error } = useWorkbench();
   const searchRunId = new URLSearchParams(location.search).get("run");
+  const hypothesisRouteMatch = location.pathname.match(/^\/projects\/([^/]+)\/hypotheses$/);
+  const hypothesisRouteRun = useProjectRouteRun(hypothesisRouteMatch?.[1]);
+  const isHypothesisRoute = Boolean(hypothesisRouteMatch);
+  const hypothesisPanelRecord = isHypothesisRoute ? hypothesisRouteRun : null;
   const activeLibraryLabel = useActiveLibraryLabel();
   const activeProject = useMemo(
     () => projects.find((project) => isProjectRoute(project, location.pathname, searchRunId)),
@@ -115,13 +121,21 @@ export function AppSidePanel({ open, onClose, onToggle }: SidePanelProps) {
           <header className="app-side-panel-header">
             <div>
               <span>工作区</span>
-              <strong>{routeLabel(location.pathname)}</strong>
+              <strong>{isHypothesisRoute ? "假设工具" : routeLabel(location.pathname)}</strong>
             </div>
             <button className="side-panel-icon-button" type="button" onClick={onClose} aria-label="收起右侧栏">
               <X size={18} />
             </button>
           </header>
 
+          {isHypothesisRoute ? (
+            <HypothesisSidePanelContent
+              record={hypothesisPanelRecord}
+              error={error}
+              isHistoricalDemo={Boolean(hypothesisPanelRecord?.request.demo_mode)}
+            />
+          ) : (
+            <>
           <section className="side-panel-section" aria-labelledby="side-panel-context-heading">
             <div className="side-panel-section-heading">
               <h2 id="side-panel-context-heading">当前上下文</h2>
@@ -199,6 +213,8 @@ export function AppSidePanel({ open, onClose, onToggle }: SidePanelProps) {
               </Link>
             </div>
           </section>
+            </>
+          )}
         </aside>
       ) : null}
     </>

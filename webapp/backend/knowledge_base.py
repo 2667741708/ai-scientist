@@ -11,6 +11,27 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+try:
+    from backend.ragflow_adapter import (
+        RagflowEmbeddingClient,
+        RagflowRerankClient,
+        cosine_similarity,
+        load_ragflow_adapter_config,
+        normalize_cosine,
+        ragflow_merge_paragraphs,
+        text_hash,
+    )
+except ModuleNotFoundError:
+    from ragflow_adapter import (
+        RagflowEmbeddingClient,
+        RagflowRerankClient,
+        cosine_similarity,
+        load_ragflow_adapter_config,
+        normalize_cosine,
+        ragflow_merge_paragraphs,
+        text_hash,
+    )
+
 
 SECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("abstract", re.compile(r"^(abstract|summary)\b", re.I)),
@@ -127,6 +148,7 @@ def _split_markdown_sections(content: str) -> list[tuple[int, str, str]]:
 
 
 def hierarchical_chunk_paper(paper: PaperDocument) -> list[KnowledgeChunk]:
+    ragflow_config = load_ragflow_adapter_config()
     sections = _split_markdown_sections(paper.content)
     chunks: list[KnowledgeChunk] = []
     heading_stack: list[tuple[int, str]] = []
@@ -159,18 +181,12 @@ def hierarchical_chunk_paper(paper: PaperDocument) -> list[KnowledgeChunk]:
         if not paragraphs:
             continue
 
-        # Preserve semantic section boundaries. Split only on paragraph groups for very
-        # dense sections, never by a fixed character window.
-        groups: list[list[str]] = []
-        current_group: list[str] = []
-        for paragraph in paragraphs:
-            current_group.append(paragraph)
-            is_table_like = paragraph.lower().startswith(("table ", "|")) or "\t" in paragraph
-            if is_table_like or len(current_group) >= 4:
-                groups.append(current_group)
-                current_group = []
-        if current_group:
-            groups.append(current_group)
+        groups = ragflow_merge_paragraphs(
+            paragraphs,
+            chunk_token_num=ragflow_config.chunk_token_num,
+            delimiter=ragflow_config.delimiter,
+            overlapped_percent=ragflow_config.overlapped_percent,
+        )
 
         for group_index, group in enumerate(groups, start=1):
             text = "\n\n".join(group)
@@ -200,6 +216,7 @@ class KnowledgeBaseStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.documents_path = self.root / "papers.jsonl"
         self.db_path = Path(os.getenv("COSCIENTIST_KNOWLEDGE_DB_PATH", str(self.root / "knowledge.sqlite3")))
+        self.ragflow_config = load_ragflow_adapter_config()
         self._init_db()
         self._import_legacy_jsonl_once()
 
@@ -267,6 +284,19 @@ class KnowledgeBaseStore:
                     support_level TEXT NOT NULL,
                     parse_run_id TEXT,
                     evidence_id TEXT,
+                    FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_chunk_embeddings (
+                    chunk_id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    library_id TEXT NOT NULL DEFAULT 'library_default',
+                    embedding_model TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    vector_json TEXT NOT NULL,
+                    text_hash TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES paper_chunks(chunk_id),
                     FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
                 );
 
@@ -382,6 +412,19 @@ class KnowledgeBaseStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     FOREIGN KEY (run_id) REFERENCES research_runs(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS research_project_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    target_ref_json TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE (project_id, run_id, artifact_type, target_ref_json)
                 );
 
                 CREATE TABLE IF NOT EXISTS hypothesis_evidence_links (
@@ -608,10 +651,14 @@ class KnowledgeBaseStore:
 
                 CREATE INDEX IF NOT EXISTS idx_paper_chunks_paper_id ON paper_chunks(paper_id);
                 CREATE INDEX IF NOT EXISTS idx_paper_chunks_parse_run_id ON paper_chunks(parse_run_id);
+                CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_library ON paper_chunk_embeddings(library_id, embedding_model, dimension);
+                CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_paper ON paper_chunk_embeddings(paper_id);
                 CREATE INDEX IF NOT EXISTS idx_parse_items_run ON paper_parse_items(parse_run_id, order_index);
                 CREATE INDEX IF NOT EXISTS idx_parse_evidence_run ON paper_parse_evidence(parse_run_id);
                 CREATE INDEX IF NOT EXISTS idx_research_runs_updated ON research_runs(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_research_hypotheses_run ON research_hypotheses(run_id, hypothesis_index);
+                CREATE INDEX IF NOT EXISTS idx_research_project_artifacts_project ON research_project_artifacts(project_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_research_project_artifacts_run ON research_project_artifacts(run_id, artifact_type, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_hypothesis_evidence_run ON hypothesis_evidence_links(run_id, hypothesis_index);
                 CREATE INDEX IF NOT EXISTS idx_evidence_retrievals_run ON evidence_retrievals(run_id, hypothesis_index);
                 CREATE INDEX IF NOT EXISTS idx_research_agent_trace_run ON research_agent_trace(run_id, order_index);
@@ -910,6 +957,7 @@ class KnowledgeBaseStore:
             chunk.evidence_id = f"evidence_{uuid.uuid4().hex[:12]}"
             chunk.library_id = resolved_library_id
         self._append_document(paper)
+        self.index_embeddings_for_paper(paper.paper_id)
         return paper
 
     def _append_document(self, paper: PaperDocument) -> None:
@@ -943,6 +991,7 @@ class KnowledgeBaseStore:
         )
         connection.execute("DELETE FROM paper_chunks WHERE paper_id = ?", (paper.paper_id,))
         connection.execute("DELETE FROM evidence_chunks_fts WHERE paper_id = ?", (paper.paper_id,))
+        connection.execute("DELETE FROM paper_chunk_embeddings WHERE paper_id = ?", (paper.paper_id,))
         for chunk in paper.chunks:
             connection.execute(
                 """
@@ -993,6 +1042,186 @@ class KnowledgeBaseStore:
                     paper.url,
                 ),
             )
+
+    def _embedding_model_label(self) -> str:
+        config = load_ragflow_adapter_config()
+        model = config.embedding_model.strip() or config.embedding_provider.strip() or "disabled"
+        return f"{config.embedding_provider}:{model}"
+
+    def ragflow_status(self) -> Dict[str, Any]:
+        config = load_ragflow_adapter_config()
+        with self._connection() as connection:
+            chunk_count = connection.execute("SELECT COUNT(*) AS count FROM paper_chunks").fetchone()["count"]
+            embedding_count = connection.execute("SELECT COUNT(*) AS count FROM paper_chunk_embeddings").fetchone()["count"]
+            dimensions = [
+                row["dimension"]
+                for row in connection.execute(
+                    "SELECT DISTINCT dimension FROM paper_chunk_embeddings ORDER BY dimension"
+                ).fetchall()
+            ]
+        return {
+            "mode": config.retrieval_mode,
+            "chunking": {
+                "strategy": "ragflow_style_section_preserving_token_budget",
+                "chunk_token_num": config.chunk_token_num,
+                "delimiter": config.delimiter,
+                "overlapped_percent": config.overlapped_percent,
+            },
+            "embedding": {
+                "enabled": config.embedding_enabled,
+                "provider": config.embedding_provider,
+                "model": config.embedding_model or None,
+                "endpoint_configured": bool(config.embedding_endpoint),
+                "indexed_chunks": embedding_count,
+                "total_chunks": chunk_count,
+                "dimensions": dimensions,
+            },
+            "reranker": {
+                "enabled": config.rerank_enabled,
+                "provider": config.rerank_provider,
+                "model": config.rerank_model or None,
+                "endpoint_configured": bool(config.rerank_endpoint),
+            },
+            "retrieval": {
+                "doc_store": "sqlite_fts5_plus_json_vectors",
+                "vector_similarity_weight": config.vector_similarity_weight,
+                "full_text_weight": 1.0 - config.vector_similarity_weight,
+                "similarity_threshold": config.similarity_threshold,
+                "candidate_multiplier": config.candidate_multiplier,
+            },
+        }
+
+    def index_embeddings_for_paper(self, paper_id: str) -> Dict[str, Any]:
+        config = load_ragflow_adapter_config()
+        if not config.embedding_enabled:
+            return {
+                "status": "skipped",
+                "reason": "embedding_not_configured",
+                "paper_id": paper_id,
+                "indexed_count": 0,
+            }
+
+        model_label = self._embedding_model_label()
+        with self._connection() as connection:
+            chunk_rows = connection.execute(
+                """
+                SELECT chunk_id, paper_id, library_id, title, section_path_json, text
+                FROM paper_chunks
+                WHERE paper_id = ?
+                ORDER BY order_index ASC
+                """,
+                (paper_id,),
+            ).fetchall()
+            existing_rows = connection.execute(
+                """
+                SELECT chunk_id, embedding_model, text_hash
+                FROM paper_chunk_embeddings
+                WHERE paper_id = ? AND embedding_model = ?
+                """,
+                (paper_id, model_label),
+            ).fetchall()
+        existing_hashes = {row["chunk_id"]: row["text_hash"] for row in existing_rows}
+        pending: list[sqlite3.Row] = []
+        pending_texts: list[str] = []
+        for row in chunk_rows:
+            text = f"{row['title']}\n{' / '.join(json.loads(row['section_path_json']))}\n{row['text']}"
+            digest = text_hash(text)
+            if existing_hashes.get(row["chunk_id"]) == digest:
+                continue
+            pending.append(row)
+            pending_texts.append(text)
+
+        if not pending:
+            return {
+                "status": "ready",
+                "paper_id": paper_id,
+                "indexed_count": len(chunk_rows),
+                "new_embeddings": 0,
+                "embedding_model": model_label,
+            }
+
+        client = RagflowEmbeddingClient(config)
+        vectors: list[list[float]] = []
+        try:
+            for index in range(0, len(pending_texts), config.embedding_batch_size):
+                vectors.extend(client.embed(pending_texts[index:index + config.embedding_batch_size]))
+        except Exception as exc:
+            return {
+                "status": "error",
+                "paper_id": paper_id,
+                "indexed_count": len(chunk_rows) - len(pending),
+                "new_embeddings": 0,
+                "embedding_model": model_label,
+                "error": str(exc),
+            }
+        if len(vectors) != len(pending):
+            return {
+                "status": "error",
+                "paper_id": paper_id,
+                "indexed_count": len(chunk_rows) - len(pending),
+                "new_embeddings": 0,
+                "embedding_model": model_label,
+                "error": f"embedding_count_mismatch:{len(vectors)}:{len(pending)}",
+            }
+
+        now = time.time()
+        with self._connection() as connection:
+            for row, text, vector in zip(pending, pending_texts, vectors):
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO paper_chunk_embeddings(
+                        chunk_id, paper_id, library_id, embedding_model, dimension,
+                        vector_json, text_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["chunk_id"],
+                        row["paper_id"],
+                        row["library_id"] or DEFAULT_LIBRARY_ID,
+                        model_label,
+                        len(vector),
+                        json.dumps(vector, ensure_ascii=False),
+                        text_hash(text),
+                        now,
+                    ),
+                )
+        return {
+            "status": "ready",
+            "paper_id": paper_id,
+            "indexed_count": len(chunk_rows),
+            "new_embeddings": len(pending),
+            "embedding_model": model_label,
+            "dimension": len(vectors[0]) if vectors else 0,
+        }
+
+    def reindex_embeddings(
+        self,
+        *,
+        library_id: Optional[str] = None,
+        paper_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resolved_library_id = self.resolve_library_id(library_id) if library_id else None
+        params: list[Any] = []
+        where: list[str] = []
+        if resolved_library_id:
+            where.append("library_id = ?")
+            params.append(resolved_library_id)
+        if paper_id:
+            where.append("paper_id = ?")
+            params.append(paper_id)
+        sql = "SELECT paper_id FROM papers"
+        if where:
+            sql += f" WHERE {' AND '.join(where)}"
+        sql += " ORDER BY created_at DESC"
+        with self._connection() as connection:
+            paper_ids = [row["paper_id"] for row in connection.execute(sql, params).fetchall()]
+        results = [self.index_embeddings_for_paper(item) for item in paper_ids]
+        return {
+            "status": "complete" if all(item.get("status") in {"ready", "skipped"} for item in results) else "warning",
+            "paper_count": len(paper_ids),
+            "results": results,
+            "ragflow": self.ragflow_status(),
+        }
 
     def list_documents(self, library_id: Optional[str] = None) -> list[PaperDocument]:
         documents: list[PaperDocument] = []
@@ -1069,13 +1298,61 @@ class KnowledgeBaseStore:
         if not normalized:
             return []
         resolved_library_id = self.resolve_library_id(library_id) if library_id else None
-        terms = re.findall(r"[A-Za-z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}", normalized)
-        fts_query = " OR ".join(f'"{term}"' for term in terms[:12]) or normalized
+        config = load_ragflow_adapter_config()
+        candidate_limit = max(1, min(max(limit, limit * config.candidate_multiplier), 200))
+        try:
+            fts_results = self._rag_search_fts(
+                normalized,
+                limit=candidate_limit,
+                paper_id=paper_id,
+                library_id=resolved_library_id,
+                parse_item_key=parse_item_key,
+                support_level=support_level,
+            )
+        except sqlite3.OperationalError:
+            fts_results = []
+        semantic_results = self._semantic_search(
+            normalized,
+            limit=candidate_limit,
+            paper_id=paper_id,
+            library_id=resolved_library_id,
+            parse_item_key=parse_item_key,
+            support_level=support_level,
+        )
+        if not fts_results and not semantic_results:
+            return self._rag_search_fallback(
+                normalized,
+                limit=limit,
+                paper_id=paper_id,
+                library_id=resolved_library_id,
+                parse_item_key=parse_item_key,
+                support_level=support_level,
+            )
+        return self._rank_ragflow_results(
+            normalized,
+            fts_results=fts_results,
+            semantic_results=semantic_results,
+            limit=limit,
+            config=config,
+        )
+
+    def _rag_search_fts(
+        self,
+        query: str,
+        *,
+        limit: int,
+        paper_id: Optional[str],
+        library_id: Optional[str],
+        parse_item_key: Optional[str],
+        support_level: Optional[str],
+    ) -> list[Dict[str, Any]]:
+        terms = re.findall(r"[A-Za-z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}", query)
+        fts_query = " OR ".join(f'"{term}"' for term in terms[:12]) or query
         where = ["evidence_chunks_fts MATCH ?"]
         params: list[Any] = [fts_query]
-        if resolved_library_id:
+        if library_id:
             where.append("library_id = ?")
-            params.append(resolved_library_id)
+            params.append(library_id)
         if paper_id:
             where.append("paper_id = ?")
             params.append(paper_id)
@@ -1096,28 +1373,18 @@ class KnowledgeBaseStore:
             LIMIT ?
         """
         evidence_ids_by_chunk: Dict[str, Optional[str]] = {}
-        try:
-            with self._connection() as connection:
-                rows = connection.execute(sql, params).fetchall()
-                chunk_ids = [row["chunk_id"] for row in rows]
-                if chunk_ids:
-                    placeholders = ", ".join("?" for _ in chunk_ids)
-                    evidence_rows = connection.execute(
-                        f"SELECT chunk_id, evidence_id FROM paper_chunks WHERE chunk_id IN ({placeholders})",
-                        chunk_ids,
-                    ).fetchall()
-                    evidence_ids_by_chunk = {
-                        row["chunk_id"]: row["evidence_id"] for row in evidence_rows
-                    }
-        except sqlite3.OperationalError:
-            return self._rag_search_fallback(
-                normalized,
-                limit=limit,
-                paper_id=paper_id,
-                library_id=resolved_library_id,
-                parse_item_key=parse_item_key,
-                support_level=support_level,
-            )
+        with self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+            chunk_ids = [row["chunk_id"] for row in rows]
+            if chunk_ids:
+                placeholders = ", ".join("?" for _ in chunk_ids)
+                evidence_rows = connection.execute(
+                    f"SELECT chunk_id, evidence_id FROM paper_chunks WHERE chunk_id IN ({placeholders})",
+                    chunk_ids,
+                ).fetchall()
+                evidence_ids_by_chunk = {
+                    row["chunk_id"]: row["evidence_id"] for row in evidence_rows
+                }
         return [
             {
                 "chunk_id": row["chunk_id"],
@@ -1135,9 +1402,155 @@ class KnowledgeBaseStore:
                 "evidence_path": row["evidence_path"],
                 "evidence_id": evidence_ids_by_chunk.get(row["chunk_id"]),
                 "score": float(row["rank"]),
+                "term_rank": float(row["rank"]),
+                "_full_text": row["text"],
             }
             for row in rows
         ]
+
+    def _semantic_search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        paper_id: Optional[str],
+        library_id: Optional[str],
+        parse_item_key: Optional[str],
+        support_level: Optional[str],
+    ) -> list[Dict[str, Any]]:
+        config = load_ragflow_adapter_config()
+        if not config.embedding_enabled:
+            return []
+        if parse_item_key and parse_item_key not in {"rag_indexed", "rag_search_ready"}:
+            return []
+        try:
+            query_vectors = RagflowEmbeddingClient(config).embed([query])
+        except Exception:
+            return []
+        if not query_vectors:
+            return []
+        query_vector = query_vectors[0]
+        model_label = self._embedding_model_label()
+        where = ["emb.embedding_model = ?"]
+        params: list[Any] = [model_label]
+        if library_id:
+            where.append("pc.library_id = ?")
+            params.append(library_id)
+        if paper_id:
+            where.append("pc.paper_id = ?")
+            params.append(paper_id)
+        if support_level:
+            where.append("pc.support_level = ?")
+            params.append(support_level)
+        sql = f"""
+            SELECT pc.chunk_id, pc.paper_id, pc.library_id, pc.parse_run_id, pc.title,
+                   pc.section_path_json, pc.section_type, pc.text, pc.experiment_data_summary,
+                   pc.support_level, pc.evidence_id, p.source_reliability, p.url,
+                   emb.vector_json, emb.dimension
+            FROM paper_chunk_embeddings emb
+            JOIN paper_chunks pc ON pc.chunk_id = emb.chunk_id
+            JOIN papers p ON p.paper_id = pc.paper_id
+            WHERE {' AND '.join(where)}
+        """
+        candidates: list[Dict[str, Any]] = []
+        with self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        for row in rows:
+            try:
+                vector = [float(value) for value in json.loads(row["vector_json"])]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if len(vector) != len(query_vector):
+                continue
+            vector_similarity = normalize_cosine(cosine_similarity(query_vector, vector))
+            if vector_similarity < config.similarity_threshold:
+                continue
+            candidates.append(
+                {
+                    "chunk_id": row["chunk_id"],
+                    "paper_id": row["paper_id"],
+                    "library_id": row["library_id"] or DEFAULT_LIBRARY_ID,
+                    "parse_run_id": row["parse_run_id"],
+                    "parse_item_key": "rag_indexed",
+                    "title": row["title"],
+                    "section_path": json.loads(row["section_path_json"]),
+                    "section_type": row["section_type"],
+                    "text_preview": row["text"][:700],
+                    "evidence_summary": row["experiment_data_summary"] or row["title"],
+                    "support_level": row["support_level"],
+                    "source_reliability": row["source_reliability"],
+                    "evidence_path": row["url"],
+                    "evidence_id": row["evidence_id"],
+                    "score": vector_similarity,
+                    "vector_similarity": vector_similarity,
+                    "embedding_model": model_label,
+                    "_full_text": row["text"],
+                }
+            )
+        candidates.sort(key=lambda item: float(item.get("vector_similarity") or 0.0), reverse=True)
+        return candidates[:limit]
+
+    def _rank_ragflow_results(
+        self,
+        query: str,
+        *,
+        fts_results: list[Dict[str, Any]],
+        semantic_results: list[Dict[str, Any]],
+        limit: int,
+        config: Any,
+    ) -> list[Dict[str, Any]]:
+        merged: dict[str, Dict[str, Any]] = {}
+        fts_count = max(1, len(fts_results))
+        for index, result in enumerate(fts_results):
+            item = dict(result)
+            item["term_similarity"] = max(0.0, 1.0 - (index / fts_count))
+            item.setdefault("vector_similarity", 0.0)
+            item["retrieval_method"] = "sqlite_fts"
+            merged[item["chunk_id"]] = item
+        for result in semantic_results:
+            item = merged.get(result["chunk_id"], dict(result))
+            item.update({key: value for key, value in result.items() if key not in {"term_similarity"}})
+            item.setdefault("term_similarity", 0.0)
+            item["vector_similarity"] = max(float(item.get("vector_similarity") or 0.0), float(result.get("vector_similarity") or 0.0))
+            item["retrieval_method"] = "hybrid_fts_vector" if result["chunk_id"] in merged else "vector"
+            merged[result["chunk_id"]] = item
+
+        weight = config.vector_similarity_weight if semantic_results else 0.0
+        for item in merged.values():
+            term_similarity = float(item.get("term_similarity") or 0.0)
+            vector_similarity = float(item.get("vector_similarity") or 0.0)
+            item["score"] = (1.0 - weight) * term_similarity + weight * vector_similarity
+
+        items = list(merged.values())
+        if config.rerank_enabled and items:
+            try:
+                docs = [
+                    f"{item.get('title', '')}\n{' / '.join(item.get('section_path') or [])}\n{item.get('_full_text') or item.get('text_preview') or ''}"
+                    for item in items
+                ]
+                rerank_scores = RagflowRerankClient(config).rerank(query, docs)
+                if len(rerank_scores) == len(items):
+                    for item, rerank_score in zip(items, rerank_scores):
+                        item["rerank_score"] = float(rerank_score)
+                        item["score"] = 0.7 * float(rerank_score) + 0.3 * float(item.get("score") or 0.0)
+                        item["retrieval_method"] = f"{item.get('retrieval_method', 'hybrid')}_reranked"
+            except Exception:
+                for item in items:
+                    item["rerank_error"] = "reranker_failed"
+
+        items.sort(
+            key=lambda item: (
+                float(item.get("score") or 0.0),
+                item.get("support_level") == "experimental_data",
+            ),
+            reverse=True,
+        )
+        sanitized = []
+        for item in items[:max(1, min(limit, 50))]:
+            next_item = dict(item)
+            next_item.pop("_full_text", None)
+            sanitized.append(next_item)
+        return sanitized
 
     def _rag_search_fallback(
         self,
@@ -1196,7 +1609,7 @@ class KnowledgeBaseStore:
                     **result,
                     "doi": None,
                     "url": result.get("evidence_path"),
-                    "source": "sqlite_fts",
+                    "source": result.get("retrieval_method") or "ragflow_hybrid",
                     "chunk_title": result.get("title"),
                     "experiment_data_summary": result.get("evidence_summary")
                     if result.get("support_level") == "experimental_data"
@@ -1245,13 +1658,19 @@ class KnowledgeBaseStore:
             )
         return results
 
-    def support_for_hypothesis(self, hypothesis: Dict[str, Any], *, limit: int = 6) -> list[Dict[str, Any]]:
+    def support_for_hypothesis(
+        self,
+        hypothesis: Dict[str, Any],
+        *,
+        limit: int = 6,
+        library_id: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
         query_parts = [
             str(hypothesis.get("text", "")),
             str(hypothesis.get("explanation", "")),
             str(hypothesis.get("experiment", "")),
         ]
-        return self.search_chunks(" ".join(query_parts), limit=limit)
+        return self.search_chunks(" ".join(query_parts), limit=limit, library_id=library_id)
 
     def record_research_run(self, record: Dict[str, Any]) -> None:
         run_id = str(record.get("run_id") or "").strip()
@@ -1516,6 +1935,119 @@ class KnowledgeBaseStore:
             }
             for row in rows
         ]
+
+    def save_project_artifact(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        artifact_type: str,
+        target_ref: Dict[str, Any],
+        title: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_project_id = project_id.strip()
+        normalized_run_id = run_id.strip()
+        normalized_type = artifact_type.strip()
+        normalized_title = title.strip() or normalized_type
+        if not normalized_project_id or not normalized_run_id or not normalized_type:
+            raise ValueError("project artifact requires project_id, run_id, and artifact_type")
+
+        target_ref_json = self._to_json(target_ref)
+        now = time.time()
+        with self._connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT artifact_id FROM research_project_artifacts
+                WHERE project_id = ? AND run_id = ? AND artifact_type = ? AND target_ref_json = ?
+                """,
+                (normalized_project_id, normalized_run_id, normalized_type, target_ref_json),
+            ).fetchone()
+            artifact_id = existing["artifact_id"] if existing else f"artifact_{uuid.uuid4().hex[:12]}"
+            connection.execute(
+                """
+                INSERT INTO research_project_artifacts(
+                    artifact_id, project_id, run_id, artifact_type, target_ref_json,
+                    title, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, run_id, artifact_type, target_ref_json) DO UPDATE SET
+                    title = excluded.title,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    artifact_id,
+                    normalized_project_id,
+                    normalized_run_id,
+                    normalized_type,
+                    target_ref_json,
+                    normalized_title,
+                    self._to_json(payload),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_project_artifact(artifact_id) or {
+            "artifact_id": artifact_id,
+            "project_id": normalized_project_id,
+            "run_id": normalized_run_id,
+            "artifact_type": normalized_type,
+            "target_ref": target_ref,
+            "title": normalized_title,
+            "payload": payload,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def get_project_artifact(self, artifact_id: str) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM research_project_artifacts WHERE artifact_id = ?",
+                (artifact_id.strip(),),
+            ).fetchone()
+        return self._project_artifact_from_row(row) if row else None
+
+    def list_project_artifacts(
+        self,
+        *,
+        project_id: str,
+        run_id: Optional[str] = None,
+        artifact_type: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[Dict[str, Any]]:
+        clauses = ["project_id = ?"]
+        params: list[Any] = [project_id.strip()]
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id.strip())
+        if artifact_type:
+            clauses.append("artifact_type = ?")
+            params.append(artifact_type.strip())
+        params.append(max(1, min(limit, 200)))
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM research_project_artifacts
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._project_artifact_from_row(row) for row in rows]
+
+    def _project_artifact_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "artifact_id": row["artifact_id"],
+            "project_id": row["project_id"],
+            "run_id": row["run_id"],
+            "artifact_type": row["artifact_type"],
+            "target_ref": json.loads(row["target_ref_json"]),
+            "title": row["title"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def upsert_research_chat_session(
         self,

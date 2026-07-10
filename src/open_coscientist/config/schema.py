@@ -78,9 +78,13 @@ def resolve_content_params(
 class ServerConfig:
     """Configuration for an MCP server connection."""
 
-    url: str
+    url: str = ""
     transport: str = "streamable_http"
     enabled: bool = True
+    command: str = ""
+    args: List[str] = field(default_factory=list)
+    env: Dict[str, str] = field(default_factory=dict)
+    headers: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServerConfig":
@@ -89,6 +93,10 @@ class ServerConfig:
             url=data.get("url", ""),
             transport=data.get("transport", "streamable_http"),
             enabled=data.get("enabled", True),
+            command=data.get("command", ""),
+            args=[str(item) for item in data.get("args", [])],
+            env={str(key): str(value) for key, value in data.get("env", {}).items()},
+            headers={str(key): str(value) for key, value in data.get("headers", {}).items()},
         )
 
 

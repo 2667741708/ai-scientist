@@ -1,0 +1,189 @@
+.desktop-shell-enabled .workspace {
+  padding-bottom: calc(var(--grid-margin) + 48px);
+}
+
+.desktop-shell-enabled.desktop-terminal-open .workspace {
+  padding-bottom: calc(var(--grid-margin) + 360px);
+}
+
+.desktop-shell-enabled.desktop-terminal-open .app-side-panel {
+  bottom: 336px;
+}
+
+.desktop-terminal-dock {
+  position: fixed;
+  right: var(--space-sm);
+  bottom: var(--space-sm);
+  left: calc(248px + var(--space-sm));
+  z-index: 68;
+  border: 1px solid rgba(20, 24, 30, 0.16);
+  border-radius: var(--radius-panel);
+  background: #111315;
+  color: #e6e8eb;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.desktop-terminal-dock.collapsed {
+  left: auto;
+  width: min(760px, calc(100vw - 248px - var(--space-md)));
+  height: 44px;
+  grid-template-rows: auto;
+}
+
+.desktop-terminal-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 72px;
+  height: 14px;
+  transform: translateX(-50%);
+  border-radius: 0 0 999px 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.6);
+  display: grid;
+  place-items: center;
+  cursor: ns-resize;
+  z-index: 2;
+}
+
+.desktop-terminal-header {
+  min-height: 44px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+  padding: 0 var(--space-xs);
+}
+
+.desktop-terminal-tabs,
+.desktop-terminal-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.desktop-terminal-tabs {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.desktop-terminal-tab {
+  min-width: 0;
+  max-width: 220px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.74);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.desktop-terminal-tab span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.desktop-terminal-tab small {
+  color: #e8b16d;
+  font-size: 11px;
+}
+
+.desktop-terminal-tab.active {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.desktop-terminal-tab.exited {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.desktop-terminal-actions {
+  flex: 0 0 auto;
+}
+
+.desktop-terminal-actions > span {
+  max-width: min(420px, 32vw);
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-terminal-actions .icon-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.desktop-terminal-actions .icon-button:hover,
+.desktop-terminal-actions .icon-button:focus-visible {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.desktop-terminal-boundary {
+  min-height: 32px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px var(--space-sm);
+}
+
+.desktop-terminal-body {
+  min-height: 0;
+  position: relative;
+  background: #111315;
+}
+
+.desktop-terminal-pane {
+  position: absolute;
+  inset: 0;
+  padding: 8px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.desktop-terminal-pane.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.desktop-terminal-pane .xterm {
+  height: 100%;
+}
+
+.desktop-terminal-pane .xterm-viewport {
+  scrollbar-width: thin;
+}
+
+@media (max-width: 900px) {
+  .desktop-terminal-dock,
+  .desktop-terminal-dock.collapsed {
+    left: var(--space-sm);
+    width: auto;
+  }
+
+  .desktop-terminal-actions > span {
+    display: none;
+  }
+}
+

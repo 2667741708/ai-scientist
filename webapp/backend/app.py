@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import requests
 
@@ -26,6 +29,7 @@ try:
         get_recovery_challenge,
         init_auth_store,
         list_accounts,
+        record_local_account_secret,
         require_permission,
         require_user,
         reset_account_password,
@@ -66,6 +70,22 @@ try:
         list_phase_tool_policies,
     )
     from backend.research_skills import get_research_skill, list_research_skills
+    from backend.remote_workspace import (
+        RemoteWorkspaceError,
+        create_tmux_session,
+        delete_profile as delete_remote_workspace_profile,
+        get_project_remote_root,
+        import_ssh_config_profile,
+        kill_tmux_session,
+        list_profiles as list_remote_workspace_profiles,
+        list_remote_directory,
+        list_tmux_sessions,
+        parse_ssh_config,
+        remote_workspace_status,
+        rename_tmux_session,
+        save_profile as save_remote_workspace_profile,
+        set_project_remote_root,
+    )
     from backend.ssh_training import (
         SshTrainingError,
         build_ssh_mcp_server_templates,
@@ -81,6 +101,14 @@ try:
         terminal_command_status,
         validate_terminal_command,
     )
+    from backend.web_terminal import (
+        WebTerminalError,
+        close_web_terminal_session,
+        create_web_terminal_session,
+        get_web_terminal_session,
+        list_web_terminal_sessions,
+        web_terminal_status,
+    )
     from backend.web_evidence import WebEvidenceError, extract_web_evidence
     from backend.web_search import WebSearchError, search_public_web
     from backend.worker_runtime import ResearchWorkerRuntime, default_worker_owner
@@ -92,6 +120,7 @@ except ModuleNotFoundError:
         get_recovery_challenge,
         init_auth_store,
         list_accounts,
+        record_local_account_secret,
         require_permission,
         require_user,
         reset_account_password,
@@ -125,6 +154,22 @@ except ModuleNotFoundError:
         list_phase_tool_policies,
     )
     from research_skills import get_research_skill, list_research_skills
+    from remote_workspace import (
+        RemoteWorkspaceError,
+        create_tmux_session,
+        delete_profile as delete_remote_workspace_profile,
+        get_project_remote_root,
+        import_ssh_config_profile,
+        kill_tmux_session,
+        list_profiles as list_remote_workspace_profiles,
+        list_remote_directory,
+        list_tmux_sessions,
+        parse_ssh_config,
+        remote_workspace_status,
+        rename_tmux_session,
+        save_profile as save_remote_workspace_profile,
+        set_project_remote_root,
+    )
     from ssh_training import (
         SshTrainingError,
         build_ssh_mcp_server_templates,
@@ -139,6 +184,14 @@ except ModuleNotFoundError:
         run_terminal_command,
         terminal_command_status,
         validate_terminal_command,
+    )
+    from web_terminal import (
+        WebTerminalError,
+        close_web_terminal_session,
+        create_web_terminal_session,
+        get_web_terminal_session,
+        list_web_terminal_sessions,
+        web_terminal_status,
     )
     from web_evidence import WebEvidenceError, extract_web_evidence
     from web_search import WebSearchError, search_public_web
@@ -177,6 +230,10 @@ class RunRequest(BaseModel):
     refinement_mode: Literal["new_run", "continue_from_run", "revise_hypotheses"] = "new_run"
     memory_scope: Literal["current_run", "project", "library", "global"] = "project"
     library_id: Optional[str] = Field(default=None, max_length=120)
+    auto_discover_papers: bool = True
+    auto_ingest_papers: bool = True
+    paper_discovery_limit: int = Field(default=8, ge=1, le=20)
+    paper_ingest_limit: int = Field(default=4, ge=0, le=12)
 
 
 class ContinueRunRequest(BaseModel):
@@ -196,6 +253,10 @@ class ContinueRunRequest(BaseModel):
     refinement_mode: Literal["new_run", "continue_from_run", "revise_hypotheses"] = "continue_from_run"
     memory_scope: Optional[Literal["current_run", "project", "library", "global"]] = None
     library_id: Optional[str] = Field(default=None, max_length=120)
+    auto_discover_papers: Optional[bool] = None
+    auto_ingest_papers: Optional[bool] = None
+    paper_discovery_limit: Optional[int] = Field(default=None, ge=1, le=20)
+    paper_ingest_limit: Optional[int] = Field(default=None, ge=0, le=12)
 
 
 class TranslationRequest(BaseModel):
@@ -203,6 +264,8 @@ class TranslationRequest(BaseModel):
     text: str = Field(..., min_length=1)
     explanation: Optional[str] = None
     experiment: Optional[str] = None
+    target_language: str = Field(default="zh-Hans", max_length=20)
+    provider: Literal["auto", "microsoft", "model"] = "auto"
 
 
 class AuthLoginRequest(BaseModel):
@@ -264,6 +327,11 @@ class PdfParseRequest(BaseModel):
     library_id: Optional[str] = Field(default=None, max_length=120)
 
 
+class RagflowReindexRequest(BaseModel):
+    library_id: Optional[str] = Field(default=None, max_length=120)
+    paper_id: Optional[str] = Field(default=None, max_length=160)
+
+
 class LiteratureLibraryCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=120)
     description: Optional[str] = Field(default=None, max_length=500)
@@ -295,7 +363,12 @@ class LiteratureDiscoveryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=500)
     library_id: Optional[str] = Field(default=None, max_length=120)
     preferred_source: Literal["auto", "all", "arxiv", "pubmed", "scholar"] = "auto"
-    max_results: int = Field(default=6, ge=1, le=12)
+    max_results: int = Field(default=12, ge=1, le=20)
+    planning_mode: Literal["llm", "rules"] = "llm"
+    model_name: Optional[str] = Field(default=None, max_length=120)
+    auto_discover_pdf_links: bool = True
+    auto_ingest_pdfs: bool = False
+    auto_ingest_limit: int = Field(default=4, ge=0, le=12)
     approval: ToolWorkflowApproval = Field(default_factory=ToolWorkflowApproval)
 
 
@@ -381,6 +454,19 @@ class FileSnapshotWorkflowRequest(BaseModel):
     approval: ToolWorkflowApproval = Field(default_factory=ToolWorkflowApproval)
 
 
+class ProjectToolRegistrationRequest(BaseModel):
+    tool_name: str = Field(..., min_length=2, max_length=120)
+    user_title: Optional[str] = Field(default=None, max_length=160)
+    description: str = Field(..., min_length=4, max_length=1200)
+    toolset: str = Field(default="project_custom", min_length=2, max_length=80)
+    phases: List[str] = Field(default_factory=lambda: ["evidence_audit"], max_length=8)
+    risk_level: Literal["read", "network", "write", "sandboxed_write", "background_write"] = "read"
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+    execution_boundary: str = Field(default="schema_registered_only", max_length=1000)
+    run_id: Optional[str] = Field(default=None, max_length=80)
+    approval: ToolWorkflowApproval = Field(default_factory=ToolWorkflowApproval)
+
+
 class CodeAnalysisWorkflowRequest(BaseModel):
     code: str = Field(..., min_length=1, max_length=20_000)
     phase: str = Field(default="experiment_analysis", min_length=2, max_length=80)
@@ -419,6 +505,51 @@ class TerminalCommandWorkflowRequest(BaseModel):
     run_id: Optional[str] = Field(default=None, max_length=80)
     timeout_seconds: int = Field(default=120, ge=1, le=3600)
     approval: ToolWorkflowApproval = Field(default_factory=ToolWorkflowApproval)
+
+
+class WebTerminalSessionCreateRequest(BaseModel):
+    profile: Optional[str] = Field(default=None, max_length=80)
+    cwd: Optional[str] = Field(default=None, max_length=1200)
+    cols: int = Field(default=100, ge=20, le=400)
+    rows: int = Field(default=30, ge=8, le=120)
+    ssh_target: Optional[str] = Field(default=None, max_length=300)
+    ssh_remote_cwd: Optional[str] = Field(default=None, max_length=1200)
+    ssh_tmux_session: Optional[str] = Field(default=None, max_length=120)
+
+
+class RemoteWorkspaceProfileRequest(BaseModel):
+    profile_id: Optional[str] = Field(default=None, max_length=80)
+    name: str = Field(..., min_length=1, max_length=120)
+    host: Optional[str] = Field(default=None, max_length=300)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: Optional[str] = Field(default=None, max_length=120)
+    auth_type: Literal["ssh_config", "password", "private_key", "agent"] = "agent"
+    password: Optional[str] = Field(default=None, max_length=2000)
+    private_key_path: Optional[str] = Field(default=None, max_length=1200)
+    passphrase: Optional[str] = Field(default=None, max_length=2000)
+    ssh_config_alias: Optional[str] = Field(default=None, max_length=240)
+    default_remote_path: Optional[str] = Field(default=None, max_length=1200)
+
+
+class RemoteWorkspaceImportRequest(BaseModel):
+    alias: str = Field(..., min_length=1, max_length=240)
+    password: Optional[str] = Field(default=None, max_length=2000)
+    default_remote_path: Optional[str] = Field(default=None, max_length=1200)
+
+
+class ProjectRemoteRootRequest(BaseModel):
+    profile_id: str = Field(..., min_length=1, max_length=80)
+    remote_path: str = Field(..., min_length=1, max_length=1200)
+    label: Optional[str] = Field(default=None, max_length=160)
+
+
+class RemoteTmuxCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    workdir: Optional[str] = Field(default=None, max_length=1200)
+
+
+class RemoteTmuxRenameRequest(BaseModel):
+    new_name: str = Field(..., min_length=1, max_length=120)
 
 
 TaskStatus = Literal["backlog", "ready", "running", "blocked", "done", "archived"]
@@ -591,30 +722,87 @@ class RunRecord(BaseModel):
     error: Optional[str] = None
 
 
+class ProjectArtifactRequest(BaseModel):
+    run_id: str = Field(..., min_length=1, max_length=80)
+    artifact_type: Literal["hypothesis", "evidence_link", "experiment_plan"]
+    target_ref: Dict[str, Any] = Field(default_factory=dict)
+    title: str = Field(default="", max_length=240)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExperimentPlanRequest(BaseModel):
+    run_id: str = Field(..., min_length=1, max_length=80)
+    hypothesis_index: int = Field(0, ge=0, le=200)
+
+
 app = FastAPI(title="Open Coscientist Studio API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+def _configured_cors_origins() -> list[str]:
+    defaults = [
         "http://127.0.0.1:5174",
         "http://localhost:5174",
         "http://127.0.0.1:5175",
         "http://localhost:5175",
-        "http://127.0.0.1:8001",
-        "http://localhost:8001",
-        "http://127.0.0.1:8002",
-        "http://localhost:8002",
-        "http://127.0.0.1:8003",
-        "http://localhost:8003",
-        "http://127.0.0.1:8004",
-        "http://localhost:8004",
         "http://127.0.0.1:4174",
         "http://localhost:4174",
-    ],
+    ] + [f"http://127.0.0.1:{port}" for port in range(8001, 8031)] + [
+        f"http://localhost:{port}" for port in range(8001, 8031)
+    ]
+    configured = [
+        origin.strip()
+        for origin in os.getenv("COSCIENTIST_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    return list(dict.fromkeys([*defaults, *configured]))
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+REQUIRE_API_AUTH = os.getenv("COSCIENTIST_REQUIRE_AUTH", "0").lower() in {"1", "true", "yes", "on"}
+API_RATE_LIMIT_PER_MINUTE = max(0, int(os.getenv("COSCIENTIST_RATE_LIMIT_PER_MINUTE", "0")))
+API_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_api_rate_limit_hits: Dict[str, deque[float]] = defaultdict(deque)
+PUBLIC_API_PATHS = {
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/recovery/challenge",
+    "/api/auth/recovery/reset",
+    "/api/health",
+}
+
+
+@app.middleware("http")
+async def optional_api_auth(request, call_next):
+    """Enable a production auth boundary without changing local demo defaults."""
+    path = request.url.path
+    if API_RATE_LIMIT_PER_MINUTE > 0 and path.startswith("/api/") and request.method != "OPTIONS":
+        client_host = request.client.host if request.client else "unknown"
+        rate_key = f"{client_host}:{path}"
+        now = time.monotonic()
+        hits = _api_rate_limit_hits[rate_key]
+        while hits and now - hits[0] >= API_RATE_LIMIT_WINDOW_SECONDS:
+            hits.popleft()
+        if len(hits) >= API_RATE_LIMIT_PER_MINUTE:
+            retry_after = max(1, int(API_RATE_LIMIT_WINDOW_SECONDS - (now - hits[0])))
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "api rate limit exceeded", "retry_after_seconds": retry_after},
+                headers={"Retry-After": str(retry_after)},
+            )
+        hits.append(now)
+    if REQUIRE_API_AUTH and path.startswith("/api/") and path not in PUBLIC_API_PATHS and request.method != "OPTIONS":
+        try:
+            require_user(request.headers.get("authorization"))
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, (str, dict, list)) else "unauthorized"
+            return JSONResponse(status_code=exc.status_code, content={"detail": detail})
+    return await call_next(request)
 
 runs: Dict[str, RunRecord] = {}
 research_chat_action_proposals: Dict[str, Dict[str, Any]] = {}
@@ -638,6 +826,8 @@ EXPERIMENT_ARTIFACT_ROOT = KB_ROOT / "experiment_jobs"
 SSH_TRAINING_ARTIFACT_ROOT = KB_ROOT / "ssh_training_jobs"
 TERMINAL_COMMAND_ARTIFACT_ROOT = KB_ROOT / "terminal_command_jobs"
 SOURCE_EVIDENCE_ROOT = Path(os.getenv("COSCIENTIST_SOURCE_EVIDENCE_ROOT", str(ROOT)))
+PROJECT_TOOL_DRAFTS_PATH = KB_ROOT / "project_tool_drafts.json"
+REMOTE_WORKSPACE_STORE_PATH = KB_ROOT / "remote_workspaces.json"
 worker_runtime: Optional[ResearchWorkerRuntime] = None
 research_chat_llm_module: Optional[Any] = None
 
@@ -648,6 +838,11 @@ PDF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 URL_PATTERN = re.compile(r"(?P<value>https?://[^\s\"'<>]+)", re.IGNORECASE)
+SOURCE_FILE_PATTERN = re.compile(
+    r"(?P<value>(?:[a-zA-Z]:\\[^\r\n\"'<>]+|(?:\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])"
+    r"[^\r\n\"'<>]+))",
+    re.IGNORECASE,
+)
 COMMAND_CODE_BLOCK_PATTERN = re.compile(
     r"```(?:powershell|pwsh|bash|sh|shell|cmd|terminal)?\s*\n(?P<command>[\s\S]+?)```",
     re.IGNORECASE,
@@ -656,7 +851,7 @@ WEB_SEARCH_SITE_PATTERN = re.compile(
     r"(?:^|\s)site:(?P<domain>[A-Za-z0-9][A-Za-z0-9.-]{0,250}[A-Za-z0-9])",
     re.IGNORECASE,
 )
-PROJECT_CHAT_KNOWLEDGE_VERSION = "project-chat-rag-v1"
+PROJECT_CHAT_KNOWLEDGE_VERSION = "project-chat-rag-v3"
 
 
 def _path_summary(value: str) -> str:
@@ -712,6 +907,87 @@ def _extract_workdir(text: str) -> Optional[str]:
         return None
     value = match.group("workdir").strip().strip("'\"`")
     return value[:1200] if value else None
+
+
+def _clean_source_file_candidate(value: str) -> str:
+    candidate = (value or "").strip(" \t\r\n：:。")
+    candidate = re.split(
+        r"\s+(?:start_line|line_count|max_bytes|起始行|开始行|行数|读取|快照)\b",
+        candidate,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    candidate = candidate.strip().strip("'\"`").rstrip("，。,;；")
+    return candidate[:1200]
+
+
+def _extract_positive_int_after(text: str, terms: List[str], *, default: Optional[int] = None) -> Optional[int]:
+    for term in terms:
+        match = re.search(rf"{re.escape(term)}\s*[:=：]?\s*(?P<value>\d+)", text, re.IGNORECASE)
+        if match:
+            return max(1, int(match.group("value")))
+    return default
+
+
+def _extract_source_file_request(text: str) -> Optional[Dict[str, Any]]:
+    if not _contains_any(
+        text,
+        [
+            "文件快照",
+            "读取文件",
+            "读取本地文件",
+            "查看本地文件",
+            "本地文件快照",
+            "source snapshot",
+            "file snapshot",
+            "local file",
+            "source_path",
+        ],
+    ):
+        return None
+    source_path = ""
+    explicit = re.search(
+        r"(?:source_path|file|path|文件|路径)\s*[:=：]\s*(?P<path>[^\r\n]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if explicit:
+        source_path = _clean_source_file_candidate(explicit.group("path"))
+    if not source_path:
+        match = SOURCE_FILE_PATTERN.search(text)
+        if match:
+            source_path = _clean_source_file_candidate(match.group("value"))
+    if not source_path:
+        return {}
+    payload: Dict[str, Any] = {"source_path": source_path}
+    start_line = _extract_positive_int_after(text, ["start_line", "起始行", "开始行"])
+    line_count = _extract_positive_int_after(text, ["line_count", "行数", "读取行数"])
+    if start_line is not None:
+        payload["start_line"] = start_line
+    if line_count is not None:
+        payload["line_count"] = line_count
+    return payload
+
+
+def _extract_tool_registration_request(text: str) -> Optional[Dict[str, Any]]:
+    if not _contains_any(text, ["注册工具", "新增工具", "添加工具", "创建工具", "register tool", "add tool"]):
+        return None
+    payload: Dict[str, Any] = {}
+    name_match = re.search(
+        r"(?:tool_name|工具名|工具 ID|工具id|name)\s*[:=：]\s*(?P<name>[A-Za-z0-9_.-]{2,120})",
+        text,
+        re.IGNORECASE,
+    )
+    if name_match:
+        payload["tool_name"] = name_match.group("name").strip()
+    purpose_match = re.search(
+        r"(?:description|描述|用途|purpose)\s*[:=：]\s*(?P<description>[^\r\n]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if purpose_match:
+        payload["description"] = purpose_match.group("description").strip()[:1200]
+    return payload
 
 
 def _extract_terminal_command_request(text: str) -> Optional[Dict[str, Any]]:
@@ -1041,6 +1317,205 @@ def _tool_capability_status(tool_name: str) -> Dict[str, Any]:
         return {"available": False, "status": "limited", "summary": "运行准备状态暂时不可读。"}
 
 
+def _tool_registration_capability_status() -> Dict[str, Any]:
+    return {
+        "available": True,
+        "status": "ready",
+        "summary": "可注册项目工具 schema 草案；不会安装执行器或写入任意代码。",
+    }
+
+
+def _virtual_tool_register_spec() -> Dict[str, Any]:
+    return {
+        "name": "tool.register_draft",
+        "toolset": "tool_management",
+        "description": "Register a schema-only project tool draft after explicit user confirmation.",
+        "phases": ["supervisor", "operator_diagnostics"],
+        "risk_level": "write",
+        "requires": ["explicit approval", "schema validation", "project audit log"],
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string"},
+                "user_title": {"type": "string"},
+                "description": {"type": "string"},
+                "toolset": {"type": "string"},
+                "phases": {"type": "array", "items": {"type": "string"}},
+                "risk_level": {"type": "string"},
+                "input_schema": {"type": "object"},
+                "execution_boundary": {"type": "string"},
+            },
+            "required": ["tool_name", "description"],
+        },
+        "availability": {
+            "available": True,
+            "mode": "schema_draft_only",
+            "reason": "Registers tool metadata only; execution adapter remains unavailable until implemented and reviewed.",
+            "checked_at": time.time(),
+        },
+    }
+
+
+def _load_project_tool_drafts() -> List[Dict[str, Any]]:
+    try:
+        if not PROJECT_TOOL_DRAFTS_PATH.exists():
+            return []
+        with PROJECT_TOOL_DRAFTS_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        print(f"Project tool draft load failed: {exc}", file=sys.stderr)
+        return []
+    drafts = payload.get("drafts") if isinstance(payload, dict) else payload
+    if not isinstance(drafts, list):
+        return []
+    return [item for item in drafts if isinstance(item, dict)]
+
+
+def _save_project_tool_drafts(drafts: List[Dict[str, Any]]) -> None:
+    PROJECT_TOOL_DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "updated_at": time.time(), "drafts": drafts}
+    with PROJECT_TOOL_DRAFTS_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _slug_project_tool_name(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_.-]+", "_", value.strip().lower()).strip("._-")
+    normalized = re.sub(r"_+", "_", normalized)
+    if not normalized:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_project_tool_name", "message": "工具名必须包含可稳定保存的英文字母、数字、点、下划线或短横线。"},
+        )
+    if not normalized.startswith("project."):
+        normalized = f"project.{normalized}"
+    if len(normalized) > 120 or not re.match(r"^project\.[a-z0-9][a-z0-9_.-]{1,111}$", normalized):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_project_tool_name", "message": "工具名必须形如 project.my_tool，且只能包含 a-z、0-9、点、下划线或短横线。"},
+        )
+    return normalized
+
+
+def _normalize_project_toolset(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower()).strip("_-")
+    return normalized[:80] if normalized else "project_custom"
+
+
+def _normalize_project_tool_phases(phases: List[str]) -> List[str]:
+    known = {item["phase"] for item in list_phase_tool_policies()}
+    normalized: List[str] = []
+    for phase in phases or ["evidence_audit"]:
+        canonical = canonical_phase(str(phase or ""))
+        if canonical not in known:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_project_tool_phase", "message": f"未知 phase：{phase}。"},
+            )
+        if canonical not in normalized:
+            normalized.append(canonical)
+    return normalized[:8] or ["evidence_audit"]
+
+
+def _normalize_project_tool_input_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    if not schema:
+        normalized: Dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+    elif not isinstance(schema, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_project_tool_schema", "message": "input_schema 必须是 JSON object。"},
+        )
+    else:
+        normalized = dict(schema)
+    blocked_keys = {"implementation", "script", "code", "command", "handler", "entrypoint", "python", "shell"}
+    if any(key in normalized for key in blocked_keys):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "project_tool_schema_contains_execution",
+                "message": "工具草案只能注册 schema，不能包含 implementation/script/command/handler 等执行字段。",
+            },
+        )
+    normalized["type"] = "object"
+    properties = normalized.get("properties") or {}
+    if not isinstance(properties, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_project_tool_schema", "message": "input_schema.properties 必须是 object。"},
+        )
+    cleaned_properties: Dict[str, Any] = {}
+    for key, value in properties.items():
+        prop_key = str(key)
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]{0,80}$", prop_key):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_project_tool_schema_property", "message": f"非法 schema 字段名：{prop_key}。"},
+            )
+        cleaned_properties[prop_key] = value if isinstance(value, dict) else {"type": "string", "description": str(value)[:300]}
+    required = normalized.get("required") or []
+    if not isinstance(required, list):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_project_tool_schema", "message": "input_schema.required 必须是数组。"},
+        )
+    cleaned_required = [str(item) for item in required if str(item) in cleaned_properties]
+    normalized["properties"] = cleaned_properties
+    normalized["required"] = cleaned_required
+    encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    if len(encoded.encode("utf-8")) > 12_000:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "project_tool_schema_too_large", "message": "工具 schema 过大，请精简字段和描述。"},
+        )
+    return normalized
+
+
+def _project_tool_draft_to_registry_tool(draft: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": draft.get("name"),
+        "toolset": draft.get("toolset") or "project_custom",
+        "description": draft.get("description") or "",
+        "phases": list(draft.get("phases") or []),
+        "risk_level": draft.get("risk_level") or "read",
+        "requires": ["registered project tool draft", "execution adapter review"],
+        "input_schema": draft.get("input_schema") or {"type": "object", "properties": {}, "required": []},
+        "availability": {
+            "available": False,
+            "mode": "registered_draft",
+            "reason": "This project tool is registered as schema only. Execution requires a reviewed adapter.",
+            "checked_at": draft.get("registered_at") or time.time(),
+        },
+        "metadata": {
+            "user_title": draft.get("user_title"),
+            "execution_boundary": draft.get("execution_boundary"),
+            "registered_at": draft.get("registered_at"),
+            "result_ref": draft.get("result_ref"),
+        },
+    }
+
+
+def _project_tool_registry_tools(*, phase: Optional[str] = None, toolset: Optional[str] = None) -> List[Dict[str, Any]]:
+    normalized_phase = canonical_phase(phase) if phase else None
+    normalized_toolset = toolset.strip().lower() if toolset else None
+    tools: List[Dict[str, Any]] = []
+    for draft in _load_project_tool_drafts():
+        tool = _project_tool_draft_to_registry_tool(draft)
+        phases = {canonical_phase(item) for item in tool.get("phases") or []}
+        if normalized_phase and normalized_phase not in phases:
+            continue
+        if normalized_toolset and normalized_toolset != str(tool.get("toolset") or "").lower():
+            continue
+        tools.append(tool)
+    return tools
+
+
+def _virtual_tool_matches_filters(tool: Dict[str, Any], *, phase: Optional[str], toolset: Optional[str]) -> bool:
+    if phase and canonical_phase(phase) not in {canonical_phase(item) for item in tool.get("phases") or []}:
+        return False
+    if toolset and toolset.strip().lower() != str(tool.get("toolset") or "").lower():
+        return False
+    return True
+
+
 def _chat_capabilities() -> List[Dict[str, Any]]:
     pdf_status = _tool_capability_status("pdf.parse_to_knowledge_base")
     web_status = _tool_capability_status("browser.web_extract")
@@ -1048,6 +1523,8 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
     mcp_status = _tool_capability_status("mcp.literature_review")
     terminal_status = _tool_capability_status("terminal.command")
     ssh_status = _tool_capability_status("ssh.training_command")
+    file_status = _tool_capability_status("file.source_snapshot")
+    tool_register_status = _tool_registration_capability_status()
     return [
         {
             "id": "project.answer_with_rag",
@@ -1097,6 +1574,18 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
             "expectedOutputs": ["run summary", "phase state", "next actions"],
             "groundingBoundary": "run_audit",
             "availability": {"available": True, "status": "ready", "summary": "可读取当前或最近一次 run。"},
+        },
+        {
+            "id": "project.summarize_artifacts",
+            "userTitle": "汇总项目论文、假设、实验和报告",
+            "userSummary": "读取当前 run audit、本地证据链接和工具检索摘要，汇总这个项目已有的论文/网页证据、候选假设、实验计划和报告草稿边界。",
+            "intent": "summarize_project_artifacts",
+            "taskArea": "project_help",
+            "executionMode": "read_only",
+            "requiredInputs": [{"key": "run_id", "label": "当前运行", "type": "run_ref", "required": False}],
+            "expectedOutputs": ["artifact inventory", "hypotheses", "evidence sources", "experiment plans", "report outline"],
+            "groundingBoundary": "run_audit",
+            "availability": {"available": True, "status": "ready", "summary": "只读取当前 run 和本地知识库索引，不执行外部工具。"},
         },
         {
             "id": "research.continue_run",
@@ -1270,6 +1759,35 @@ def _chat_capabilities() -> List[Dict[str, Any]]:
             "availability": {"available": True, "status": "ready", "summary": "只返回摘要和跳转引用，不铺开大型结果。"},
         },
         {
+            "id": "file.source_snapshot",
+            "userTitle": "读取本地文件快照",
+            "userSummary": "经用户确认后读取配置证据根目录内的本地源码/文本文件片段，生成分页、hash 和审计记录。",
+            "intent": "snapshot_local_file",
+            "taskArea": "evidence",
+            "executionMode": "approval_required",
+            "approvalScope": "file.source_snapshot",
+            "requiredInputs": [{"key": "source_path", "label": "本地文件路径", "type": "file", "required": True}],
+            "expectedOutputs": ["source file snapshot", "line range", "content hash", "tool result provenance"],
+            "groundingBoundary": "local_file_snapshot",
+            "availability": file_status,
+        },
+        {
+            "id": "tool.register_draft",
+            "userTitle": "注册项目工具草案",
+            "userSummary": "经用户确认后保存一个 schema-only 项目工具草案；不会安装执行器、不会写入任意工具代码。",
+            "intent": "register_project_tool",
+            "taskArea": "tool_management",
+            "executionMode": "approval_required",
+            "approvalScope": "tool.register_draft",
+            "requiredInputs": [
+                {"key": "tool_name", "label": "工具 ID", "type": "text", "required": True},
+                {"key": "description", "label": "工具用途", "type": "text", "required": True},
+            ],
+            "expectedOutputs": ["project tool draft", "validated input schema", "audit result", "registry visibility"],
+            "groundingBoundary": "tool_registry_draft",
+            "availability": tool_register_status,
+        },
+        {
             "id": "runtime.terminal_command",
             "userTitle": "执行本地终端命令",
             "userSummary": "通过 permission-gated terminal workflow 执行本机 PowerShell/bash 命令，并保存 stdout/stderr artifact。",
@@ -1324,8 +1842,10 @@ def _ensure_project_chat_knowledge_index() -> None:
                 "研究聊天输入框使用 Enter 换行，Ctrl+Enter 或 Cmd+Enter 发送。这个约定适用于项目 AI、研究工作台命令中心和侧边聊天。",
                 "## Evidence boundary",
                 "回答必须区分 project system knowledge、parsed fulltext、knowledge base snippets、run audit、tournament audit 和 model_without_local_evidence。Demo simulation 只能验证 UI/schema/流程，不能当作真实科学证据。",
+                "证据核验报告中的当前证据来自三类来源：SQL RAG/parsed fulltext 检索片段、当前 run 的 hypothesis_evidence_links、以及用户确认后写入 provenance 的外部 MCP 文献候选。possible counter-evidence 是从这些片段中检测到 negative/failed/contradictory 等负面标记，必须提示人工复核。",
                 "## Elo and tournament ranking",
                 "Elo 是一种基于成对比较结果更新相对评分的排序方法。在本工作台里，候选假设会通过 pairwise / tournament 比较产生 winner、loser、confidence、before/after Elo 和 delta。Elo 不是绝对真理分数，只是当前评审条件和证据边界下的相对优先级信号。",
+                "如果某条假设在 ranking 中是 winner，但后续 evidence audit 发现潜在反证，必须明确说明：winner 表示 tournament 阶段的相对优先级，不表示该假设已被证据支撑；后续应优先审计反证来源、更新证据边界，必要时重新 ranking。",
                 "## User-facing task map",
                 "\n".join(capability_lines),
             ]
@@ -1347,6 +1867,7 @@ def _contains_any(text: str, terms: List[str]) -> bool:
     lowered = text.lower()
     return any(term.lower() in lowered for term in terms)
 
+
 def _looks_like_start_research_run_request(text: str) -> bool:
     if not _extract_research_goal(text):
         return False
@@ -1366,6 +1887,31 @@ def _looks_like_start_research_run_request(text: str) -> bool:
             "rank",
             "review",
             "workflow",
+        ],
+    )
+
+
+def _looks_like_current_project_inventory_question(text: str) -> bool:
+    if not _contains_any(text, ["当前这个项目", "当前项目", "这个项目", "指定项目", "项目里", "project"]):
+        return False
+    return _contains_any(
+        text,
+        [
+            "能做什么",
+            "可以实现什么",
+            "有什么",
+            "有哪些",
+            "产出",
+            "论文",
+            "假设",
+            "实验",
+            "报告",
+            "artifact",
+            "inventory",
+            "papers",
+            "hypotheses",
+            "experiments",
+            "reports",
         ],
     )
 
@@ -2426,6 +2972,283 @@ def _report_draft_result(context: ResearchChatContext) -> Dict[str, Any]:
     }
 
 
+def _compact_artifact_text(value: Any, *, limit: int = 700) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:limit]
+
+
+def _append_project_artifact_evidence(
+    items: List[Dict[str, Any]],
+    seen: set[str],
+    raw: Dict[str, Any],
+    *,
+    source_channel: str,
+    hypothesis_index: Optional[int] = None,
+) -> None:
+    if not isinstance(raw, dict):
+        return
+    title = _compact_artifact_text(
+        raw.get("title")
+        or raw.get("chunk_title")
+        or raw.get("source")
+        or raw.get("evidence_summary")
+        or raw.get("query")
+        or "未命名证据线索",
+        limit=180,
+    )
+    url = _compact_artifact_text(raw.get("url") or raw.get("evidence_path") or raw.get("link") or "", limit=600)
+    evidence_id = _compact_artifact_text(raw.get("evidence_id") or raw.get("chunk_id") or raw.get("result_id") or "", limit=160)
+    paper_id = _compact_artifact_text(raw.get("paper_id") or raw.get("parse_run_id") or "", limit=160)
+    summary = _compact_artifact_text(
+        raw.get("evidence_summary")
+        or raw.get("snippet")
+        or raw.get("text_preview")
+        or raw.get("abstract")
+        or raw.get("summary")
+        or raw.get("content")
+        or "",
+        limit=850,
+    )
+    key = "|".join(part for part in (url, evidence_id, paper_id, title) if part) or title
+    if key in seen:
+        return
+    seen.add(key)
+    item = {
+        "title": title,
+        "url": url,
+        "paper_id": paper_id or None,
+        "evidence_id": evidence_id or None,
+        "source_channel": source_channel,
+        "source_reliability": raw.get("source_reliability") or raw.get("reliability") or raw.get("type"),
+        "support_level": raw.get("support_level"),
+        "evidence_summary": summary,
+        "text_preview": summary,
+        "hypothesis_index": raw.get("hypothesis_index", hypothesis_index),
+        "created_at": raw.get("created_at"),
+    }
+    items.append({key: value for key, value in item.items() if value not in (None, "", [])})
+
+
+def _run_evidence_inventory(record: RunRecord, *, limit: int = 16) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    items: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    counts = {
+        "hypothesisEvidenceLinks": 0,
+        "evidenceRetrievals": 0,
+        "citationMapItems": 0,
+        "knowledgeSupportItems": 0,
+        "toolResultSummaries": 0,
+        "parsedFulltextItems": 0,
+        "webEvidenceItems": 0,
+    }
+
+    try:
+        links = knowledge_base.get_hypothesis_evidence_links(record.run_id)
+    except Exception:
+        links = []
+    counts["hypothesisEvidenceLinks"] = len(links)
+    for link in links:
+        if isinstance(link, dict):
+            _append_project_artifact_evidence(items, seen, link, source_channel="run_evidence_link")
+
+    for hypothesis_index, hypothesis in enumerate(record.hypotheses):
+        if not isinstance(hypothesis, dict):
+            continue
+        support = hypothesis.get("knowledge_base_support")
+        if isinstance(support, list):
+            counts["knowledgeSupportItems"] += len([item for item in support if isinstance(item, dict)])
+            for item in support:
+                if isinstance(item, dict):
+                    _append_project_artifact_evidence(
+                        items,
+                        seen,
+                        item,
+                        source_channel="hypothesis_knowledge_support",
+                        hypothesis_index=hypothesis_index,
+                    )
+        citation_map = hypothesis.get("citation_map")
+        if isinstance(citation_map, dict):
+            for citation_key, citation in citation_map.items():
+                counts["citationMapItems"] += 1
+                if isinstance(citation, dict):
+                    payload = {"evidence_id": citation_key, **citation}
+                else:
+                    payload = {"evidence_id": citation_key, "title": str(citation)}
+                _append_project_artifact_evidence(
+                    items,
+                    seen,
+                    payload,
+                    source_channel="hypothesis_citation_map",
+                    hypothesis_index=hypothesis_index,
+                )
+
+    try:
+        retrievals = knowledge_base.get_evidence_retrievals(record.run_id)
+    except Exception:
+        retrievals = []
+    counts["evidenceRetrievals"] = len(retrievals)
+    for retrieval in retrievals:
+        if not isinstance(retrieval, dict):
+            continue
+        for result in retrieval.get("results") or []:
+            if isinstance(result, dict):
+                _append_project_artifact_evidence(
+                    items,
+                    seen,
+                    {
+                        "query": retrieval.get("query"),
+                        "hypothesis_index": retrieval.get("hypothesis_index"),
+                        **result,
+                    },
+                    source_channel=str(retrieval.get("tool_name") or "evidence_retrieval"),
+                )
+
+    try:
+        tool_results = knowledge_base.list_tool_results(record.run_id, limit=12)
+    except Exception:
+        tool_results = []
+    counts["toolResultSummaries"] = len(tool_results)
+    for result in tool_results:
+        if isinstance(result, dict):
+            _append_project_artifact_evidence(
+                items,
+                seen,
+                {
+                    "title": f"{result.get('tool_name') or 'tool'} / {result.get('result_kind') or 'result'}",
+                    "summary": result.get("summary"),
+                    "result_id": result.get("result_id"),
+                    "created_at": result.get("created_at"),
+                },
+                source_channel="tool_result_summary",
+            )
+
+    counts["parsedFulltextItems"] = sum(1 for item in items if item.get("source_reliability") == "parsed_fulltext")
+    counts["webEvidenceItems"] = sum(
+        1
+        for item in items
+        if "web" in str(item.get("source_channel") or "").lower()
+        or "html" in str(item.get("source_reliability") or "").lower()
+    )
+    return items[:limit], counts
+
+
+def _run_experiment_inventory(record: RunRecord, *, limit: int = 8) -> List[Dict[str, Any]]:
+    experiments: List[Dict[str, Any]] = []
+    for index, hypothesis in enumerate(record.hypotheses):
+        if not isinstance(hypothesis, dict):
+            continue
+        plan = _compact_artifact_text(
+            hypothesis.get("experiment") or hypothesis.get("experiment_plan") or hypothesis.get("validation_plan"),
+            limit=1200,
+        )
+        reviews = hypothesis.get("reviews") if isinstance(hypothesis.get("reviews"), list) else []
+        review_obj = hypothesis.get("review") or hypothesis.get("review_feedback") or hypothesis.get("critique") or (reviews[0] if reviews else {})
+        falsification = []
+        if isinstance(review_obj, dict):
+            raw_falsification = (
+                review_obj.get("falsification_criteria")
+                or review_obj.get("failure_conditions")
+                or review_obj.get("falsification_tests")
+                or []
+            )
+            if isinstance(raw_falsification, list):
+                falsification = [_compact_artifact_text(item, limit=220) for item in raw_falsification if str(item).strip()]
+        if plan or falsification:
+            experiments.append(
+                {
+                    "index": len(experiments),
+                    "hypothesisIndex": index,
+                    "title": _hypothesis_title(hypothesis, index),
+                    "experimentPlan": plan or "当前假设尚未包含完整实验计划，需要继续补可观测变量、对照组、失败条件和最小验证路径。",
+                    "falsificationTests": falsification[:4],
+                    "source_channel": "run_hypothesis_experiment_plan",
+                }
+            )
+        if len(experiments) >= limit:
+            break
+    return experiments
+
+
+def _project_artifacts_summary_result(context: ResearchChatContext, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    record = _active_run_record_with_hypotheses(context)
+    if not record:
+        return {
+            "intent": "summarize_project_artifacts",
+            "title": "还没有可汇总的项目产物",
+            "summary": "当前没有选中的 run，也没有找到带候选假设的历史运行。先启动研究流程，或打开一个已有项目运行。",
+            "verdict": "limited",
+            "nextActions": ["启动研究流程", "打开历史运行", "解析论文 PDF 后再生成假设"],
+            "groundingBoundary": "run_audit",
+        }
+
+    hypotheses = [
+        _hypothesis_brief(hypothesis, index)
+        for index, hypothesis in enumerate(record.hypotheses)
+        if isinstance(hypothesis, dict)
+    ]
+    evidence_items, evidence_counts = _run_evidence_inventory(record)
+    experiments = _run_experiment_inventory(record)
+    report_sections = [
+        "Research goal and constraints",
+        "Candidate hypotheses and rationale",
+        "Tournament ranking and Elo audit",
+        "Evidence grounding and limitations",
+        "Falsifiable experiments and failure criteria",
+        "Next research tasks",
+    ]
+    reports = [
+        {
+            "title": "报告草稿结构",
+            "summary": "当前报告是从 run audit 派生的结构化草稿，不是已经导出的最终论文或科学发现声明。",
+            "sections": report_sections,
+            "source_channel": "derived_run_report",
+        }
+    ]
+    evidence_count = len(evidence_items)
+    verdict = "grounded" if evidence_counts.get("parsedFulltextItems", 0) else ("limited" if evidence_count else "ungrounded")
+    summary = (
+        f"当前 run 状态为 {record.status}；可读取 {len(hypotheses)} 条候选假设、"
+        f"{evidence_count} 条论文/网页/PDF 证据线索、{len(experiments)} 条实验计划草案，"
+        "并可按当前 run 派生报告草稿结构。"
+    )
+    if not evidence_count:
+        summary += " 暂未发现已解析 fulltext 或已抓取网页证据，论文层面的回答应标记为 evidence-limited。"
+
+    return {
+        "intent": "summarize_project_artifacts",
+        "title": "项目论文、假设、实验和报告清单",
+        "summary": summary,
+        "status": record.status,
+        "runId": record.run_id,
+        "researchGoal": record.request.research_goal,
+        "hypothesisCount": len(hypotheses),
+        "hypotheses": hypotheses[:8],
+        "items": evidence_items[:8],
+        "papers": evidence_items[:8],
+        "experiments": experiments[:8],
+        "reports": reports,
+        "sections": report_sections,
+        "artifactCounts": {
+            "hypotheses": len(hypotheses),
+            "evidenceItems": evidence_count,
+            "experiments": len(experiments),
+            "reports": len(reports),
+            **evidence_counts,
+        },
+        "modeBoundary": _summarize_mode_boundary(record),
+        "verdict": verdict,
+        "query": str(inputs.get("query") or "").strip(),
+        "nextActions": [
+            "列出所有候选假设",
+            "围绕第 1 条假设生成实验设计",
+            "检查引用证据是否足够",
+            "生成报告草稿",
+        ],
+        "groundingBoundary": "run_audit",
+    }
+
+
 def _session_search_result(context: ResearchChatContext, query: str) -> Dict[str, Any]:
     results = knowledge_base.search_research_sessions(
         query,
@@ -2499,6 +3322,116 @@ def _proposal_response(
         "assistant_message": assistant_message,
         "state": "awaiting_confirmation",
     }
+
+
+SAFE_RESEARCH_CHAT_APPROVAL_SCOPES = {
+    "file.source_snapshot",
+    "tool.register_draft",
+}
+
+
+def _research_chat_action_risk(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    scope = str(proposal.get("approvalScope") or "")
+    target = str(proposal.get("executionTarget") or "")
+    preview = proposal.get("requestPreview") if isinstance(proposal.get("requestPreview"), dict) else {}
+    if target in {"workflow.terminal_command", "workflow.ssh_training_command"}:
+        command_risk = preview.get("command_risk") if isinstance(preview.get("command_risk"), dict) else None
+        if command_risk:
+            return command_risk
+        return classify_command_risk(str(preview.get("command") or ""))
+    if scope in SAFE_RESEARCH_CHAT_APPROVAL_SCOPES:
+        return {
+            "allowed": True,
+            "risk_level": "safe",
+            "code": "safe_project_ai_action",
+            "message": "This Project AI action is constrained to a schema-validated local workflow.",
+        }
+    return {
+        "allowed": True,
+        "risk_level": "review",
+        "code": "project_ai_action_requires_review",
+        "message": "This Project AI action may access external services, consume model resources, or write project artifacts.",
+    }
+
+
+def _research_chat_action_policy_decision(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    policy = get_command_permission_policy(KB_ROOT)
+    risk = _research_chat_action_risk(proposal)
+    mode = str(policy.get("mode") or "request_approval")
+    risk_level = str(risk.get("risk_level") or "review")
+    auto_approved = False
+    if bool(risk.get("allowed", True)):
+        auto_approved = mode == "full_access" or (mode == "approve_safe" and risk_level == "safe")
+    return {
+        "mode": mode,
+        "label": policy.get("label"),
+        "source": policy.get("source"),
+        "approvalPolicy": policy.get("approval_policy"),
+        "risk": risk,
+        "autoApproved": auto_approved,
+        "requiresApproval": not auto_approved,
+    }
+
+
+async def _proposal_or_auto_response(
+    *,
+    session_id: str,
+    action_id: str,
+    intent: str,
+    title: str,
+    summary: str,
+    input_summary: str,
+    operation_summary: List[str],
+    risk_summary: str,
+    expected_result_summary: List[str],
+    approval_scope: str,
+    execution_target: str,
+    request_preview: Dict[str, Any],
+) -> Dict[str, Any]:
+    response = _proposal_response(
+        session_id=session_id,
+        action_id=action_id,
+        intent=intent,
+        title=title,
+        summary=summary,
+        input_summary=input_summary,
+        operation_summary=operation_summary,
+        risk_summary=risk_summary,
+        expected_result_summary=expected_result_summary,
+        approval_scope=approval_scope,
+        execution_target=execution_target,
+        request_preview=request_preview,
+    )
+    proposal = response.get("assistant_message", {}).get("proposal")
+    if not isinstance(proposal, dict):
+        return response
+    decision = _research_chat_action_policy_decision(proposal)
+    proposal["actionPolicyDecision"] = decision
+    if decision.get("requiresApproval", True):
+        return response
+    approval = ToolWorkflowApproval(
+        confirmed=True,
+        scope=approval_scope,
+        reason=f"Auto-approved by Project AI action policy: {decision.get('mode')}",
+        granted_by="project_ai_action_policy",
+        permission_mode=decision.get("mode"),
+        command_risk=decision.get("risk") if isinstance(decision.get("risk"), dict) else None,
+    )
+    background_tasks = BackgroundTasks()
+    confirmed = await confirm_research_chat_action(
+        action_id,
+        ResearchChatConfirmRequest(approval=approval),
+        background_tasks,
+    )
+    if background_tasks.tasks:
+        await background_tasks()
+    result = confirmed.get("assistant_message", {}).get("result")
+    if isinstance(result, dict):
+        result["autoApproval"] = decision
+    assistant_message = confirmed.get("assistant_message")
+    if isinstance(assistant_message, dict):
+        assistant_message["autoApproval"] = decision
+    return confirmed
 
 
 def _rag_result_summary(query: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2593,6 +3526,8 @@ def _format_research_chat_run_context(context: ResearchChatContext) -> str:
     record = _active_run_record(context)
     if not record:
         return "当前没有可用 run context。"
+    evidence_items, evidence_counts = _run_evidence_inventory(record, limit=5)
+    experiments = _run_experiment_inventory(record, limit=5)
     top_hypotheses: List[str] = []
     for index, hypothesis in enumerate(record.hypotheses[:3], start=1):
         if not isinstance(hypothesis, dict):
@@ -2606,6 +3541,10 @@ def _format_research_chat_run_context(context: ResearchChatContext) -> str:
             f"status: {record.status}",
             f"research_goal: {record.request.research_goal}",
             f"hypotheses_count: {len(record.hypotheses)}",
+            f"evidence_items_count: {len(evidence_items)}",
+            f"parsed_fulltext_items_count: {evidence_counts.get('parsedFulltextItems', 0)}",
+            f"experiment_plans_count: {len(experiments)}",
+            "report_draft_available: yes (derived from run audit)",
             "top_hypotheses:",
             "\n".join(top_hypotheses) or "none",
         ]
@@ -2711,6 +3650,7 @@ def _build_research_chat_llm_prompt(
 - 不要直接执行命令、访问外部 Web、解析 PDF 或启动 live workflow；这些动作必须让用户通过确认卡授权。
 - 如果知识库没有命中，就明确说证据不足，并建议解析 PDF、抓取网页证据或启动 literature-grounded workflow。
 - 如果结构化上下文与知识库片段不一致，要说明证据边界，不要把结构化 run audit 当作外部文献事实。
+- 如果结构化上下文包含 evidenceSourceExplanation 或 rankingCaveat，必须解释“当前证据如何获得”以及“Elo winner 不等于该假设已被证据支撑”。
 - 最终回答文本必须由你基于上下文生成；不要照抄旧模板或 raw JSON。
 - 回答保持简洁、可操作，优先给当前用户下一步。
 
@@ -2780,6 +3720,7 @@ def _research_chat_capabilities_by_id() -> Dict[str, Dict[str, Any]]:
 PLANNER_ALLOWED_INPUTS: Dict[str, set[str]] = {
     "ask_project_ai": {"query"},
     "discover_capabilities": {"query"},
+    "summarize_project_artifacts": {"run_id", "query"},
     "start_research_run": {"research_goal", "starting_hypotheses", "constraints", "preferences", "attributes"},
     "explain_current_run": {"run_id", "query"},
     "continue_or_revise_run": {"run_id", "research_goal", "starting_hypotheses", "constraints", "preferences", "attributes"},
@@ -2799,6 +3740,18 @@ PLANNER_ALLOWED_INPUTS: Dict[str, set[str]] = {
     "search_session_history": {"query"},
     "run_terminal_command": {"command", "workdir"},
     "run_ssh_training_command": {"server_id", "command", "workdir"},
+    "snapshot_local_file": {"source_path", "start_line", "line_count", "max_bytes", "run_id"},
+    "register_project_tool": {
+        "tool_name",
+        "user_title",
+        "description",
+        "toolset",
+        "phases",
+        "risk_level",
+        "input_schema",
+        "execution_boundary",
+        "run_id",
+    },
     "clarify": {"question", "query"},
     "unsupported": {"query"},
 }
@@ -2843,12 +3796,16 @@ def _research_chat_literal_refs(message: str) -> Dict[str, Any]:
     managed_ssh = _extract_managed_ssh_request(message)
     arbitrary_ssh = _extract_arbitrary_ssh_terminal_request(message)
     explicit_web_search = _extract_web_search_request(message)
+    source_file = _extract_source_file_request(message)
+    tool_registration = _extract_tool_registration_request(message)
     refs: Dict[str, Any] = {
         "pdf_path": pdf_match.group("value") if pdf_match else None,
         "urls": urls,
         "hypothesis_index": _extract_hypothesis_index(message),
         "research_goal": _extract_research_goal(message),
         "web_search": explicit_web_search,
+        "source_file": source_file,
+        "tool_registration": tool_registration,
         "terminal_command": terminal,
         "managed_ssh": managed_ssh,
         "arbitrary_ssh": arbitrary_ssh,
@@ -2865,6 +3822,7 @@ def _planner_capability_schema() -> List[Dict[str, Any]]:
     allowed_intents = {
         "ask_project_ai",
         "discover_capabilities",
+        "summarize_project_artifacts",
         "start_research_run",
         "explain_current_run",
         "inspect_hypothesis",
@@ -2878,6 +3836,8 @@ def _planner_capability_schema() -> List[Dict[str, Any]]:
         "verify_evidence_with_literature",
         "run_terminal_command",
         "run_ssh_training_command",
+        "snapshot_local_file",
+        "register_project_tool",
         "design_experiment",
         "draft_report",
         "search_session_history",
@@ -2929,13 +3889,17 @@ def _build_research_chat_planner_prompt(
 - 条件边界句不是工具请求。例如“如果下一步需要解析 PDF、联网搜索或调用外部文献服务，请先确认”只能表示安全要求，不能选择 Web Search/PDF/MCP。
 - approval_required 能力只允许生成确认卡，不能直接执行。
 - terminal/SSH 必须只有在用户明确要求执行命令时选择。
+- snapshot_local_file 必须只有在用户明确要求读取/快照某个本地文件且能提供 source_path 时选择；模糊地“查找本地文件”应选择 ask_project_ai 或 clarify。
+- register_project_tool 必须只有在用户明确要求注册/新增工具能力时选择；它只能注册 schema 草案，不能生成、安装或执行工具代码。
 - 如果缺少 requiredInputs，把缺少字段放入 missingInputs。
 - 如果只是询问概念、证据缺口、项目状态、工作流建议、Elo、候选假设解释，选择 read_only 能力。
+- 如果用户询问“这个指定项目/当前项目里有哪些论文、证据、候选假设、实验、报告、产出”，选择 summarize_project_artifacts。
+- 如果用户询问“当前这个项目可以实现什么/能做什么/有什么”，且当前上下文有 run_id，也选择 summarize_project_artifacts；不要因为句子里出现“反证检查”前缀就选择外部文献工具。
 - 输出语言相关字段使用{language}，但最终必须只输出 JSON，不要 markdown，不要解释。
 
 输出 JSON schema:
 {{
-  "intent": "ask_project_ai | discover_capabilities | start_research_run | explain_current_run | inspect_hypothesis | explain_ranking | parse_pdf_to_knowledge_base | extract_web_evidence | extract_web_evidence_batch | search_public_web | search_knowledge_evidence | check_hypothesis_grounding | verify_evidence_with_literature | run_terminal_command | run_ssh_training_command | design_experiment | draft_report | search_session_history | clarify | unsupported",
+  "intent": "ask_project_ai | discover_capabilities | summarize_project_artifacts | start_research_run | explain_current_run | inspect_hypothesis | explain_ranking | parse_pdf_to_knowledge_base | extract_web_evidence | extract_web_evidence_batch | search_public_web | search_knowledge_evidence | check_hypothesis_grounding | verify_evidence_with_literature | run_terminal_command | run_ssh_training_command | snapshot_local_file | register_project_tool | design_experiment | draft_report | search_session_history | clarify | unsupported",
   "capability_id": "tool schema id or null",
   "executionMode": "read_only | approval_required | unsupported",
   "inputs": {{}},
@@ -3012,7 +3976,7 @@ def _planner_failure_route(
 
 def _normalize_planner_inputs(intent: str, inputs: Dict[str, Any], literal_refs: Dict[str, Any], message: str) -> Dict[str, Any]:
     normalized = dict(inputs or {})
-    if intent in {"ask_project_ai", "discover_capabilities", "search_knowledge_evidence", "search_session_history"}:
+    if intent in {"ask_project_ai", "discover_capabilities", "summarize_project_artifacts", "search_knowledge_evidence", "search_session_history"}:
         normalized["query"] = str(normalized.get("query") or message).strip()
     if intent == "parse_pdf_to_knowledge_base" and not normalized.get("pdf_path"):
         normalized["pdf_path"] = literal_refs.get("pdf_path")
@@ -3038,6 +4002,28 @@ def _normalize_planner_inputs(intent: str, inputs: Dict[str, Any], literal_refs:
         normalized["server_id"] = str(normalized.get("server_id") or managed.get("server_id") or "").strip()
         normalized["command"] = str(normalized.get("command") or managed.get("command") or "").strip()
         normalized["workdir"] = normalized.get("workdir") or managed.get("workdir")
+    if intent == "snapshot_local_file":
+        source_file = literal_refs.get("source_file") if isinstance(literal_refs.get("source_file"), dict) else {}
+        normalized["source_path"] = str(normalized.get("source_path") or source_file.get("source_path") or "").strip()
+        for key, default, minimum, maximum in (
+            ("start_line", 1, 1, 1_000_000),
+            ("line_count", 200, 1, 2000),
+            ("max_bytes", 1_000_000, 1024, 5_000_000),
+        ):
+            if normalized.get(key) is not None or source_file.get(key) is not None:
+                normalized[key] = bounded_int(normalized.get(key) or source_file.get(key), default, minimum, maximum)
+    if intent == "register_project_tool":
+        draft = literal_refs.get("tool_registration") if isinstance(literal_refs.get("tool_registration"), dict) else {}
+        normalized["tool_name"] = str(normalized.get("tool_name") or draft.get("tool_name") or "").strip()
+        normalized["description"] = str(normalized.get("description") or draft.get("description") or "").strip()
+        normalized["user_title"] = str(normalized.get("user_title") or "").strip()
+        normalized["toolset"] = str(normalized.get("toolset") or "project_custom").strip()
+        phases = normalized.get("phases")
+        normalized["phases"] = [str(item).strip() for item in phases if str(item).strip()] if isinstance(phases, list) else []
+        normalized["risk_level"] = str(normalized.get("risk_level") or "read").strip()
+        if not isinstance(normalized.get("input_schema"), dict):
+            normalized["input_schema"] = {}
+        normalized["execution_boundary"] = str(normalized.get("execution_boundary") or "schema_registered_only").strip()
     if intent == "start_research_run":
         literal_research_goal = literal_refs.get("research_goal")
         if literal_research_goal and _looks_like_start_research_run_request(message):
@@ -3068,13 +4054,33 @@ def _validate_planner_route(
     *,
     raw_plan: Dict[str, Any],
     message: str,
+    context: ResearchChatContext,
     literal_refs: Dict[str, Any],
     recent_messages: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     capabilities_by_intent = _research_chat_capabilities_by_intent()
     capabilities_by_id = _research_chat_capabilities_by_id()
     intent = str(raw_plan.get("intent") or "ask_project_ai").strip()
-    if _looks_like_start_research_run_request(message) and intent in {
+    if context.run_id and _looks_like_current_project_inventory_question(message) and intent in {
+        "ask_project_ai",
+        "discover_capabilities",
+        "verify_evidence_with_literature",
+        "check_hypothesis_grounding",
+    }:
+        intent = "summarize_project_artifacts"
+        raw_plan = {
+            **raw_plan,
+            "intent": intent,
+            "capability_id": "project.summarize_artifacts",
+            "inputs": {"query": message},
+            "executionMode": "read_only",
+            "answerStrategy": "用户请求当前指定项目的产物和能力概览，应读取当前 run audit，而不是启动外部文献反证工具。",
+        }
+    planner_requested_execution = (
+        str(raw_plan.get("executionMode") or raw_plan.get("execution_mode") or "").strip() == "approval_required"
+        or bool(raw_plan.get("requiresConfirmation") is True)
+    )
+    if planner_requested_execution and _looks_like_start_research_run_request(message) and intent in {
         "ask_project_ai",
         "discover_capabilities",
         "search_knowledge_evidence",
@@ -3201,6 +4207,7 @@ async def _plan_research_chat_route(
         routed = _validate_planner_route(
             raw_plan=plan,
             message=request.message,
+            context=request.context,
             literal_refs=literal_refs,
             recent_messages=recent_messages,
         )
@@ -3300,6 +4307,8 @@ def _research_chat_response_max_tokens(routed: Dict[str, Any]) -> int:
     intent = str(routed.get("intent") or "")
     if intent in {"ask_project_ai", "discover_capabilities", "search_knowledge_evidence", "explain_current_run"}:
         return 560
+    if intent == "summarize_project_artifacts":
+        return 1000
     if intent in {"explain_ranking", "inspect_hypothesis", "design_experiment", "critique_generated_hypothesis"}:
         return 760
     if intent == "draft_report":
@@ -4550,6 +5559,43 @@ async def parse_pdf_and_record(
         input_path=input_path,
         knowledge_base_ingested=ingest_to_knowledge_base,
     )
+    embedding_index_status = (
+        knowledge_base.index_embeddings_for_paper(paper_id)
+        if paper_id
+        else {"status": "skipped", "reason": "paper_not_ingested", "indexed_count": 0}
+    )
+    embedding_item_status: Literal["success", "warning", "error"] = (
+        "success" if embedding_index_status.get("status") == "ready" else "warning"
+    )
+    embedding_evidence_id = f"evidence_{parse_run_id}_ragflow_embedding_indexed"
+    embedding_summary = (
+        f"RAGFlow-style embedding 已就绪：{embedding_index_status.get('indexed_count', 0)} 个 chunk。"
+        if embedding_index_status.get("status") == "ready"
+        else f"向量索引未启用或未完成：{embedding_index_status.get('reason') or embedding_index_status.get('error') or embedding_index_status.get('status')}；仍可使用 SQLite FTS/BM25 检索。"
+    )
+    payload["items"].append(
+        _parse_item(
+            item_key="ragflow_embedding_indexed",
+            label="RAGFlow 向量索引",
+            status=embedding_item_status,
+            evidence_type="rag",
+            evidence_summary=embedding_summary,
+            evidence_id=embedding_evidence_id,
+        )
+    )
+    payload["evidence"].append(
+        _parse_evidence(
+            parse_run_id=parse_run_id,
+            paper_id=paper_id,
+            item_key="ragflow_embedding_indexed",
+            evidence_type="rag",
+            label="RAGFlow 向量索引",
+            metadata=embedding_index_status,
+            evidence_id=embedding_evidence_id,
+        )
+    )
+    if payload["status"] == "success" and embedding_item_status == "warning":
+        payload["status"] = "warning"
     knowledge_base.record_parse_run(
         parse_run_id=parse_run_id,
         paper_id=paper_id,
@@ -4594,6 +5640,8 @@ async def parse_pdf_and_record(
         "items": parse_run["items"] if parse_run else payload["items"],
         "parse_status_summary": parse_status_summary(summary_source),
         "rag_indexed_chunks_count": len(chunks) if ingest_to_knowledge_base and chunks else 0,
+        "embedding_index_status": embedding_index_status,
+        "ragflow": knowledge_base.ragflow_status(),
         "database_path": str(knowledge_base.db_path),
     }
 
@@ -4750,7 +5798,15 @@ def apply_citation_provenance_qa(record: RunRecord) -> None:
             key: get_source_reliability(value)
             for key, value in citation_map.items()
         }
-        kb_support = knowledge_base.support_for_hypothesis(hypothesis, limit=6) if isinstance(hypothesis, dict) else []
+        kb_support = (
+            knowledge_base.support_for_hypothesis(
+                hypothesis,
+                limit=6,
+                library_id=record.request.library_id,
+            )
+            if isinstance(hypothesis, dict)
+            else []
+        )
         experiment_summaries = [
             item
             for item in kb_support
@@ -5529,6 +6585,176 @@ def _literature_candidates_from_mcp_result(value: Any, *, tool_id: str, max_resu
     return candidates
 
 
+def _collect_pdf_urls_from_value(value: Any) -> List[str]:
+    urls: List[str] = []
+    seen: set[str] = set()
+
+    def add_url(candidate: Any) -> None:
+        if not isinstance(candidate, str):
+            return
+        for match in re.findall(r"https?://[^\s\"'<>]+", candidate):
+            normalized = _normalize_pdf_url(match.rstrip(").,;]"))
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                urls.append(normalized)
+        normalized = _normalize_pdf_url(candidate)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            urls.append(normalized)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            add_url(node)
+            return
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if isinstance(node, dict):
+            for key in ("pdf_url", "pdf", "download_url", "url", "href"):
+                add_url(node.get(key))
+            for key in ("pdf_urls", "pdf_links", "links", "results", "items", "candidates"):
+                if key in node:
+                    walk(node.get(key))
+            return
+
+    walk(_coerce_mcp_result_payload(value))
+    return urls
+
+
+async def _discover_pdf_links_for_candidates(
+    *,
+    client: Any,
+    tool_registry: Any,
+    candidates: List[Dict[str, Any]],
+    source_statuses: List[Dict[str, Any]],
+    max_pages: int,
+) -> List[Dict[str, Any]]:
+    find_tool = tool_registry.get_tool("find_pdf_links")
+    if not find_tool or max_pages <= 0:
+        return []
+    discovery_results: List[Dict[str, Any]] = []
+    attempted = 0
+    for candidate in candidates:
+        if candidate.get("pdf_url") or not candidate.get("url"):
+            continue
+        attempted += 1
+        if attempted > max_pages:
+            break
+        url = str(candidate.get("url") or "")
+        try:
+            raw_result = await client.call_tool(find_tool.mcp_tool_name, url=url)
+            pdf_urls = _collect_pdf_urls_from_value(raw_result)
+        except Exception as exc:
+            discovery_results.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "url": url,
+                    "status": "failed",
+                    "message": str(exc)[:200],
+                    "pdf_url": None,
+                }
+            )
+            continue
+        if pdf_urls:
+            candidate["pdf_url"] = pdf_urls[0]
+            candidate["can_parse_pdf"] = True
+            candidate["status"] = "ready_to_parse"
+            candidate["download_method"] = "已从论文落地页发现 PDF，可直接解析入库"
+            candidate["pdf_discovery"] = {
+                "status": "ready",
+                "tool_id": "find_pdf_links",
+                "mcp_tool_name": find_tool.mcp_tool_name,
+                "pdf_urls": pdf_urls[:5],
+            }
+            discovery_results.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "url": url,
+                    "status": "ready",
+                    "pdf_url": pdf_urls[0],
+                    "count": len(pdf_urls),
+                }
+            )
+        else:
+            candidate["pdf_discovery"] = {
+                "status": "limited",
+                "tool_id": "find_pdf_links",
+                "mcp_tool_name": find_tool.mcp_tool_name,
+                "pdf_urls": [],
+            }
+            discovery_results.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "url": url,
+                    "status": "limited",
+                    "pdf_url": None,
+                    "count": 0,
+                }
+            )
+    if discovery_results:
+        ready_count = sum(1 for item in discovery_results if item.get("status") == "ready")
+        source_statuses.append(
+            {
+                "tool_id": "find_pdf_links",
+                "mcp_tool_name": find_tool.mcp_tool_name,
+                "display_name": find_tool.display_name,
+                "status": "ready" if ready_count else "limited",
+                "message": f"已为 {len(discovery_results)} 个落地页查找 PDF，发现 {ready_count} 个可解析链接。",
+            }
+        )
+    return discovery_results
+
+
+async def _auto_ingest_discovered_pdfs(
+    *,
+    candidates: List[Dict[str, Any]],
+    library_id: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    results: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        if len(results) >= limit:
+            break
+        pdf_url = str(candidate.get("pdf_url") or "").strip()
+        if not pdf_url:
+            continue
+        ingest_result: Dict[str, Any] = {
+            "candidate_id": candidate.get("candidate_id"),
+            "title": candidate.get("title"),
+            "pdf_url": pdf_url,
+            "status": "pending",
+        }
+        try:
+            resolved_pdf = await asyncio.to_thread(resolve_pdf_input, pdf_url)
+            parse_run_id = f"parse_{uuid.uuid4().hex[:12]}"
+            payload = await parse_pdf_and_record(
+                parse_run_id=parse_run_id,
+                pdf_path=resolved_pdf,
+                input_kind="local_path",
+                input_path=pdf_url,
+                fetch_metadata=True,
+                ingest_to_knowledge_base=True,
+                library_id=library_id,
+            )
+            ingest_result.update(
+                {
+                    "status": "ingested" if payload.get("knowledge_base_ingested") else "limited",
+                    "paper_id": payload.get("paper_id"),
+                    "parse_run_id": payload.get("parse_run_id"),
+                    "chunks_count": payload.get("chunks_count"),
+                    "rag_search_ready": payload.get("rag_search_ready"),
+                }
+            )
+        except Exception as exc:
+            ingest_result.update({"status": "failed", "message": str(exc)[:240]})
+        candidate["auto_ingest"] = ingest_result
+        results.append(ingest_result)
+    return results
+
+
 def _preferred_literature_tools(query: str, preferred_source: str) -> List[str]:
     if preferred_source == "arxiv":
         return ["arxiv_search"]
@@ -5540,6 +6766,208 @@ def _preferred_literature_tools(query: str, preferred_source: str) -> List[str]:
         return ["pubmed_fulltext", "arxiv_search", "google_scholar_search"]
     biomedical_terms = ("cell", "gene", "protein", "cancer", "clinical", "patient", "drug", "disease", "biomarker")
     return ["pubmed_fulltext"] if any(term in query.lower() for term in biomedical_terms) else ["arxiv_search"]
+
+
+def _default_discovery_model_name() -> str:
+    configured = os.getenv("COSCIENTIST_LITERATURE_DISCOVERY_MODEL")
+    if configured:
+        return configured
+    chat_model = os.getenv("COSCIENTIST_RESEARCH_CHAT_MODEL")
+    if chat_model:
+        return _discovery_planner_model_name(chat_model)
+    if has_provider_key("MIMO_API_KEY", "XIAOMI_MIMO_API_KEY", "MIMOCODE_API_KEY"):
+        return "openai/mimo-v2.5"
+    if has_provider_key("DEEPSEEK_API_KEY"):
+        return "deepseek/deepseek-chat"
+    if has_provider_key("DASHSCOPE_API_KEY", "QWEN_API_KEY"):
+        return "dashscope/qwen-plus"
+    if has_provider_key("OPENAI_API_KEY"):
+        return "gpt-4o-mini"
+    if has_provider_key("GEMINI_API_KEY"):
+        return "gemini/gemini-1.5-flash"
+    if has_provider_key("ANTHROPIC_API_KEY"):
+        return "claude-3-5-haiku-20241022"
+    return "deepseek/deepseek-v4-pro"
+
+
+def _discovery_planner_model_name(model_name: str) -> str:
+    if model_name.startswith("deepseek/") and model_name != "deepseek/deepseek-chat":
+        return "deepseek/deepseek-chat"
+    return model_name
+
+
+def _literature_tool_scope_for_source(preferred_source: str) -> List[str]:
+    if preferred_source == "arxiv":
+        return ["arxiv_search"]
+    if preferred_source == "pubmed":
+        return ["pubmed_fulltext"]
+    if preferred_source == "scholar":
+        return ["google_scholar_search"]
+    return ["arxiv_search", "pubmed_fulltext", "google_scholar_search"]
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.I)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", stripped, flags=re.S)
+        if not match:
+            raise
+        value = json.loads(match.group(0))
+    return value if isinstance(value, dict) else {}
+
+
+def _rules_literature_discovery_plan(query: str, preferred_source: str, *, reason: str) -> Dict[str, Any]:
+    tool_ids = _preferred_literature_tools(query, preferred_source)
+    return {
+        "mode": "rules",
+        "model_name": None,
+        "intent_summary": query,
+        "reason": reason,
+        "tool_queries": [
+            {
+                "tool_id": tool_id,
+                "query": query,
+                "rationale": "规则回退：按用户选择的来源或基础领域关键词选择检索工具。",
+            }
+            for tool_id in tool_ids
+        ],
+        "fallback_used": True,
+    }
+
+
+def _normalize_literature_discovery_plan(
+    plan: Dict[str, Any],
+    *,
+    query: str,
+    preferred_source: str,
+    model_name: str,
+) -> Dict[str, Any]:
+    allowed_tools = set(_literature_tool_scope_for_source(preferred_source))
+    raw_tool_queries = plan.get("tool_queries")
+    if not isinstance(raw_tool_queries, list):
+        raw_tool_queries = []
+
+    normalized_queries: List[Dict[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for item in raw_tool_queries:
+        if not isinstance(item, dict):
+            continue
+        tool_id = str(item.get("tool_id") or "").strip()
+        if tool_id not in allowed_tools:
+            continue
+        planned_query = str(item.get("query") or query).strip()
+        if not planned_query:
+            planned_query = query
+        pair = (tool_id, planned_query.lower())
+        if pair in seen_pairs:
+            continue
+        normalized_queries.append(
+            {
+                "tool_id": tool_id,
+                "query": planned_query[:500],
+                "rationale": str(item.get("rationale") or "模型建议该来源适合当前研究主题。")[:500],
+            }
+        )
+        seen_pairs.add(pair)
+
+    if not normalized_queries:
+        return _rules_literature_discovery_plan(
+            query,
+            preferred_source,
+            reason="模型没有返回可执行的文献检索计划，已回退到规则检索。",
+        )
+
+    return {
+        "mode": "llm",
+        "model_name": model_name,
+        "intent_summary": str(plan.get("intent_summary") or query)[:800],
+        "reason": str(plan.get("reason") or "模型已根据研究主题生成检索计划。")[:800],
+        "domain": str(plan.get("domain") or "unknown")[:120],
+        "tool_queries": normalized_queries[:5],
+        "fallback_used": False,
+    }
+
+
+async def _plan_literature_discovery(
+    *,
+    query: str,
+    preferred_source: str,
+    max_results: int,
+    planning_mode: str,
+    model_name: Optional[str],
+) -> Dict[str, Any]:
+    if planning_mode == "rules":
+        return _rules_literature_discovery_plan(query, preferred_source, reason="用户选择规则检索模式。")
+
+    selected_model = _discovery_planner_model_name(model_name) if model_name else _default_discovery_model_name()
+    if not has_model_provider_key(selected_model):
+        return _rules_literature_discovery_plan(
+            query,
+            preferred_source,
+            reason=f"未配置 {selected_model} 的模型 key，已回退到规则检索。",
+        )
+
+    source_hint = {
+        "auto": "模型可以选择 arxiv_search、pubmed_fulltext、google_scholar_search，并可为同一来源生成多个互补 query。",
+        "all": "用户要求覆盖全部公开来源，模型应为 arxiv_search、pubmed_fulltext、google_scholar_search 分别生成互补 query。",
+        "arxiv": "用户明确选择 arXiv，只能使用 arxiv_search，但可以生成多个 arXiv query。",
+        "pubmed": "用户明确选择 PubMed，只能使用 pubmed_fulltext，但可以生成多个 PubMed query。",
+        "scholar": "用户明确选择 Scholar，只能使用 google_scholar_search，但可以生成多个 Scholar query。",
+    }.get(preferred_source, "模型可以选择合适的公开文献来源。")
+    allowed_tools = ", ".join(_literature_tool_scope_for_source(preferred_source))
+    prompt = f"""
+你是科研文献检索规划器。你的任务不是回答研究问题，而是把用户的自然语言研究主题转成可执行的 MCP 文献检索计划。
+
+用户主题：
+{query}
+
+用户选择的来源模式：{preferred_source}
+来源约束：{source_hint}
+允许的 tool_id：{allowed_tools}
+最大候选数：{max_results}
+
+请输出严格 JSON，不要 Markdown，不要解释文本。Schema：
+{{
+  "intent_summary": "用中文总结用户真正想找的论文方向",
+  "domain": "computer_vision | machine_learning | biomedicine | interdisciplinary | other",
+  "reason": "为什么这样选来源和改写 query",
+  "tool_queries": [
+    {{
+      "tool_id": "arxiv_search | pubmed_fulltext | google_scholar_search",
+      "query": "适合该来源的英文检索式，必要时保留关键中文名词",
+      "rationale": "为什么这个来源和 query 合适"
+    }}
+  ]
+}}
+
+规划规则：
+- 视觉、图像、音频驱动数字人、生成模型、CV/ML 主题优先 arxiv_search，可加 google_scholar_search 扩展。
+- 如果主题是音频驱动数字人/说话人脸/虚拟人生成，至少覆盖这些互补方向中的 3 个：talking head generation、lip sync、audio-driven avatar、speech-driven facial animation、talking face diffusion model、neural rendering talking head。
+- 生物医学、临床、药物、基因、疾病主题优先 pubmed_fulltext。
+- 宽泛中文主题必须改写为具体英文关键词，避免只搜索原句。
+- 不要输出未在允许列表中的 tool_id。
+- tool_queries 输出 3-5 条；同一个 tool_id 可以出现多次，但 query 必须互补。
+""".strip()
+
+    try:
+        raw = await call_research_chat_planner_llm(prompt=prompt, model_name=selected_model)
+        return _normalize_literature_discovery_plan(
+            _extract_json_object(raw),
+            query=query,
+            preferred_source=preferred_source,
+            model_name=selected_model,
+        )
+    except Exception as exc:
+        return _rules_literature_discovery_plan(
+            query,
+            preferred_source,
+            reason=f"模型检索规划失败，已回退到规则检索：{str(exc)[:160]}",
+        )
 
 
 def _discovery_tool_arguments(tool_id: str, query: str, max_results: int, library_id: str) -> Dict[str, Any]:
@@ -5596,6 +7024,7 @@ async def build_health_payload(*, debug: bool = False) -> Dict[str, Any]:
         "has_mimo_key": mimo_key,
         "has_local_agent_key": True,
         "local_agent_provider": "local-simulation",
+        "ragflow_knowledge": knowledge_base.ragflow_status(),
         "providers": {
             "local": public_provider_status(
                 True,
@@ -5757,6 +7186,114 @@ def serialize_value(value: Any) -> Any:
 
 def run_record_payload(record: RunRecord) -> Dict[str, Any]:
     return serialize_value(record)
+
+
+_PRIVATE_PATH_KEYS = {
+    "database_path",
+    "evidence_path",
+    "file_path",
+    "input_path",
+    "pdf_path",
+    "solve_dir",
+}
+
+
+def _is_local_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|\\\\|/)", value.strip()))
+
+
+def _public_snapshot_value(value: Any, *, key: str = "") -> Any:
+    """Remove machine-local paths from the public workbench facade."""
+    if key.lower() in _PRIVATE_PATH_KEYS:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(child_key): _public_snapshot_value(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+            if str(child_key).lower() not in _PRIVATE_PATH_KEYS
+        }
+    if isinstance(value, list):
+        return [_public_snapshot_value(item, key=key) for item in value]
+    if key.lower() == "url" and _is_local_path(value):
+        return None
+    return value
+
+
+def _public_paper_summary(paper: Any) -> Dict[str, Any]:
+    return {
+        "paper_id": paper.paper_id,
+        "library_id": paper.library_id,
+        "title": paper.title,
+        "authors": paper.authors,
+        "year": paper.year,
+        "doi": paper.doi,
+        "url": None if _is_local_path(paper.url) else paper.url,
+        "source": paper.source,
+        "source_reliability": paper.source_reliability,
+        "parse_run_id": paper.parse_run_id,
+        "chunks_count": len(paper.chunks),
+        "section_types": sorted({chunk.section_type for chunk in paper.chunks}),
+        "experimental_chunks_count": sum(
+            1 for chunk in paper.chunks if chunk.experiment_data_summary
+        ),
+        "created_at": paper.created_at,
+        "source_ref": f"paper:{paper.paper_id}",
+    }
+
+
+def _public_run_summary(record: RunRecord) -> Dict[str, Any]:
+    return {
+        "run_id": record.run_id,
+        "status": record.status,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "research_goal": record.request.research_goal,
+        "model_name": record.request.model_name,
+        "demo_mode": record.request.demo_mode,
+        "literature_review": record.request.literature_review,
+        "hypothesis_count": len(record.hypotheses),
+        "evidence_count": sum(
+            len(hypothesis.get("citation_map") or {})
+            for hypothesis in record.hypotheses
+            if isinstance(hypothesis, dict)
+        ),
+        "error": record.error,
+    }
+
+
+def _run_recovery_summary(record: RunRecord) -> Dict[str, Any]:
+    error = (record.error or "").lower()
+    if "json" in error or "parse llm" in error:
+        return {
+            "category": "structured_output",
+            "summary": "模型结构化输出没有通过解析或 schema 校验。建议减少候选数、降低上下文长度或切换到更稳定的模型。",
+            "retryable": True,
+            "next_actions": ["retry_run", "reduce_hypotheses", "switch_model", "inspect_phase_trace"],
+        }
+    if any(token in error for token in ("timeout", "timed out", "exceeded")):
+        return {
+            "category": "timeout",
+            "summary": "后台运行超过等待窗口。建议先检查 worker 和 provider，再以较小规模重新运行。",
+            "retryable": True,
+            "next_actions": ["inspect_worker", "reduce_iterations", "retry_run"],
+        }
+    if any(token in error for token in ("decompression", "connection", "ssl", "gateway", "remote protocol")):
+        return {
+            "category": "transport",
+            "summary": "模型或文献服务传输异常。建议检查网络/provider 状态后重试。",
+            "retryable": True,
+            "next_actions": ["check_provider", "check_literature_service", "retry_run"],
+        }
+    return {
+        "category": "unknown" if record.status == "error" else "none",
+        "summary": "当前运行没有可归类的失败原因。请打开过程记录检查最后一个 phase。"
+        if record.status == "error"
+        else "当前运行没有失败。",
+        "retryable": record.status == "error",
+        "next_actions": ["inspect_phase_trace", "retry_run"] if record.status == "error" else [],
+    }
 
 
 def _short_prompt_text(value: Any, limit: int = 420) -> str:
@@ -6753,6 +8290,11 @@ async def run_demo(record: RunRecord) -> None:
 
 async def run_real(record: RunRecord) -> None:
     observer_token = None
+    evidence_first_summary = (
+        serialize_value(record.metrics.get("evidence_first"))
+        if isinstance(record.metrics, dict) and record.metrics.get("evidence_first")
+        else None
+    )
     try:
         normalize_provider_env()
         from open_coscientist import HypothesisGenerator
@@ -6808,6 +8350,14 @@ async def run_real(record: RunRecord) -> None:
         ]
         combined_constraints.append(f"[reference_policy] {reference_constraints}")
         combined_constraints.append("[memory_boundary] Memory context is summary-only; raw records are not injected.")
+        if evidence_first_summary:
+            combined_constraints.append(
+                "[evidence_first] Before hypothesis generation, the system attempted automatic literature "
+                f"discovery and knowledge-base ingestion for library_id={evidence_first_summary.get('library_id')}. "
+                f"candidate_count={evidence_first_summary.get('candidate_count')}; "
+                f"ingested_count={evidence_first_summary.get('ingested_count')}. Use the supplied evidence memory "
+                "and citation_map for grounding, and explicitly mark gaps when the evidence is insufficient."
+            )
         combined_constraints.extend(run_request_feedback_prompt_constraints(record.request.user_feedback))
         combined_constraints.extend(memory_context_prompt_constraints(memory_context))
 
@@ -6867,6 +8417,8 @@ async def run_real(record: RunRecord) -> None:
         }
         record.tournament_matchups = serialize_value(result.get("tournament_matchups", []))
         record.metrics = serialize_value(result.get("metrics", {}))
+        if evidence_first_summary:
+            record.metrics["evidence_first"] = evidence_first_summary
         record.metrics["execution_memory"] = checkpoint_status
         record.metrics["workflow_tool_policy_enforced"] = True
         record.metrics["direct_tool_calling_generation"] = False
@@ -6878,6 +8430,8 @@ async def run_real(record: RunRecord) -> None:
             "evidence_summary_count": len(memory_context.get("evidence_summaries", [])),
             "memory_prompt_packet_section_count": int(memory_prompt_packet.get("section_count") or 0),
         }
+        if evidence_first_summary:
+            record.research_plan["evidence_first"] = evidence_first_summary
         annotate_hypothesis_origins(record)
         apply_citation_provenance_qa(record)
         initialize_expert_feedback_state(record)
@@ -6943,6 +8497,123 @@ async def run_with_guard(record: RunRecord, task) -> None:
         persist_run_checkpoint_metadata(record, status="error", phase="exception")
 
 
+def summarize_evidence_first_discovery(payload: Dict[str, Any], *, library_id: str) -> Dict[str, Any]:
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    auto_ingest = payload.get("auto_ingest") if isinstance(payload.get("auto_ingest"), list) else []
+    source_statuses = payload.get("source_statuses") if isinstance(payload.get("source_statuses"), list) else []
+    ingested = [item for item in auto_ingest if isinstance(item, dict) and item.get("status") == "ingested"]
+    failed = [item for item in auto_ingest if isinstance(item, dict) and item.get("status") == "failed"]
+    ready_pdf_count = sum(1 for item in candidates if isinstance(item, dict) and item.get("pdf_url"))
+    return {
+        "status": payload.get("status") or "limited",
+        "library_id": library_id,
+        "query": payload.get("query"),
+        "message": payload.get("message"),
+        "candidate_count": len(candidates),
+        "ready_pdf_count": ready_pdf_count,
+        "ingested_count": len(ingested),
+        "failed_ingest_count": len(failed),
+        "source_count": len(source_statuses),
+        "tool_count": len(payload.get("tools") or []),
+        "auto_ingest": auto_ingest,
+        "source_statuses": source_statuses,
+        "boundary": (
+            "Automatic evidence-first preparation stores discoverable PDF papers in the selected "
+            "RAGFlow-style knowledge library before hypothesis generation."
+        ),
+    }
+
+
+async def prepare_evidence_first_run(record: RunRecord) -> None:
+    request = record.request
+    if request.demo_mode or not request.literature_review or not request.auto_discover_papers:
+        return
+
+    try:
+        library_id = knowledge_base.resolve_library_id(request.library_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "literature_library_not_found",
+                "message": "一键研究需要写入目标资料库，但没有找到这个资料库。",
+            },
+        ) from exc
+
+    request.library_id = library_id
+    record.status = "running"
+    record.updated_at = time.time()
+    add_event(
+        record,
+        "Evidence",
+        "Searching papers",
+        "正在按研究主题自动检索论文，并把可解析 PDF 写入当前资料库。",
+        "active",
+    )
+    record.metrics["evidence_first"] = {
+        "status": "running",
+        "library_id": library_id,
+        "candidate_count": 0,
+        "ingested_count": 0,
+    }
+    persist_run_record(record)
+
+    try:
+        payload = await discover_literature_for_library(
+            LiteratureDiscoveryRequest(
+                query=request.research_goal,
+                library_id=library_id,
+                preferred_source="auto",
+                max_results=request.paper_discovery_limit,
+                planning_mode="llm",
+                model_name=request.model_name,
+                auto_discover_pdf_links=True,
+                auto_ingest_pdfs=request.auto_ingest_papers,
+                auto_ingest_limit=request.paper_ingest_limit,
+                approval=ToolWorkflowApproval(
+                    confirmed=True,
+                    scope="mcp.literature_review",
+                    reason="one_click_evidence_first_run",
+                ),
+            )
+        )
+        summary = summarize_evidence_first_discovery(payload, library_id=library_id)
+        record.metrics["evidence_first"] = summary
+        record.research_plan["evidence_first"] = summary
+        add_event(
+            record,
+            "Evidence",
+            "Evidence library prepared",
+            (
+                f"找到 {summary['candidate_count']} 个论文候选，"
+                f"发现 {summary['ready_pdf_count']} 个 PDF，"
+                f"自动入库 {summary['ingested_count']} 篇。"
+            ),
+            "complete",
+        )
+    except Exception as exc:
+        summary = {
+            "status": "failed",
+            "library_id": library_id,
+            "query": request.research_goal,
+            "message": str(exc)[:500],
+            "candidate_count": 0,
+            "ingested_count": 0,
+            "boundary": "The run continues with the literature review node, but pre-run knowledge-base ingestion failed.",
+        }
+        record.metrics["evidence_first"] = summary
+        record.research_plan["evidence_first"] = summary
+        add_event(record, "Evidence", "Evidence preparation limited", summary["message"], "error")
+    finally:
+        record.updated_at = time.time()
+        persist_run_record(record)
+
+
+async def run_real_evidence_first(record: RunRecord) -> None:
+    await prepare_evidence_first_run(record)
+    await run_real(record)
+
+
 async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[str, Any]:
     run_id = str(item.get("run_id") or item.get("arguments", {}).get("run_id") or "").strip()
     if not run_id:
@@ -6952,7 +8623,7 @@ async def execute_open_coscientist_run_work_item(item: Dict[str, Any]) -> Dict[s
         raise ValueError(f"Run not found for work item: {run_id}")
     record = RunRecord(**payload)
     runs[run_id] = record
-    task = run_demo(record) if record.request.demo_mode else run_real(record)
+    task = run_demo(record) if record.request.demo_mode else run_real_evidence_first(record)
     await run_with_guard(record, task)
     if record.status != "complete":
         raise RuntimeError(record.error or f"Run ended with status {record.status}")
@@ -7105,6 +8776,262 @@ async def auth_roles() -> Dict[str, Any]:
     return {"roles": list(role_rows())}
 
 
+def remote_workspace_http_error(exc: RemoteWorkspaceError) -> HTTPException:
+    return HTTPException(status_code=400, detail={"code": "remote_workspace_failed", "message": str(exc)})
+
+
+async def run_remote_workspace_call(
+    fn: Callable[..., Dict[str, Any]],
+    *args: Any,
+    timeout_seconds: float = 25,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={"code": "remote_workspace_timeout", "message": "远程服务器连接超时，请切换服务器或稍后重试。"},
+        ) from exc
+
+
+@app.get("/api/remote-workspaces/status")
+async def get_remote_workspace_status() -> Dict[str, Any]:
+    return remote_workspace_status()
+
+
+@app.get("/api/remote-workspaces/ssh-config-hosts")
+async def get_remote_workspace_ssh_config_hosts() -> Dict[str, Any]:
+    try:
+        return {"mode": "unrestricted", "hosts": parse_ssh_config()}
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+
+
+@app.get("/api/remote-workspaces/profiles")
+async def get_remote_workspace_profiles() -> Dict[str, Any]:
+    try:
+        return {"mode": "unrestricted", "profiles": list_remote_workspace_profiles(REMOTE_WORKSPACE_STORE_PATH)}
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+
+
+@app.post("/api/remote-workspaces/profiles")
+async def save_remote_workspace_profile_endpoint(request: RemoteWorkspaceProfileRequest) -> Dict[str, Any]:
+    try:
+        profile = save_remote_workspace_profile(REMOTE_WORKSPACE_STORE_PATH, request.model_dump())
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    return {"mode": "unrestricted", "profile": profile}
+
+
+@app.post("/api/remote-workspaces/profiles/import-ssh-config")
+async def import_remote_workspace_profile_endpoint(request: RemoteWorkspaceImportRequest) -> Dict[str, Any]:
+    try:
+        profile = import_ssh_config_profile(
+            REMOTE_WORKSPACE_STORE_PATH,
+            request.alias,
+            password=request.password,
+            default_remote_path_value=request.default_remote_path,
+        )
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    return {"mode": "unrestricted", "profile": profile}
+
+
+@app.delete("/api/remote-workspaces/profiles/{profile_id}")
+async def delete_remote_workspace_profile_endpoint(profile_id: str) -> Dict[str, Any]:
+    try:
+        return delete_remote_workspace_profile(REMOTE_WORKSPACE_STORE_PATH, profile_id)
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+
+
+@app.get("/api/remote-workspaces/profiles/{profile_id}/ls")
+async def list_remote_workspace_directory_endpoint(profile_id: str, path: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        return await run_remote_workspace_call(list_remote_directory, REMOTE_WORKSPACE_STORE_PATH, profile_id, path)
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"code": "remote_directory_list_failed", "message": str(exc)}) from exc
+
+
+@app.get("/api/projects/{project_id}/remote-root")
+async def get_project_remote_root_endpoint(project_id: str) -> Dict[str, Any]:
+    try:
+        root = get_project_remote_root(REMOTE_WORKSPACE_STORE_PATH, project_id)
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    return {"mode": "unrestricted", "remote_root": root}
+
+
+@app.post("/api/projects/{project_id}/remote-root")
+async def set_project_remote_root_endpoint(project_id: str, request: ProjectRemoteRootRequest) -> Dict[str, Any]:
+    try:
+        root = set_project_remote_root(
+            REMOTE_WORKSPACE_STORE_PATH,
+            project_id,
+            request.profile_id,
+            request.remote_path,
+            request.label,
+        )
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    return {"mode": "unrestricted", "remote_root": root}
+
+
+@app.get("/api/remote-workspaces/profiles/{profile_id}/tmux")
+async def list_remote_workspace_tmux_endpoint(profile_id: str, path: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        return await run_remote_workspace_call(list_tmux_sessions, REMOTE_WORKSPACE_STORE_PATH, profile_id, path)
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"code": "remote_tmux_list_failed", "message": str(exc)}) from exc
+
+
+@app.post("/api/remote-workspaces/profiles/{profile_id}/tmux")
+async def create_remote_workspace_tmux_endpoint(profile_id: str, request: RemoteTmuxCreateRequest) -> Dict[str, Any]:
+    try:
+        session = await run_remote_workspace_call(create_tmux_session, REMOTE_WORKSPACE_STORE_PATH, profile_id, request.name, request.workdir)
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+    return {"mode": "unrestricted", "session": session}
+
+
+@app.post("/api/remote-workspaces/profiles/{profile_id}/tmux/{session_name}/kill")
+async def kill_remote_workspace_tmux_endpoint(profile_id: str, session_name: str) -> Dict[str, Any]:
+    try:
+        return {
+            "mode": "unrestricted",
+            "session": await run_remote_workspace_call(kill_tmux_session, REMOTE_WORKSPACE_STORE_PATH, profile_id, session_name),
+        }
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+
+
+@app.post("/api/remote-workspaces/profiles/{profile_id}/tmux/{session_name}/rename")
+async def rename_remote_workspace_tmux_endpoint(profile_id: str, session_name: str, request: RemoteTmuxRenameRequest) -> Dict[str, Any]:
+    try:
+        return {
+            "mode": "unrestricted",
+            "session": await run_remote_workspace_call(
+                rename_tmux_session,
+                REMOTE_WORKSPACE_STORE_PATH,
+                profile_id,
+                session_name,
+                request.new_name,
+            ),
+        }
+    except RemoteWorkspaceError as exc:
+        raise remote_workspace_http_error(exc) from exc
+
+
+@app.get("/api/web-terminal/status")
+async def get_web_terminal_status() -> Dict[str, Any]:
+    return web_terminal_status()
+
+
+@app.get("/api/web-terminal/sessions")
+async def get_web_terminal_sessions() -> Dict[str, Any]:
+    return {
+        "mode": "unrestricted",
+        "sessions": list_web_terminal_sessions(),
+    }
+
+
+@app.post("/api/web-terminal/sessions")
+async def create_web_terminal_endpoint(request: WebTerminalSessionCreateRequest) -> Dict[str, Any]:
+    try:
+        session = create_web_terminal_session(
+            profile_id=request.profile,
+            cwd=request.cwd,
+            default_root=ROOT,
+            cols=request.cols,
+            rows=request.rows,
+            ssh_target=request.ssh_target,
+            ssh_remote_cwd=request.ssh_remote_cwd,
+            ssh_tmux_session=request.ssh_tmux_session,
+        )
+    except WebTerminalError as exc:
+        raise HTTPException(status_code=400, detail={"code": "web_terminal_create_failed", "message": str(exc)}) from exc
+    return {
+        "mode": "unrestricted",
+        "session": session.public_dict(),
+        "websocket_path": f"/api/web-terminal/sessions/{session.session_id}/ws",
+    }
+
+
+@app.delete("/api/web-terminal/sessions/{session_id}")
+async def close_web_terminal_endpoint(session_id: str) -> Dict[str, Any]:
+    close_web_terminal_session(session_id)
+    return {"ok": True, "session_id": session_id}
+
+
+@app.websocket("/api/web-terminal/sessions/{session_id}/ws")
+async def web_terminal_socket(websocket: WebSocket, session_id: str) -> None:
+    try:
+        session = get_web_terminal_session(session_id)
+    except WebTerminalError:
+        await websocket.close(code=4404)
+        return
+    await websocket.accept()
+    loop = asyncio.get_running_loop()
+    output_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+    stop_event = threading.Event()
+
+    def reader() -> None:
+        while not stop_event.is_set() and session.process.isalive():
+            try:
+                data = session.process.read(4096)
+            except Exception as exc:
+                loop.call_soon_threadsafe(output_queue.put_nowait, {"type": "error", "message": str(exc)})
+                break
+            if data:
+                loop.call_soon_threadsafe(output_queue.put_nowait, {"type": "output", "data": data})
+            else:
+                time.sleep(0.02)
+        loop.call_soon_threadsafe(output_queue.put_nowait, {"type": "exit"})
+
+    reader_thread = threading.Thread(target=reader, name=f"web-terminal-{session_id}", daemon=True)
+    reader_thread.start()
+
+    async def sender() -> None:
+        while True:
+            payload = await output_queue.get()
+            await websocket.send_json(payload)
+            if payload.get("type") == "exit":
+                break
+
+    sender_task = asyncio.create_task(sender())
+    try:
+        await websocket.send_json({"type": "ready", "session": session.public_dict()})
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {"type": "input", "data": raw}
+            message_type = payload.get("type")
+            if message_type == "input":
+                session.process.write(str(payload.get("data") or ""))
+            elif message_type == "resize":
+                rows = int(payload.get("rows") or 30)
+                cols = int(payload.get("cols") or 100)
+                session.process.resize(max(8, min(rows, 120)), max(20, min(cols, 400)))
+            elif message_type == "close":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        stop_event.set()
+        sender_task.cancel()
+        close_web_terminal_session(session_id)
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+            await sender_task
+
+
 @app.get("/api/literature-service/status")
 async def literature_service_status(user: Dict[str, Any] = Depends(require_user)) -> Dict[str, Any]:
     return {"runtime": literature_mcp_runtime_status(), "actor": user}
@@ -7134,9 +9061,15 @@ async def admin_create_user(
             display_name=request.display_name,
             role=request.role,
         )
+        secret_path = record_local_account_secret(
+            user,
+            request.password,
+            source="admin_create_user",
+            actor_email=admin.get("email", ""),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"user": user, "actor": admin}
+    return {"user": user, "actor": admin, "local_secret_path": str(secret_path)}
 
 
 @app.put("/api/admin/users/{account_id}/status")
@@ -7162,11 +9095,17 @@ async def admin_reset_user_password(
 ) -> Dict[str, Any]:
     try:
         user = reset_account_password(account_id, request.password)
+        secret_path = record_local_account_secret(
+            user,
+            request.password,
+            source="admin_reset_password",
+            actor_email=admin.get("email", ""),
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"user": user, "actor": admin}
+    return {"user": user, "actor": admin, "local_secret_path": str(secret_path)}
 
 
 @app.get("/api/health")
@@ -7198,6 +9137,10 @@ async def get_tool_registry(
 ) -> Dict[str, Any]:
     registry = research_tool_registry()
     tools = registry.list_tools(phase=phase, toolset=toolset)
+    virtual_register = _virtual_tool_register_spec()
+    if _virtual_tool_matches_filters(virtual_register, phase=phase, toolset=toolset):
+        tools.append(virtual_register)
+    tools.extend(_project_tool_registry_tools(phase=phase, toolset=toolset))
     return {
         "tools": tools,
         "count": len(tools),
@@ -7210,6 +9153,28 @@ async def get_tool_registry(
 async def get_toolsets() -> Dict[str, Any]:
     registry = research_tool_registry()
     toolsets = registry.list_toolsets()
+    toolsets.append(
+        {
+            "toolset": "tool_management",
+            "tools": ["tool.register_draft"],
+            "risk_levels": ["write"],
+            "phases": ["operator_diagnostics", "supervisor"],
+        }
+    )
+    project_tools = _project_tool_registry_tools()
+    if project_tools:
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for tool in project_tools:
+            grouped.setdefault(str(tool.get("toolset") or "project_custom"), []).append(tool)
+        for toolset_name, tools in sorted(grouped.items()):
+            toolsets.append(
+                {
+                    "toolset": toolset_name,
+                    "tools": sorted(str(tool.get("name")) for tool in tools if tool.get("name")),
+                    "risk_levels": sorted({str(tool.get("risk_level") or "read") for tool in tools}),
+                    "phases": sorted({str(phase) for tool in tools for phase in (tool.get("phases") or [])}),
+                }
+            )
     return {"toolsets": toolsets, "count": len(toolsets)}
 
 
@@ -8233,6 +10198,8 @@ async def _research_chat_turn_impl(
             "start_research_run": "请用一句明确 research goal 描述这次研究目标，例如：研究目标：为某机制生成可证伪假设。",
             "run_terminal_command": "请提供要执行的本地 PowerShell/bash/terminal 命令。",
             "run_ssh_training_command": "请提供服务器 ID（例如 c201-5080）和要执行的远程命令。",
+            "snapshot_local_file": "请提供要读取快照的本地文件路径，并确认它位于项目允许的证据根目录内。",
+            "register_project_tool": "请提供工具 ID 和用途描述；如果已有 input schema，也可以一并给出。",
             "search_public_web": "请提供要执行公开 Web Search 的 query。",
             "clarify": "你想解析 PDF、抓取网页、搜索知识库，还是检查假设支撑？",
         }
@@ -8245,6 +10212,17 @@ async def _research_chat_turn_impl(
                 "suggestions": _chat_capabilities(),
             },
             state="needs_input",
+        )
+
+    if intent == "summarize_project_artifacts":
+        result = _project_artifacts_summary_result(request.context, inputs)
+        return await _chat_turn_llm_response(
+            session_id=session_id,
+            request=request,
+            routed=routed,
+            structured_context=result,
+            knowledge_results=[item for item in result.get("items", []) if isinstance(item, dict)],
+            progress=progress,
         )
 
     if intent in {"ask_project_ai", "discover_capabilities"}:
@@ -8279,7 +10257,7 @@ async def _research_chat_turn_impl(
         normalized_min_references = min(request.context.min_references, request.context.max_references)
         normalized_max_references = max(request.context.min_references, request.context.max_references)
         action_id = f"action_{uuid.uuid4().hex[:12]}"
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8289,12 +10267,13 @@ async def _research_chat_turn_impl(
             operation_summary=[
                 "检查模型、本地知识库和文献服务",
                 "执行 safety gate",
+                "按研究主题自动检索论文并写入当前资料库",
                 "启动多阶段研究 workflow",
                 f"纳入 {len(starting_hypotheses)} 条用户候选假设" if starting_hypotheses else "由模型生成候选假设",
                 "生成 review、Elo ranking 和 timeline",
             ],
-            risk_summary="将调用真实模型；如果启用 literature-grounded workflow，还会检查 MCP 文献服务。没有文献证据的输出会标记为 limited/ungrounded。",
-            expected_result_summary=["research run", "hypotheses", "reviews", "tournament matchups", "agent trace"],
+            risk_summary="将调用真实模型和文献 MCP；一键模式会把可解析 PDF 自动写入当前资料库。没有文献证据的输出会标记为 limited/ungrounded。",
+            expected_result_summary=["research run", "ingested papers", "hypotheses", "reviews", "tournament matchups", "agent trace"],
             approval_scope="research.start_live_run",
             execution_target="workflow.start_run",
             request_preview={
@@ -8313,8 +10292,12 @@ async def _research_chat_turn_impl(
                 "starting_hypotheses_count": len(starting_hypotheses),
                 "parent_run_id": parent_run_id,
                 "refinement_mode": "continue_from_run" if parent_run_id else "new_run",
-                "memory_scope": "project",
+                "memory_scope": "library",
                 "library_id": request.context.library_id,
+                "auto_discover_papers": True,
+                "auto_ingest_papers": True,
+                "paper_discovery_limit": min(max(normalized_max_references, 6), 12),
+                "paper_ingest_limit": min(max(normalized_min_references, 4), 8),
             },
         )
 
@@ -8387,12 +10370,73 @@ async def _research_chat_turn_impl(
             progress=progress,
         )
 
+    if intent == "snapshot_local_file":
+        source_path = str(inputs["source_path"]).strip()
+        start_line = bounded_int(inputs.get("start_line"), 1, 1, 1_000_000)
+        line_count = bounded_int(inputs.get("line_count"), 200, 1, 2000)
+        max_bytes = bounded_int(inputs.get("max_bytes"), 1_000_000, 1024, 5_000_000)
+        action_id = f"action_{uuid.uuid4().hex[:12]}"
+        return await _proposal_or_auto_response(
+            session_id=session_id,
+            action_id=action_id,
+            intent=intent,
+            title="读取本地文件快照",
+            summary="我可以通过受控 file.source_snapshot workflow 读取这段本地文件，生成分页、hash 和审计记录。文件必须位于配置的 source evidence root 内。",
+            input_summary=_path_summary(source_path),
+            operation_summary=["校验路径边界", "按行范围读取文本", "计算内容 hash", "保存 source evidence 快照和 tool result"],
+            risk_summary="这是只读文件快照；仍会限制路径根目录、读取行数和最大字节数，并写入审计记录。不会读取凭据目录或越过 source evidence root。",
+            expected_result_summary=["source file snapshot", "line range", "content sha256", "tool result provenance"],
+            approval_scope="file.source_snapshot",
+            execution_target="workflow.file_snapshot",
+            request_preview={
+                "source_path": source_path,
+                "phase": "evidence_audit",
+                "run_id": request.context.run_id,
+                "start_line": start_line,
+                "line_count": line_count,
+                "max_bytes": max_bytes,
+            },
+        )
+
+    if intent == "register_project_tool":
+        tool_name = str(inputs["tool_name"]).strip()
+        description = str(inputs["description"]).strip()
+        toolset = str(inputs.get("toolset") or "project_custom").strip()
+        phases = [str(item).strip() for item in inputs.get("phases", []) if str(item).strip()] if isinstance(inputs.get("phases"), list) else ["evidence_audit"]
+        risk_level = str(inputs.get("risk_level") or "read").strip()
+        input_schema = inputs.get("input_schema") if isinstance(inputs.get("input_schema"), dict) else {}
+        action_id = f"action_{uuid.uuid4().hex[:12]}"
+        return await _proposal_or_auto_response(
+            session_id=session_id,
+            action_id=action_id,
+            intent=intent,
+            title="注册项目工具草案",
+            summary="我可以把这个工具注册为项目级 schema 草案，供后续 planner 和人工实现参考。此操作不会安装执行器，也不会让模型写入或运行任意工具代码。",
+            input_summary=f"{tool_name}: {description[:180]}",
+            operation_summary=["规范化工具 ID", "校验 input schema 和 phase", "保存 schema-only 草案", "写入 tool result 审计记录并出现在工具注册表"],
+            risk_summary="只保存工具元数据和输入 schema；执行器保持不可用，真正执行能力必须另行实现、审查和授权。",
+            expected_result_summary=["project tool draft", "validated schema", "registry entry", "audit result"],
+            approval_scope="tool.register_draft",
+            execution_target="workflow.tool_register_draft",
+            request_preview={
+                "tool_name": tool_name,
+                "user_title": str(inputs.get("user_title") or "").strip() or None,
+                "description": description,
+                "toolset": toolset,
+                "phases": phases,
+                "risk_level": risk_level,
+                "input_schema": input_schema,
+                "execution_boundary": str(inputs.get("execution_boundary") or "schema_registered_only"),
+                "run_id": request.context.run_id,
+            },
+        )
+
     if intent == "run_terminal_command":
         command = str(inputs["command"]).strip()
         workdir = inputs.get("workdir")
         command_risk = classify_command_risk(command)
         action_id = f"action_{uuid.uuid4().hex[:12]}"
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8420,7 +10464,7 @@ async def _research_chat_turn_impl(
         workdir = inputs.get("workdir")
         command_risk = classify_command_risk(command)
         action_id = f"action_{uuid.uuid4().hex[:12]}"
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8446,7 +10490,7 @@ async def _research_chat_turn_impl(
     if intent == "parse_pdf_to_knowledge_base":
         pdf_path = str(inputs["pdf_path"])
         action_id = f"action_{uuid.uuid4().hex[:12]}"
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8470,7 +10514,7 @@ async def _research_chat_turn_impl(
     if intent == "extract_web_evidence":
         url = str(inputs["url"])
         action_id = f"action_{uuid.uuid4().hex[:12]}"
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8495,7 +10539,7 @@ async def _research_chat_turn_impl(
     if intent == "extract_web_evidence_batch":
         urls = [str(url).strip() for url in inputs.get("urls", []) if str(url).strip()][:3]
         action_id = f"action_{uuid.uuid4().hex[:12]}"
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8523,7 +10567,7 @@ async def _research_chat_turn_impl(
         query = str(inputs["query"]).strip()
         action_id = f"action_{uuid.uuid4().hex[:12]}"
         domains = inputs.get("domains") if isinstance(inputs.get("domains"), list) else []
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8573,7 +10617,7 @@ async def _research_chat_turn_impl(
         hypothesis_text = str(inputs["hypothesis_text"]).strip()
         action_id = f"action_{uuid.uuid4().hex[:12]}"
         query = evidence_verifier.build_counter_evidence_query(hypothesis_text)
-        return _proposal_response(
+        return await _proposal_or_auto_response(
             session_id=session_id,
             action_id=action_id,
             intent=intent,
@@ -8798,15 +10842,19 @@ async def confirm_research_chat_action(
                     ],
                     parent_run_id=str(preview.get("parent_run_id") or "") or None,
                     refinement_mode=str(preview.get("refinement_mode") or "new_run"),
-                    memory_scope=str(preview.get("memory_scope") or "project"),
+                    memory_scope=str(preview.get("memory_scope") or "library"),
                     library_id=str(preview.get("library_id") or "") or None,
+                    auto_discover_papers=bool(preview.get("auto_discover_papers", True)),
+                    auto_ingest_papers=bool(preview.get("auto_ingest_papers", True)),
+                    paper_discovery_limit=bounded_int(preview.get("paper_discovery_limit"), 8, 1, 20),
+                    paper_ingest_limit=bounded_int(preview.get("paper_ingest_limit"), 4, 0, 12),
                 )
             )
             run_id = payload["run_id"]
             result_summary = {
                 "intent": proposal.get("intent"),
                 "title": "研究流程已启动",
-                "summary": "已创建研究运行。右侧工作区会显示 timeline、hypotheses、reviews 和 tournament ranking；没有文献证据时请按 limited/ungrounded 处理。",
+                "summary": "已创建一键研究运行。系统会先自动检索论文并把可解析 PDF 写入资料库，再生成带证据回填的 hypotheses、reviews 和 tournament ranking。",
                 "runId": run_id,
                 "researchGoal": preview.get("research_goal"),
                 "status": "queued",
@@ -8996,6 +11044,65 @@ async def confirm_research_chat_action(
                 "resultRef": payload.get("result_ref"),
                 "nextActions": ["抓取高相关网页作为证据", "解析搜索结果中的 PDF", "继续搜索更精确 query", "用知识库核验候选假设"],
                 "groundingBoundary": "public_web_search",
+            }
+        elif proposal.get("executionTarget") == "workflow.file_snapshot":
+            payload = await execute_file_snapshot_workflow(
+                FileSnapshotWorkflowRequest(
+                    source_path=str(preview["source_path"]),
+                    phase=str(preview.get("phase") or "evidence_audit"),
+                    run_id=preview.get("run_id"),
+                    start_line=bounded_int(preview.get("start_line"), 1, 1, 1_000_000),
+                    line_count=bounded_int(preview.get("line_count"), 200, 1, 2000),
+                    max_bytes=bounded_int(preview.get("max_bytes"), 1_000_000, 1024, 5_000_000),
+                    approval=request.approval,
+                )
+            )
+            file_result = payload.get("file_result", {})
+            result_summary = {
+                "intent": proposal.get("intent"),
+                "title": "本地文件快照已保存",
+                "summary": "已按行范围读取本地文件片段，并保存 content hash、快照元数据和 tool result provenance。",
+                "status": "complete",
+                "toolName": payload.get("tool_name"),
+                "relativePath": file_result.get("relative_path"),
+                "lineStart": file_result.get("start_line"),
+                "lineCount": file_result.get("line_count"),
+                "contentSha256": file_result.get("content_sha256"),
+                "sourceReliability": file_result.get("source_reliability"),
+                "resultRef": payload.get("result_ref"),
+                "nextActions": ["基于文件片段继续问答", "把关键片段用于证据核验", "继续读取相邻行范围"],
+                "groundingBoundary": "local_file_snapshot",
+            }
+        elif proposal.get("executionTarget") == "workflow.tool_register_draft":
+            payload = await execute_project_tool_registration_workflow(
+                ProjectToolRegistrationRequest(
+                    tool_name=str(preview["tool_name"]),
+                    user_title=preview.get("user_title"),
+                    description=str(preview["description"]),
+                    toolset=str(preview.get("toolset") or "project_custom"),
+                    phases=list(preview.get("phases") or ["evidence_audit"]),
+                    risk_level=str(preview.get("risk_level") or "read"),
+                    input_schema=preview.get("input_schema") if isinstance(preview.get("input_schema"), dict) else {},
+                    execution_boundary=str(preview.get("execution_boundary") or "schema_registered_only"),
+                    run_id=preview.get("run_id"),
+                    approval=request.approval,
+                )
+            )
+            draft = payload.get("draft", {})
+            result_summary = {
+                "intent": proposal.get("intent"),
+                "title": "项目工具草案已注册",
+                "summary": f"已注册 {draft.get('name')} 的 schema-only 工具草案；它会出现在工具注册表中，但执行器仍不可用，不能直接运行代码。",
+                "status": "complete",
+                "toolName": payload.get("tool_name"),
+                "registeredToolName": draft.get("name"),
+                "toolset": draft.get("toolset"),
+                "phases": draft.get("phases"),
+                "riskLevel": draft.get("risk_level"),
+                "executionStatus": draft.get("execution_status"),
+                "resultRef": payload.get("result_ref"),
+                "nextActions": ["在工具注册表查看草案", "人工实现并审查执行器", "为该工具补充测试和权限策略"],
+                "groundingBoundary": "tool_registry_draft",
             }
         elif proposal.get("executionTarget") == "workflow.terminal_command":
             payload = await enqueue_terminal_command_background_job(
@@ -9371,16 +11478,15 @@ async def execute_file_snapshot_workflow(request: FileSnapshotWorkflowRequest) -
 
     payload = snapshot.payload
     public_payload = snapshot.public_payload()
-    result_ref: Optional[Dict[str, Any]] = None
+    result_ref = knowledge_base.store_tool_result(
+        run_id=request.run_id,
+        tool_name="file.source_snapshot",
+        phase=phase,
+        content=payload,
+        result_kind="source_file_snapshot",
+        summary=f"Source file snapshot captured for {payload.get('relative_path')}.",
+    )
     if request.run_id:
-        result_ref = knowledge_base.store_tool_result(
-            run_id=request.run_id,
-            tool_name="file.source_snapshot",
-            phase=phase,
-            content=payload,
-            result_kind="source_file_snapshot",
-            summary=f"Source file snapshot captured for {payload.get('relative_path')}.",
-        )
         knowledge_base.record_research_tool_call(
             run_id=request.run_id,
             tool_name="file.source_snapshot",
@@ -9424,6 +11530,106 @@ async def execute_file_snapshot_workflow(request: FileSnapshotWorkflowRequest) -
         "policy": authorization.get("policy"),
         "result_ref": result_ref,
         "file_result": public_payload,
+    }
+
+
+@app.post("/api/tools/workflows/tool-register-draft")
+async def execute_project_tool_registration_workflow(request: ProjectToolRegistrationRequest) -> Dict[str, Any]:
+    approval = require_tool_workflow_approval(
+        request.approval,
+        expected_scope="tool.register_draft",
+    )
+    if request.run_id and not load_run_record(request.run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    registry = research_tool_registry()
+    tool_name = _slug_project_tool_name(request.tool_name)
+    if registry.get(tool_name):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "project_tool_name_conflicts_with_builtin",
+                "message": f"{tool_name} 已是内置工具，不能作为项目草案覆盖。",
+            },
+        )
+    drafts = _load_project_tool_drafts()
+    if any(str(item.get("name") or "") == tool_name for item in drafts):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "project_tool_draft_exists",
+                "message": f"{tool_name} 已注册为项目工具草案；请换一个 ID 或先人工审查已有草案。",
+            },
+        )
+
+    phases = _normalize_project_tool_phases(request.phases)
+    input_schema = _normalize_project_tool_input_schema(request.input_schema)
+    toolset = _normalize_project_toolset(request.toolset)
+    boundary = str(request.execution_boundary or "schema_registered_only").strip()[:1000]
+    if boundary and re.search(r"(?:write\s+code|exec|subprocess|shell|powershell|bash|python\s+-c|任意代码|执行代码)", boundary, re.I):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "project_tool_boundary_requests_execution",
+                "message": "工具草案的 execution_boundary 不能要求执行代码；请只描述 schema 和人工实现边界。",
+            },
+        )
+
+    now = time.time()
+    draft: Dict[str, Any] = {
+        "name": tool_name,
+        "user_title": request.user_title or tool_name,
+        "description": request.description.strip(),
+        "toolset": toolset,
+        "phases": phases,
+        "risk_level": request.risk_level,
+        "input_schema": input_schema,
+        "execution_boundary": boundary or "schema_registered_only",
+        "path_policy": "source_evidence_root_only_for_file_inputs",
+        "execution_status": "schema_registered_only",
+        "registered_at": now,
+        "registered_by": "research_chat_confirmation",
+        "approval": approval,
+    }
+    result_ref = knowledge_base.store_tool_result(
+        run_id=request.run_id,
+        tool_name="tool.register_draft",
+        phase="operator_diagnostics",
+        content=draft,
+        result_kind="project_tool_registration_draft",
+        summary=f"Project tool draft registered: {tool_name}.",
+    )
+    draft["result_ref"] = result_ref
+    drafts.append(draft)
+    _save_project_tool_drafts(drafts)
+
+    if request.run_id:
+        knowledge_base.record_research_tool_call(
+            run_id=request.run_id,
+            tool_name="tool.register_draft",
+            phase="operator_diagnostics",
+            status="complete",
+            arguments={
+                "tool_name": tool_name,
+                "toolset": toolset,
+                "phases": phases,
+                "risk_level": request.risk_level,
+            },
+            result_summary=f"Project tool draft registered: {tool_name}.",
+            metadata={
+                "approval": approval,
+                "result_ref": result_ref,
+                "execution_status": "schema_registered_only",
+            },
+        )
+
+    return {
+        "tool_name": "tool.register_draft",
+        "run_id": request.run_id,
+        "approval": approval,
+        "result_ref": result_ref,
+        "draft": draft,
+        "registry_tool": _project_tool_draft_to_registry_tool(draft),
     }
 
 
@@ -10869,6 +13075,110 @@ async def translate_hypothesis(request: TranslationRequest) -> Dict[str, str]:
         )
 
 
+def _microsoft_translator_settings() -> Dict[str, str]:
+    return {
+        "key": os.getenv("MICROSOFT_TRANSLATOR_KEY") or os.getenv("AZURE_TRANSLATOR_KEY") or "",
+        "region": os.getenv("MICROSOFT_TRANSLATOR_REGION") or os.getenv("AZURE_TRANSLATOR_REGION") or "",
+        "endpoint": (
+            os.getenv("MICROSOFT_TRANSLATOR_ENDPOINT")
+            or os.getenv("AZURE_TRANSLATOR_ENDPOINT")
+            or "https://api.cognitive.microsofttranslator.com"
+        ).rstrip("/"),
+    }
+
+
+def _translate_with_microsoft(text: str, target_language: str) -> str:
+    settings = _microsoft_translator_settings()
+    if not settings["key"]:
+        raise RuntimeError("missing_microsoft_translator_key")
+    headers = {
+        "Ocp-Apim-Subscription-Key": settings["key"],
+        "Content-Type": "application/json",
+        "X-ClientTraceId": str(uuid.uuid4()),
+    }
+    if settings["region"]:
+        headers["Ocp-Apim-Subscription-Region"] = settings["region"]
+    response = requests.post(
+        f"{settings['endpoint']}/translate",
+        params={"api-version": "3.0", "to": target_language or "zh-Hans"},
+        headers=headers,
+        json=[{"Text": text}],
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("empty_microsoft_translation")
+    translations = payload[0].get("translations") if isinstance(payload[0], dict) else None
+    if not translations:
+        raise RuntimeError("empty_microsoft_translation")
+    translated = translations[0].get("text") if isinstance(translations[0], dict) else ""
+    if not translated:
+        raise RuntimeError("empty_microsoft_translation")
+    return str(translated).strip()
+
+
+@app.post("/api/evidence/translate")
+async def translate_evidence_text(request: TranslationRequest) -> Dict[str, str]:
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail={"code": "empty_translation_text"})
+    text = text[:6000]
+    target_language = request.target_language or "zh-Hans"
+
+    if request.provider in {"auto", "microsoft"}:
+        try:
+            translation = await asyncio.to_thread(_translate_with_microsoft, text, target_language)
+            return {"translation": translation, "provider": "microsoft", "target_language": target_language}
+        except Exception as exc:
+            if request.provider == "microsoft":
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": "microsoft_translation_failed",
+                        "message": "Microsoft Translator 暂时不可用，请检查 Azure Translator key、region 或网络。",
+                    },
+                ) from exc
+
+    if not has_model_provider_key(request.model_name):
+        provider = provider_for_model(request.model_name)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_provider_key",
+                "message": (
+                    "Evidence translation requires Microsoft Translator env vars "
+                    f"or {', '.join(provider['env_vars'])} for {request.model_name}."
+                ),
+            },
+        )
+
+    try:
+        from open_coscientist.llm import call_llm
+
+        prompt = (
+            "Translate the following evidence excerpt into concise Simplified Chinese. "
+            "Preserve technical terms, symbols, numbers, uncertainty, negative-result language, and citations. "
+            "Return only the Chinese translation; do not add analysis or new claims.\n\n"
+            f"Evidence excerpt:\n{text}"
+        )
+        translation = await call_llm(
+            prompt=prompt,
+            model_name=request.model_name,
+            max_tokens=1200,
+            temperature=0.1,
+        )
+        return {"translation": translation.strip(), "provider": "model", "target_language": target_language}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "evidence_translation_failed",
+                "message": "证据片段翻译暂时不可用。",
+            },
+        ) from exc
+
+
 @app.get("/api/literature-libraries")
 async def list_literature_libraries() -> Dict[str, Any]:
     libraries = knowledge_base.list_libraries()
@@ -10934,8 +13244,32 @@ async def discover_literature_for_library(request: LiteratureDiscoveryRequest) -
             detail={key: value for key, value in authorization.items() if key != "allowed"},
         )
 
+    planner = await _plan_literature_discovery(
+        query=request.query,
+        preferred_source=request.preferred_source,
+        max_results=request.max_results,
+        planning_mode=request.planning_mode,
+        model_name=request.model_name,
+    )
+    planned_tool_queries = [
+        item
+        for item in planner.get("tool_queries", [])
+        if isinstance(item, dict) and str(item.get("tool_id") or "").strip()
+    ]
+    if not planned_tool_queries:
+        planner = _rules_literature_discovery_plan(
+            request.query,
+            request.preferred_source,
+            reason="检索计划为空，已回退到规则检索。",
+        )
+        planned_tool_queries = [
+            item
+            for item in planner.get("tool_queries", [])
+            if isinstance(item, dict) and str(item.get("tool_id") or "").strip()
+        ]
+
     tool_registry = build_policy_limited_tool_registry()
-    tool_ids = _preferred_literature_tools(request.query, request.preferred_source)
+    tool_ids = [str(item["tool_id"]) for item in planned_tool_queries]
     allowed_tool_ids = set(tool_registry.get_tools_for_workflow("literature_review"))
     blocked_tool_ids = [tool_id for tool_id in tool_ids if tool_id not in allowed_tool_ids]
     if blocked_tool_ids:
@@ -10947,12 +13281,23 @@ async def discover_literature_for_library(request: LiteratureDiscoveryRequest) -
                 "blocked_tools": blocked_tool_ids,
             },
         )
-    tool_configs = [(tool_id, tool_registry.get_tool(tool_id)) for tool_id in tool_ids]
-    missing_tool_ids = [tool_id for tool_id, tool_config in tool_configs if not tool_config]
+    planned_calls: List[Dict[str, Any]] = []
+    for call_index, item in enumerate(planned_tool_queries, start=1):
+        tool_id = str(item.get("tool_id") or "")
+        tool_config = tool_registry.get_tool(tool_id)
+        planned_calls.append(
+            {
+                "call_id": f"{tool_id}:{call_index}",
+                "tool_id": tool_id,
+                "tool_config": tool_config,
+                "query": str(item.get("query") or request.query).strip() or request.query,
+                "rationale": str(item.get("rationale") or ""),
+            }
+        )
+    missing_tool_ids = [str(item["tool_id"]) for item in planned_calls if not item.get("tool_config")]
     if missing_tool_ids:
         raise HTTPException(status_code=424, detail={"code": "mcp_tool_not_configured"})
 
-    per_source_limit = request.max_results if len(tool_ids) == 1 else max(2, min(request.max_results, (request.max_results + len(tool_ids) - 1) // len(tool_ids) + 1))
     client = await get_policy_limited_mcp_client(tool_registry)
     source_statuses: List[Dict[str, Any]] = []
     candidates: List[Dict[str, Any]] = []
@@ -10966,14 +13311,18 @@ async def discover_literature_for_library(request: LiteratureDiscoveryRequest) -
                 return f"{key}:{value}"
         return f"title:{str(candidate.get('title') or '').strip().lower()}"
 
-    for tool_id, tool_config in tool_configs:
+    for planned_call in planned_calls:
+        tool_id = str(planned_call["tool_id"])
+        tool_config = planned_call["tool_config"]
         if not tool_config:
             continue
-        arguments = _discovery_tool_arguments(tool_id, request.query, per_source_limit, library_id)
+        planned_query = str(planned_call["query"])
+        call_id = str(planned_call["call_id"])
+        arguments = _discovery_tool_arguments(tool_id, planned_query, request.max_results, library_id)
         try:
             raw_result = await client.call_tool(tool_config.mcp_tool_name, **arguments)
         except Exception:
-            if len(tool_ids) == 1:
+            if len(planned_calls) == 1:
                 raise HTTPException(
                     status_code=424,
                     detail={
@@ -10983,9 +13332,12 @@ async def discover_literature_for_library(request: LiteratureDiscoveryRequest) -
                 )
             source_statuses.append(
                 {
+                    "call_id": call_id,
                     "tool_id": tool_id,
                     "mcp_tool_name": tool_config.mcp_tool_name,
                     "display_name": tool_config.display_name,
+                    "query": planned_query,
+                    "rationale": str(planned_call.get("rationale") or ""),
                     "status": "failed",
                     "message": "该来源检索失败；已保留其他来源结果。",
                 }
@@ -10994,40 +13346,69 @@ async def discover_literature_for_library(request: LiteratureDiscoveryRequest) -
         source_candidates = _literature_candidates_from_mcp_result(
             raw_result,
             tool_id=tool_id,
-            max_results=per_source_limit,
+            max_results=request.max_results,
         )
-        for candidate in source_candidates:
+        for candidate_index, candidate in enumerate(source_candidates, start=1):
+            candidate["candidate_id"] = f"candidate_{tool_id}_{len(source_statuses) + 1}_{candidate_index}"
+            candidate["discovery_query"] = planned_query
+            candidate["discovery_call_id"] = call_id
             key = candidate_key(candidate)
             if key in seen_candidate_keys:
                 continue
             seen_candidate_keys.add(key)
             candidates.append(candidate)
-            if len(candidates) >= request.max_results:
-                break
         successful_tools.append(
             {
+                "call_id": call_id,
                 "tool_id": tool_id,
                 "mcp_tool_name": tool_config.mcp_tool_name,
                 "display_name": tool_config.display_name,
+                "query": planned_query,
+                "rationale": str(planned_call.get("rationale") or ""),
             }
         )
         source_statuses.append(
             {
+                "call_id": call_id,
                 "tool_id": tool_id,
                 "mcp_tool_name": tool_config.mcp_tool_name,
                 "display_name": tool_config.display_name,
+                "query": planned_query,
+                "rationale": str(planned_call.get("rationale") or ""),
                 "status": "ready" if source_candidates else "limited",
                 "message": f"找到 {len(source_candidates)} 个候选。" if source_candidates else "该来源没有返回可展示候选。",
             }
         )
-        if len(candidates) >= request.max_results:
-            break
+    pdf_discovery_results = (
+        await _discover_pdf_links_for_candidates(
+            client=client,
+            tool_registry=tool_registry,
+            candidates=candidates,
+            source_statuses=source_statuses,
+            max_pages=request.max_results if request.auto_discover_pdf_links else 0,
+        )
+        if candidates
+        else []
+    )
+    auto_ingest_results = (
+        await _auto_ingest_discovered_pdfs(
+            candidates=candidates,
+            library_id=library_id,
+            limit=request.auto_ingest_limit,
+        )
+        if request.auto_ingest_pdfs and candidates
+        else []
+    )
+    ingested_count = sum(1 for item in auto_ingest_results if item.get("status") == "ingested")
     return {
         "query": request.query,
         "library_id": library_id,
         "status": "ready" if candidates else "limited",
         "message": (
-            f"已通过 {', '.join(item['display_name'] for item in successful_tools) or '文献搜索引擎'} 找到 {len(candidates)} 个去重候选。"
+            (
+                f"已通过 {len(successful_tools)} 组模型规划检索找到 {len(candidates)} 个去重候选。"
+                + (f" 自动解析入库 {ingested_count} 篇 PDF。" if request.auto_ingest_pdfs else "")
+            )
             if candidates
             else "文献搜索引擎已完成可用来源检索，但没有发现可直接展示的论文候选；建议换用更具体的检索词。"
         ),
@@ -11035,6 +13416,9 @@ async def discover_literature_for_library(request: LiteratureDiscoveryRequest) -
         "tool": successful_tools[0] if len(successful_tools) == 1 else None,
         "tools": successful_tools,
         "source_statuses": source_statuses,
+        "planner": planner,
+        "pdf_discovery": pdf_discovery_results,
+        "auto_ingest": auto_ingest_results,
         "approval": approval,
         "candidates": candidates,
     }
@@ -11456,7 +13840,27 @@ async def search_knowledge(q: str, limit: int = 8, library_id: Optional[str] = N
         "query": q,
         "library_id": library_id,
         "results": results,
+        "ragflow": knowledge_base.ragflow_status(),
     }
+
+
+@app.get("/api/knowledge/ragflow/status")
+async def get_ragflow_knowledge_status() -> Dict[str, Any]:
+    return knowledge_base.ragflow_status()
+
+
+@app.post("/api/knowledge/ragflow/reindex")
+async def reindex_ragflow_embeddings(request: RagflowReindexRequest) -> Dict[str, Any]:
+    try:
+        return knowledge_base.reindex_embeddings(library_id=request.library_id, paper_id=request.paper_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "literature_library_not_found",
+                "message": "没有找到目标文献库，请先选择或创建文献库。",
+            },
+        )
 
 
 @app.get("/api/knowledge/rag/search")
@@ -11494,7 +13898,280 @@ async def search_rag_evidence(
         "parse_item_key": parse_item_key,
         "support_level": support_level,
         "results": results,
+        "ragflow": knowledge_base.ragflow_status(),
         "database_path": str(paper_parse_store.database_path),
+    }
+
+
+@app.get("/api/workbench/snapshot")
+async def get_workbench_snapshot(
+    run_id: Optional[str] = None,
+    library_id: Optional[str] = None,
+    paper_limit: int = 12,
+    run_limit: int = 8,
+) -> Dict[str, Any]:
+    selected_run: Optional[RunRecord] = None
+    if run_id:
+        selected_run = load_run_record(run_id)
+        if not selected_run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        documents = knowledge_base.list_documents(library_id=library_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "literature_library_not_found",
+                "message": "没有找到目标文献库，请先选择或创建文献库。",
+            },
+        ) from exc
+
+    run_summaries = knowledge_base.list_research_runs(limit=max(1, min(run_limit, 50)))
+    recent_runs: list[RunRecord] = []
+    for summary in run_summaries:
+        record = load_run_record(str(summary.get("run_id") or ""))
+        if record:
+            recent_runs.append(record)
+            if selected_run is None and record.status in {"queued", "running", "complete"}:
+                selected_run = record
+
+    papers = [_public_paper_summary(document) for document in documents[: max(1, min(paper_limit, 100))]]
+    evidence_count = 0
+    if selected_run:
+        evidence_count = sum(
+            len(hypothesis.get("citation_map") or {})
+            for hypothesis in selected_run.hypotheses
+            if isinstance(hypothesis, dict)
+        )
+    if not selected_run:
+        evidence_boundary = "no_run"
+    elif selected_run.request.demo_mode:
+        evidence_boundary = "synthetic_demo"
+    elif selected_run.request.literature_review and evidence_count:
+        evidence_boundary = "literature_grounded_with_provenance_review"
+    elif selected_run.request.literature_review:
+        evidence_boundary = "literature_requested_but_evidence_pending"
+    else:
+        evidence_boundary = "ungrounded_model_output"
+
+    health_payload = await build_health_payload(debug=False)
+    project = None
+    artifacts: list[Dict[str, Any]] = []
+    if selected_run:
+        project = {
+            "id": selected_run.run_id,
+            "title": " ".join(selected_run.request.research_goal.split())[:96],
+            "research_goal": selected_run.request.research_goal,
+            "status": selected_run.status,
+            "mode": "demo" if selected_run.request.demo_mode else "live",
+        }
+        artifacts = knowledge_base.list_project_artifacts(
+            project_id=selected_run.run_id,
+            run_id=selected_run.run_id,
+            limit=50,
+        )
+
+    return {
+        "schema_version": "workbench.snapshot.v1",
+        "project": project,
+        "current_run": _public_snapshot_value(run_record_payload(selected_run))
+        if selected_run
+        else None,
+        "runs": [_public_run_summary(record) for record in recent_runs[: max(1, min(run_limit, 50))]],
+        "papers": papers,
+        "artifacts": [_public_snapshot_value(item) for item in artifacts],
+        "capabilities": {
+            "research_run": True,
+            "literature_library": True,
+            "pdf_ingest": True,
+            "evidence_search": True,
+            "project_artifacts": True,
+            "run_events": True,
+            "synthetic_demo": True,
+        },
+        "evidence_boundary": evidence_boundary,
+        "literature_mcp": health_payload.get("literature_mcp", {}),
+        "ragflow_knowledge": health_payload.get("ragflow_knowledge", {}),
+    }
+
+
+@app.get("/api/projects/{project_id}/artifacts")
+async def list_project_artifacts(
+    project_id: str,
+    run_id: Optional[str] = None,
+    artifact_type: Optional[str] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    return {
+        "project_id": project_id,
+        "artifacts": [
+            _public_snapshot_value(item)
+            for item in knowledge_base.list_project_artifacts(
+                project_id=project_id,
+                run_id=run_id,
+                artifact_type=artifact_type,
+                limit=limit,
+            )
+        ],
+    }
+
+
+@app.post("/api/projects/{project_id}/artifacts")
+async def save_project_artifact(project_id: str, request: ProjectArtifactRequest) -> Dict[str, Any]:
+    record = load_run_record(request.run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    artifact = knowledge_base.save_project_artifact(
+        project_id=project_id,
+        run_id=request.run_id,
+        artifact_type=request.artifact_type,
+        target_ref=request.target_ref,
+        title=request.title,
+        payload=request.payload,
+    )
+    return {"artifact": _public_snapshot_value(artifact)}
+
+
+@app.post("/api/projects/{project_id}/experiment-plans")
+async def create_project_experiment_plan(
+    project_id: str,
+    request: ExperimentPlanRequest,
+) -> Dict[str, Any]:
+    record = load_run_record(request.run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if request.hypothesis_index >= len(record.hypotheses):
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    hypothesis = record.hypotheses[request.hypothesis_index]
+    if not isinstance(hypothesis, dict):
+        raise HTTPException(status_code=422, detail="Hypothesis payload is invalid")
+
+    context = ResearchChatContext(
+        run_id=request.run_id,
+        selected_hypothesis_index=request.hypothesis_index,
+        demo_mode=record.request.demo_mode,
+        literature_review=record.request.literature_review,
+    )
+    result = _experiment_design_result(
+        context,
+        {
+            "hypothesis_index": request.hypothesis_index,
+            "query": str(hypothesis.get("text") or hypothesis.get("hypothesis") or ""),
+        },
+    )
+    artifact = knowledge_base.save_project_artifact(
+        project_id=project_id,
+        run_id=request.run_id,
+        artifact_type="experiment_plan",
+        target_ref={"hypothesis_index": request.hypothesis_index},
+        title=str(result.get("title") or "可证伪实验设计草案"),
+        payload=result,
+    )
+    return {
+        "experiment_plan": _public_snapshot_value(result),
+        "artifact": _public_snapshot_value(artifact),
+        "grounding_boundary": "run_audit",
+    }
+
+
+@app.get("/api/runs/{run_id}/events")
+async def stream_run_events(run_id: str) -> StreamingResponse:
+    initial = load_run_record(run_id)
+    if not initial:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def event_stream():
+        started_at = time.monotonic()
+        last_fingerprint: Optional[tuple[Any, ...]] = None
+        while True:
+            record = load_run_record(run_id)
+            if not record:
+                yield _research_chat_sse_event(
+                    "error",
+                    {"code": "run_not_found", "message": "研究运行已不存在。"},
+                )
+                break
+            fingerprint = (
+                record.updated_at,
+                record.status,
+                len(record.timeline),
+                len(record.hypotheses),
+                len(record.agent_trace),
+            )
+            if fingerprint != last_fingerprint:
+                last_fingerprint = fingerprint
+                yield _research_chat_sse_event(
+                    "run",
+                    {
+                        "run_id": run_id,
+                        "status": record.status,
+                        "updated_at": record.updated_at,
+                        "timeline_count": len(record.timeline),
+                        "hypothesis_count": len(record.hypotheses),
+                        "agent_trace_count": len(record.agent_trace),
+                        "record": _public_snapshot_value(run_record_payload(record)),
+                    },
+                )
+            if record.status in {"complete", "error"}:
+                yield _research_chat_sse_event(
+                    "done",
+                    {"run_id": run_id, "status": record.status},
+                )
+                break
+            if time.monotonic() - started_at > max(RUN_TIMEOUT_SECONDS, 30) + STALE_RUN_GRACE_SECONDS:
+                yield _research_chat_sse_event(
+                    "error",
+                    {
+                        "run_id": run_id,
+                        "code": "run_events_timeout",
+                        "message": "运行事件流超过等待窗口，请刷新运行详情。",
+                    },
+                )
+                break
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/runs/{run_id}/recovery")
+async def get_run_recovery(run_id: str) -> Dict[str, Any]:
+    record = load_run_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    queue = knowledge_base.active_work_item_snapshot(
+        run_id=run_id,
+        workflow_name="workflow.open_coscientist_run",
+        limit=10,
+    )
+    recovery = _run_recovery_summary(record)
+    if record.status in {"queued", "running"}:
+        recovery = {
+            "category": "in_progress",
+            "summary": "运行仍在后台队列中，页面会继续接收阶段事件。",
+            "retryable": False,
+            "next_actions": ["monitor_run_events", "inspect_worker"],
+        }
+    return {
+        "run_id": run_id,
+        "status": record.status,
+        "recovery": recovery,
+        "queue": queue,
+        "checkpoint_count": len(knowledge_base.list_checkpoint_metadata(run_id=run_id, limit=20)),
+        "evidence_boundary": (
+            "synthetic_demo"
+            if record.request.demo_mode
+            else "literature_requested"
+            if record.request.literature_review
+            else "ungrounded_model_output"
+        ),
     }
 
 
@@ -11606,6 +14283,17 @@ async def create_run(request: RunRequest) -> Dict[str, str]:
                     "repair_hint": mcp_status["repair_hint"],
                 },
             )
+    if request.library_id or request.auto_discover_papers:
+        try:
+            request.library_id = knowledge_base.resolve_library_id(request.library_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "literature_library_not_found",
+                    "message": "没有找到目标资料库，无法启动一键证据优先研究。",
+                },
+            ) from exc
 
     safety_gate = evaluate_safety_gate(request.research_goal)
     if safety_gate["status"] == "blocked":
@@ -11657,6 +14345,9 @@ async def create_run(request: RunRequest) -> Dict[str, str]:
             "run_id": run_id,
             "demo_mode": request.demo_mode,
             "literature_review": request.literature_review,
+            "auto_discover_papers": request.auto_discover_papers,
+            "auto_ingest_papers": request.auto_ingest_papers,
+            "library_id": request.library_id,
         },
     )
     persist_run_checkpoint_metadata(
@@ -11695,6 +14386,18 @@ async def continue_run(run_id: str, request: ContinueRunRequest) -> Dict[str, st
         refinement_mode=request.refinement_mode,
         memory_scope=request.memory_scope or parent_request.memory_scope,
         library_id=request.library_id if request.library_id is not None else parent_request.library_id,
+        auto_discover_papers=parent_request.auto_discover_papers
+        if request.auto_discover_papers is None
+        else request.auto_discover_papers,
+        auto_ingest_papers=parent_request.auto_ingest_papers
+        if request.auto_ingest_papers is None
+        else request.auto_ingest_papers,
+        paper_discovery_limit=parent_request.paper_discovery_limit
+        if request.paper_discovery_limit is None
+        else request.paper_discovery_limit,
+        paper_ingest_limit=parent_request.paper_ingest_limit
+        if request.paper_ingest_limit is None
+        else request.paper_ingest_limit,
     )
     response = await create_run(continued_request)
     response["parent_run_id"] = run_id

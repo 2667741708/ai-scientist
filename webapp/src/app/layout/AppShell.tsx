@@ -4,6 +4,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { PrimaryNav } from "../../components/navigation/PrimaryNav";
 import { useAuth } from "../../features/auth/auth-context";
 import { ResearchChatLauncher } from "../../features/research-chat/ResearchChatDrawer";
+import { DesktopTerminalDock } from "../../features/desktop/DesktopTerminalDock";
 import { classNames, copy } from "../../lib/formatters/workbench";
 import { useRouteEntranceMotion } from "../../lib/motion/useAnimeEntrance";
 import { AppSidePanel } from "./AppSidePanel";
@@ -21,12 +22,21 @@ export function AppShell() {
   const { user, signOut } = useAuth();
   const workspaceRef = useRef<HTMLElement | null>(null);
   const [sidePanelOpen, setSidePanelOpen] = useState(readStoredSidePanelState);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const desktopBridgeAvailable = typeof window !== "undefined" && Boolean(window.coscientist?.terminal);
   const isProjectChatRoute = location.pathname.startsWith("/project-chat");
+  const isHypothesisRoute = /^\/projects\/[^/]+\/hypotheses$/.test(location.pathname);
   useRouteEntranceMotion(workspaceRef, location.pathname);
 
   useEffect(() => {
     window.localStorage.setItem(SIDE_PANEL_STORAGE_KEY, String(sidePanelOpen));
   }, [sidePanelOpen]);
+
+  useEffect(() => {
+    if (isHypothesisRoute) {
+      setSidePanelOpen(true);
+    }
+  }, [isHypothesisRoute]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -44,7 +54,15 @@ export function AppShell() {
   };
 
   return (
-    <div className={classNames("app-shell", sidePanelOpen && "side-panel-open")}>
+    <div
+      className={classNames(
+        "app-shell",
+        sidePanelOpen && "side-panel-open",
+        isHypothesisRoute && "hypothesis-side-panel-mode",
+        desktopBridgeAvailable && "desktop-shell-enabled",
+        terminalOpen && "desktop-terminal-open",
+      )}
+    >
       <aside className="nav-rail">
         <div className="brand-block">
           <div className="brand-mark">
@@ -76,6 +94,7 @@ export function AppShell() {
         onToggle={() => setSidePanelOpen((open) => !open)}
       />
       {isProjectChatRoute ? null : <ResearchChatLauncher />}
+      {desktopBridgeAvailable ? <DesktopTerminalDock onExpandedChange={setTerminalOpen} /> : null}
     </div>
   );
 }

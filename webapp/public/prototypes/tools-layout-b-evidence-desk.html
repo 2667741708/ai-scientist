@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>研究工具布局 B - 压缩任务引导页</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f8fb;
+        --surface: #ffffff;
+        --soft: #f1f5f9;
+        --line: #dce4ee;
+        --text: #142033;
+        --muted: #5e6d82;
+        --subtle: #8995a7;
+        --primary: #2f6fed;
+        --primary-soft: #e8f0ff;
+        --ok: #0f856f;
+        --ok-soft: #e5f5f1;
+        --warn: #9a6400;
+        --warn-soft: #fff3dc;
+        --shadow: 0 16px 42px rgba(20, 32, 51, 0.08);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 228px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        border-right: 1px solid var(--line);
+        background: var(--surface);
+        padding: 20px 14px;
+      }
+
+      .brand {
+        display: grid;
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 22px;
+      }
+
+      .mark,
+      .nav-icon,
+      .tool-icon {
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        font-weight: 900;
+      }
+
+      .mark {
+        width: 36px;
+        height: 36px;
+        color: var(--primary);
+        background: var(--primary-soft);
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.2;
+      }
+
+      .muted,
+      .label,
+      .caption {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .nav {
+        display: grid;
+        gap: 6px;
+      }
+
+      .nav-item {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        padding: 6px 8px;
+        border-radius: 8px;
+        color: #3a4759;
+        text-decoration: none;
+      }
+
+      .nav-item.active {
+        color: var(--primary);
+        background: var(--primary-soft);
+        font-weight: 800;
+      }
+
+      .nav-icon {
+        width: 28px;
+        height: 28px;
+        color: #59687a;
+        background: var(--soft);
+        font-size: 13px;
+      }
+
+      .section {
+        margin-top: 22px;
+        padding-top: 14px;
+        border-top: 1px solid var(--line);
+      }
+
+      .project {
+        display: grid;
+        gap: 7px;
+      }
+
+      .project-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 34px;
+        padding: 5px 8px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 24px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0 9px;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .pill.ok {
+        color: var(--ok);
+        background: var(--ok-soft);
+        border-color: #b7dfd8;
+      }
+
+      .pill.warn {
+        color: var(--warn);
+        background: var(--warn-soft);
+        border-color: #ffd89a;
+      }
+
+      .workspace {
+        min-width: 0;
+        padding: 28px;
+      }
+
+      .page {
+        max-width: 1120px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+        min-width: 0;
+      }
+
+      .topline {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .topline h1 {
+        margin: 0;
+        font-size: 28px;
+        line-height: 1.2;
+        letter-spacing: 0;
+      }
+
+      .focus {
+        background: var(--surface);
+        border: 1px solid #c9d8ef;
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        padding: 24px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 280px;
+        gap: 22px;
+        min-width: 0;
+      }
+
+      .focus > * {
+        min-width: 0;
+      }
+
+      .kicker {
+        margin: 0 0 8px;
+        color: var(--primary);
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .focus h2 {
+        margin: 0;
+        max-width: 680px;
+        font-size: 34px;
+        line-height: 1.18;
+        letter-spacing: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .lead {
+        margin: 12px 0 0;
+        max-width: 700px;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.7;
+        overflow-wrap: anywhere;
+      }
+
+      .next-box {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--soft);
+        padding: 14px;
+        align-self: start;
+      }
+
+      .next-box strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 17px;
+        line-height: 1.35;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr auto 1fr;
+        gap: 8px;
+        align-items: center;
+        margin-top: 20px;
+        max-width: 720px;
+      }
+
+      .flow-step {
+        min-height: 54px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--soft);
+        padding: 9px 11px;
+      }
+
+      .flow-step.active {
+        color: var(--primary);
+        border-color: #a9c3ff;
+        background: var(--primary-soft);
+      }
+
+      .flow-step strong {
+        display: block;
+        font-size: 14px;
+      }
+
+      .arrow {
+        color: var(--subtle);
+        font-weight: 900;
+      }
+
+      .action-panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        padding: 18px;
+        display: grid;
+        gap: 14px;
+        min-width: 0;
+      }
+
+      .source-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .source {
+        min-height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--text);
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      .source.active,
+      .source:hover {
+        color: var(--primary);
+        border-color: #a9c3ff;
+        background: var(--primary-soft);
+      }
+
+      .submit-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 170px;
+        gap: 10px;
+        align-items: end;
+      }
+
+      .field {
+        display: grid;
+        gap: 7px;
+      }
+
+      .input {
+        width: 100%;
+        min-height: 46px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--text);
+        padding: 11px 12px;
+      }
+
+      .button {
+        min-height: 46px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--text);
+        padding: 0 14px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      .button.primary {
+        color: #fff;
+        border-color: var(--primary);
+        background: var(--primary);
+      }
+
+      .button:hover {
+        border-color: #a9c3ff;
+      }
+
+      .micro-guide {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .micro-card {
+        min-height: 58px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--soft);
+        padding: 10px;
+      }
+
+      .micro-card strong {
+        display: block;
+        font-size: 14px;
+      }
+
+      .compact-area {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);
+        gap: 16px;
+      }
+
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        min-width: 0;
+      }
+
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .panel h3 {
+        margin: 0;
+        font-size: 16px;
+        line-height: 1.35;
+      }
+
+      .queue {
+        display: grid;
+        gap: 7px;
+      }
+
+      .queue-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        min-height: 42px;
+        border-top: 1px solid var(--line);
+        padding-top: 8px;
+      }
+
+      .queue-row:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .tools {
+        display: grid;
+        gap: 10px;
+      }
+
+      .tool-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .tool {
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        cursor: pointer;
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr);
+        gap: 6px;
+        align-items: center;
+        padding: 7px;
+        text-align: left;
+        font-weight: 900;
+      }
+
+      .tool.active,
+      .tool:hover {
+        border-color: #a9c3ff;
+        background: var(--primary-soft);
+        color: var(--primary);
+      }
+
+      .tool-icon {
+        width: 24px;
+        height: 24px;
+        color: var(--primary);
+        background: var(--primary-soft);
+        font-size: 12px;
+      }
+
+      .tool-detail {
+        border: 1px solid #a9c3ff;
+        border-radius: 8px;
+        background: #f8fbff;
+        padding: 12px;
+        min-height: 76px;
+      }
+
+      .tool-detail strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+
+      @media (max-width: 980px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          display: none;
+        }
+
+        .workspace {
+          padding: 20px 16px;
+        }
+
+        .focus,
+        .compact-area {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .topline {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .focus h2 {
+          font-size: 26px;
+        }
+
+        .flow,
+        .source-row,
+        .submit-row,
+        .micro-guide {
+          grid-template-columns: 1fr;
+        }
+
+        .tool-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .arrow {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <div class="mark">OC</div>
+          <div>
+            <h1>开放共研</h1>
+            <p class="muted">研究工作台</p>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <a class="nav-item" href="#"><span class="nav-icon">+</span><span>新建项目</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">问</span><span>项目 AI</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">列</span><span>任务队列</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">库</span><span>资料库</span></a>
+          <a class="nav-item active" href="#"><span class="nav-icon">工</span><span>研究工具</span></a>
+        </nav>
+
+        <section class="section project">
+          <p class="label">当前项目</p>
+          <div class="project-line"><strong>候选假设解释</strong><span class="pill warn">待补证</span></div>
+          <div class="project-line"><span>论文</span><span class="caption">0</span></div>
+          <div class="project-line"><span>假设</span><span class="caption">0</span></div>
+          <div class="project-line"><span>实验</span><span class="caption">0</span></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <div class="page">
+          <div class="topline">
+            <div>
+              <p class="label">方案 B · 压缩版</p>
+              <h1>研究工具</h1>
+            </div>
+            <span class="pill ok">项目可继续</span>
+          </div>
+
+          <section class="focus" aria-labelledby="focus-title">
+            <div>
+              <p class="kicker">当前最重要</p>
+              <h2 id="focus-title">选择下一步研究动作</h2>
+              <p class="lead">
+                这里不直接展示系统能力，而是把工具压缩成研究者能理解的动作：整理资料、检查假设、设计实验。
+              </p>
+
+              <div class="flow" aria-label="当前流程">
+                <div class="flow-step active"><strong>1. 选择</strong><span class="caption">研究动作</span></div>
+                <span class="arrow">→</span>
+                <div class="flow-step"><strong>2. 配置</strong><span class="caption">目标和范围</span></div>
+                <span class="arrow">→</span>
+                <div class="flow-step"><strong>3. 检查</strong><span class="caption">结果和下一步</span></div>
+              </div>
+            </div>
+
+            <aside class="next-box">
+              <p class="label">下一步</p>
+              <strong>先选一个任务入口</strong>
+              <p class="muted">工具细节会在需要时展开，不让内部命令抢占主流程。</p>
+            </aside>
+          </section>
+
+          <section class="action-panel" aria-labelledby="action-title">
+            <div>
+              <p class="label">任务入口</p>
+              <h2 id="action-title" style="margin: 2px 0 0; font-size: 20px">你现在要推进哪一步？</h2>
+            </div>
+
+            <div class="source-row" role="tablist" aria-label="研究任务">
+              <button class="source active" data-placeholder="论文路径、PDF、网页 URL 或资料关键词">整理资料</button>
+              <button class="source" data-placeholder="粘贴候选假设，或输入当前假设编号">检查假设</button>
+              <button class="source" data-placeholder="输入实验目标、观测指标或约束条件">设计实验</button>
+            </div>
+
+            <div class="submit-row">
+              <label class="field">
+                <span class="label" id="inputLabel">资料、假设或实验目标</span>
+                <input class="input" id="taskInput" value="论文路径、PDF、网页 URL 或资料关键词" />
+              </label>
+              <button class="button primary">继续</button>
+            </div>
+
+            <div class="micro-guide" aria-label="处理原则">
+              <div class="micro-card"><strong>目标清楚</strong><span class="caption">先确认要推进哪一步</span></div>
+              <div class="micro-card"><strong>按需展开</strong><span class="caption">复杂工具进入右侧或详情</span></div>
+              <div class="micro-card"><strong>可审计</strong><span class="caption">执行和输出保留记录</span></div>
+            </div>
+          </section>
+
+          <div class="compact-area">
+            <section class="panel" aria-labelledby="queue-title">
+              <div class="panel-head">
+                <h3 id="queue-title">待处理事项</h3>
+                <span class="pill warn">3 项</span>
+              </div>
+              <div class="queue">
+                <div class="queue-row"><span>资料解析与入库</span><span class="caption">待确认</span></div>
+                <div class="queue-row"><span>候选假设检查</span><span class="caption">待处理</span></div>
+                <div class="queue-row"><span>最小实验设计</span><span class="caption">待处理</span></div>
+              </div>
+            </section>
+
+            <section class="panel tools" aria-labelledby="tools-title">
+              <div class="panel-head">
+                <h3 id="tools-title">更多工具</h3>
+                <span class="caption">需要时再打开</span>
+              </div>
+              <div class="tool-grid">
+                <button class="tool active" data-tool="模板"><span class="tool-icon">模</span><span>模板</span></button>
+                <button class="tool" data-tool="权限"><span class="tool-icon">权</span><span>权限</span></button>
+                <button class="tool" data-tool="本地"><span class="tool-icon">本</span><span>本地</span></button>
+                <button class="tool" data-tool="远训"><span class="tool-icon">远</span><span>远训</span></button>
+                <button class="tool" data-tool="复核"><span class="tool-icon">复</span><span>复核</span></button>
+                <button class="tool" data-tool="审查"><span class="tool-icon">审</span><span>审查</span></button>
+              </div>
+              <div class="tool-detail" id="toolDetail">
+                <strong>模板</strong>
+                <span class="caption">查看研究方法模板。它只是辅助当前研究任务，不抢主流程。</span>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const labels = {
+        "论文路径、PDF、网页 URL 或资料关键词": "资料范围",
+        "粘贴候选假设，或输入当前假设编号": "假设内容",
+        "输入实验目标、观测指标或约束条件": "实验目标",
+      };
+
+      document.querySelectorAll(".source").forEach((button) => {
+        button.addEventListener("click", () => {
+          document.querySelectorAll(".source").forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+          const input = document.getElementById("taskInput");
+          input.value = button.dataset.placeholder;
+          document.getElementById("inputLabel").textContent = labels[button.dataset.placeholder];
+        });
+      });
+
+      const details = {
+        模板: "查看研究方法模板。它只是辅助当前研究任务，不抢主流程。",
+        权限: "查看命令执行边界；只有需要本地或远程任务时才进入。",
+        本地: "提交本地命令任务；默认不展示 raw command，只显示安全摘要。",
+        远训: "选择服务器发起远程训练或验证；执行前需要确认。",
+        复核: "创建周期复核计划；只生成待确认任务，不静默执行。",
+        审查: "创建多角色审查计划；用于证据、方法和实验设计复核。",
+      };
+
+      document.querySelectorAll(".tool").forEach((button) => {
+        button.addEventListener("click", () => {
+          document.querySelectorAll(".tool").forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+          document.getElementById("toolDetail").innerHTML = `<strong>${button.dataset.tool}</strong><span class="caption">${details[button.dataset.tool]}</span>`;
+        });
+      });
+    </script>
+  </body>
+</html>

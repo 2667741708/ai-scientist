@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>研究工具布局 C - 研究运行控制台</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fa;
+        --surface: #ffffff;
+        --surface-soft: #f1f5f8;
+        --surface-strong: #e7edf4;
+        --ink: #182230;
+        --muted: #657386;
+        --border: #dce4ed;
+        --primary: #2e6de8;
+        --primary-soft: #e7efff;
+        --teal: #0e8275;
+        --teal-soft: #e3f4f0;
+        --amber: #986300;
+        --amber-soft: #fff4dc;
+        --red: #b63737;
+        --red-soft: #ffe9e9;
+        --shadow: 0 10px 30px rgba(24, 34, 48, 0.08);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: var(--bg);
+        color: var(--ink);
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      .shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 232px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding: 20px 14px;
+        border-right: 1px solid var(--border);
+        background: var(--surface);
+      }
+
+      .brand {
+        display: grid;
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 22px;
+      }
+
+      .mark,
+      .nav-icon,
+      .status-icon {
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        font-weight: 900;
+      }
+
+      .mark {
+        width: 36px;
+        height: 36px;
+        color: var(--primary);
+        background: var(--primary-soft);
+      }
+
+      .brand h1,
+      .panel h2,
+      .drawer h2 {
+        margin: 0;
+      }
+
+      .brand h1 {
+        font-size: 15px;
+        line-height: 1.2;
+      }
+
+      .muted,
+      .label,
+      .caption {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .nav {
+        display: grid;
+        gap: 6px;
+      }
+
+      .nav-item {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        padding: 6px 8px;
+        border-radius: 8px;
+        color: #3c4859;
+        text-decoration: none;
+      }
+
+      .nav-item.active {
+        color: var(--primary);
+        background: var(--primary-soft);
+        font-weight: 800;
+      }
+
+      .nav-icon {
+        width: 28px;
+        height: 28px;
+        color: #59687a;
+        background: var(--surface-soft);
+        font-size: 13px;
+      }
+
+      .nav-item.active .nav-icon {
+        color: var(--primary);
+        background: #dce9ff;
+      }
+
+      .section {
+        margin-top: 22px;
+        padding-top: 14px;
+        border-top: 1px solid var(--border);
+      }
+
+      .project-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 36px;
+        padding: 6px 8px;
+        border-radius: 8px;
+      }
+
+      .workspace {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .topbar {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 18px;
+        min-height: 76px;
+        padding: 16px 28px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }
+
+      .topbar h1 {
+        margin: 0;
+        font-size: 24px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .status-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 24px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0 9px;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .pill.ok {
+        color: var(--teal);
+        background: var(--teal-soft);
+        border-color: #b7dfd7;
+      }
+
+      .pill.warn {
+        color: var(--amber);
+        background: var(--amber-soft);
+        border-color: #ffd999;
+      }
+
+      .pill.error {
+        color: var(--red);
+        background: var(--red-soft);
+        border-color: #ffc6c6;
+      }
+
+      .page {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        gap: 18px;
+        padding: 24px 28px 38px;
+      }
+
+      .main {
+        display: grid;
+        gap: 16px;
+        min-width: 0;
+      }
+
+      .panel,
+      .drawer {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+      }
+
+      .panel {
+        padding: 18px;
+      }
+
+      .panel-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 14px;
+      }
+
+      .panel h2,
+      .drawer h2 {
+        font-size: 18px;
+        line-height: 1.35;
+      }
+
+      .command-bar {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .command {
+        min-height: 64px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        cursor: pointer;
+        text-align: left;
+        padding: 10px;
+        display: grid;
+        gap: 5px;
+      }
+
+      .command strong {
+        font-size: 15px;
+      }
+
+      .command span {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .command.active,
+      .command:hover {
+        border-color: #abc4ff;
+        background: var(--primary-soft);
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .readiness {
+        min-height: 118px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-soft);
+        padding: 14px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .status-icon {
+        width: 34px;
+        height: 34px;
+        color: var(--primary);
+        background: var(--primary-soft);
+      }
+
+      .readiness h3,
+      .task h3,
+      .drawer-card h3 {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.35;
+      }
+
+      .readiness p,
+      .task p,
+      .drawer-card p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .task-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .task {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) 110px 94px;
+        gap: 12px;
+        align-items: center;
+        min-height: 66px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .drawer {
+        padding: 16px;
+        align-self: start;
+        position: sticky;
+        top: 18px;
+      }
+
+      .drawer-stack {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .drawer-card {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        background: var(--surface);
+      }
+
+      .drawer-card.focus {
+        border-color: #abc4ff;
+        background: #f8fbff;
+      }
+
+      .form-grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .input,
+      .select {
+        width: 100%;
+        min-height: 42px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 9px 10px;
+        color: var(--ink);
+      }
+
+      .button {
+        min-height: 42px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 0 14px;
+        color: var(--ink);
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      .button.primary {
+        color: #fff;
+        border-color: var(--primary);
+        background: var(--primary);
+      }
+
+      .log {
+        min-height: 130px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #101820;
+        color: #d9f0e9;
+        padding: 12px;
+        overflow: auto;
+        font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      @media (max-width: 1180px) {
+        .page {
+          grid-template-columns: 1fr;
+        }
+
+        .drawer {
+          position: static;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          display: none;
+        }
+
+        .topbar,
+        .page {
+          padding-left: 16px;
+          padding-right: 16px;
+        }
+
+        .command-bar,
+        .grid-3 {
+          grid-template-columns: 1fr;
+        }
+
+        .topbar {
+          grid-template-columns: 1fr;
+        }
+
+        .status-strip {
+          justify-content: flex-start;
+        }
+      }
+
+      @media (max-width: 580px) {
+        .task {
+          grid-template-columns: 34px minmax(0, 1fr);
+        }
+
+        .task .pill,
+        .task .caption {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <div class="mark">OC</div>
+          <div>
+            <h1>开放共研</h1>
+            <p class="muted">研究工作台</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="nav-item" href="#"><span class="nav-icon">+</span><span>新建项目</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">问</span><span>项目 AI</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">列</span><span>任务队列</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">库</span><span>资料库</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">搜</span><span>搜索</span></a>
+        </nav>
+        <section class="section">
+          <p class="label">当前项目</p>
+          <div class="project-line"><strong>候选假设解释</strong><span class="pill error">错误</span></div>
+          <div class="project-line"><span>论文</span><span class="caption">0</span></div>
+          <div class="project-line"><span>假设</span><span class="caption">0</span></div>
+          <div class="project-line"><span>实验</span><span class="caption">0</span></div>
+        </section>
+        <section class="section">
+          <p class="label">专家与运行</p>
+          <a class="nav-item active" href="#"><span class="nav-icon">工</span><span>研究工具</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">出</span><span>研究产出</span></a>
+          <a class="nav-item" href="#"><span class="nav-icon">准</span><span>运行准备</span></a>
+        </section>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="label">方案 C</p>
+            <h1>研究运行控制台</h1>
+            <p class="muted">适合管理员或高级用户：把真实任务、权限和后台结果集中管理，默认仍隐藏 raw API 和内部路径。</p>
+          </div>
+          <div class="status-strip" aria-label="运行状态">
+            <span class="pill ok">文献服务可达</span>
+            <span class="pill warn">任务 4</span>
+            <span class="pill">后台 0</span>
+          </div>
+        </header>
+
+        <main class="page">
+          <section class="main">
+            <section class="panel" aria-labelledby="commands-title">
+              <div class="panel-head">
+                <div>
+                  <h2 id="commands-title">工具命令栏</h2>
+                  <p class="muted">六项功能作为一行控制入口，点击后在右侧配置和执行。</p>
+                </div>
+                <span class="pill warn">执行前确认</span>
+              </div>
+              <div class="command-bar">
+                <button class="command active" data-tool="模板"><strong>模板</strong><span>研究方法库</span></button>
+                <button class="command" data-tool="权限"><strong>权限</strong><span>执行边界</span></button>
+                <button class="command" data-tool="本地"><strong>本地</strong><span>命令任务</span></button>
+                <button class="command" data-tool="远训"><strong>远训</strong><span>SSH 任务</span></button>
+                <button class="command" data-tool="复核"><strong>复核</strong><span>计划任务</span></button>
+                <button class="command" data-tool="审查"><strong>审查</strong><span>角色委派</span></button>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="readiness-title">
+              <div class="panel-head">
+                <div>
+                  <h2 id="readiness-title">运行准备</h2>
+                  <p class="muted">把工具是否可用、是否需要确认、是否写入审计放在执行前判断。</p>
+                </div>
+              </div>
+              <div class="grid-3">
+                <article class="readiness">
+                  <span class="status-icon">服</span>
+                  <div><h3>文献服务</h3><p>可达，允许写入知识库前先确认来源范围。</p></div>
+                  <span class="pill ok">ready</span>
+                </article>
+                <article class="readiness">
+                  <span class="status-icon">权</span>
+                  <div><h3>命令权限</h3><p>当前为管理员上下文，本地和远程命令仍需要确认。</p></div>
+                  <span class="pill warn">guarded</span>
+                </article>
+                <article class="readiness">
+                  <span class="status-icon">审</span>
+                  <div><h3>审计记录</h3><p>工具结果、计划和委派都会进入本地可追溯记录。</p></div>
+                  <span class="pill ok">enabled</span>
+                </article>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="task-title">
+              <div class="panel-head">
+                <div>
+                  <h2 id="task-title">活跃任务</h2>
+                  <p class="muted">适合排查真实 API 是否可用，也适合录制演示和验收。</p>
+                </div>
+                <span class="pill">4 项</span>
+              </div>
+              <div class="task-list">
+                <article class="task">
+                  <span class="status-icon">1</span>
+                  <div><h3>PDF section chunking</h3><p>修复解析粒度，让证据片段可审查。</p></div>
+                  <span class="pill warn">待处理</span>
+                  <span class="caption">研究任务</span>
+                </article>
+                <article class="task">
+                  <span class="status-icon">2</span>
+                  <div><h3>外部文献反证检索</h3><p>生成支持、有限或反驳判断。</p></div>
+                  <span class="pill warn">待处理</span>
+                  <span class="caption">证据审计</span>
+                </article>
+                <article class="task">
+                  <span class="status-icon">3</span>
+                  <div><h3>恢复外部文献服务</h3><p>不可达时所有科学结论标记为 limited。</p></div>
+                  <span class="pill warn">待处理</span>
+                  <span class="caption">服务检查</span>
+                </article>
+              </div>
+            </section>
+          </section>
+
+          <aside class="drawer" aria-live="polite">
+            <p class="label">工具面板</p>
+            <h2 id="drawerTitle">模板</h2>
+            <div class="drawer-stack" id="drawerStack">
+              <article class="drawer-card focus">
+                <h3>研究方法库</h3>
+                <p>选择证据复核、可证伪性、实验设计或引用 QA 模板，用于规范后续研究输出。</p>
+              </article>
+              <div class="form-grid">
+                <label class="field">
+                  <span class="label">模板类型</span>
+                  <select class="select"><option>Evidence Grounding Rubric</option><option>Falsifiability Review</option></select>
+                </label>
+                <button class="button primary">打开模板</button>
+              </div>
+              <div class="log">ready: method templates loaded
+audit: user can inspect before applying</div>
+            </div>
+          </aside>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      const panels = {
+        模板: {
+          head: "研究方法库",
+          copy: "选择证据复核、可证伪性、实验设计或引用 QA 模板，用于规范后续研究输出。",
+          field: "模板类型",
+          control: '<select class="select"><option>Evidence Grounding Rubric</option><option>Falsifiability Review</option></select>',
+          action: "打开模板",
+          log: "ready: method templates loaded\naudit: user can inspect before applying",
+        },
+        权限: {
+          head: "执行边界",
+          copy: "查看当前命令策略，所有本地和远程执行都要保留确认与审计。",
+          field: "权限模式",
+          control: '<select class="select"><option>full_access</option><option>guarded</option><option>disabled</option></select>',
+          action: "保存策略",
+          log: "policy: full_access\nconfirmation: required before execution",
+        },
+        本地: {
+          head: "本地命令任务",
+          copy: "提交安全本地命令，运行完成后记录 return code 和输出摘要。",
+          field: "命令",
+          control: '<input class="input" value="echo codex_tools_smoke" />',
+          action: "提交任务",
+          log: "queued: terminal.command\nresult: waits for worker completion",
+        },
+        远训: {
+          head: "SSH 训练任务",
+          copy: "选择远程服务器发起训练、验证或环境探测任务。",
+          field: "服务器",
+          control: '<select class="select"><option>c201-4090</option><option>c201-5080</option><option>d437</option></select>',
+          action: "创建远程任务",
+          log: "servers: 3 available\nexecution: guarded SSH workflow",
+        },
+        复核: {
+          head: "定期复核计划",
+          copy: "创建周期性复核，触发后生成待确认任务，不自动调用外部实验。",
+          field: "复核范围",
+          control: '<input class="input" value="citation_provenance_qa" />',
+          action: "创建计划",
+          log: "schedule: planned\ntick: creates ready task only",
+        },
+        审查: {
+          head: "多角色审查",
+          copy: "把研究目标拆给证据、方法、实验等角色，形成可追踪审查计划。",
+          field: "审查角色",
+          control: '<select class="select"><option>Evidence + Experiment</option><option>Method + Safety</option></select>',
+          action: "生成委派",
+          log: "delegation: planned\nroles: evidence reviewer, experiment reviewer",
+        },
+      };
+
+      const title = document.getElementById("drawerTitle");
+      const stack = document.getElementById("drawerStack");
+
+      document.querySelectorAll(".command").forEach((command) => {
+        command.addEventListener("click", () => {
+          document.querySelectorAll(".command").forEach((item) => item.classList.remove("active"));
+          command.classList.add("active");
+          const panel = panels[command.dataset.tool];
+          title.textContent = command.dataset.tool;
+          stack.innerHTML = `
+            <article class="drawer-card focus">
+              <h3>${panel.head}</h3>
+              <p>${panel.copy}</p>
+            </article>
+            <div class="form-grid">
+              <label class="field">
+                <span class="label">${panel.field}</span>
+                ${panel.control}
+              </label>
+              <button class="button primary">${panel.action}</button>
+            </div>
+            <div class="log">${panel.log}</div>
+          `;
+        });
+      });
+    </script>
+  </body>
+</html>

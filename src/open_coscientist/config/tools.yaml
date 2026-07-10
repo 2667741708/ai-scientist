@@ -15,6 +15,34 @@ servers:
     transport: "streamable_http"
     enabled: true
 
+  # Disabled templates for SSH-hosted MCP exec services. They document the
+  # three workspace training hosts without storing credentials. Enable only
+  # after a controlled MCP command named COSCIENTIST_SSH_MCP_REMOTE_COMMAND
+  # exists on the corresponding host.
+  ssh_c201_4090:
+    transport: "stdio"
+    command: "${COSCIENTIST_SSH_MCP_COMMAND:-ssh}"
+    args:
+      - "c201-4090"
+      - "${COSCIENTIST_SSH_MCP_REMOTE_COMMAND:-coscientist-ssh-mcp}"
+    enabled: "${COSCIENTIST_SSH_MCP_C201_4090_ENABLED:-false}"
+
+  ssh_c201_5080:
+    transport: "stdio"
+    command: "${COSCIENTIST_SSH_MCP_COMMAND:-ssh}"
+    args:
+      - "c201-5080"
+      - "${COSCIENTIST_SSH_MCP_REMOTE_COMMAND:-coscientist-ssh-mcp}"
+    enabled: "${COSCIENTIST_SSH_MCP_C201_5080_ENABLED:-false}"
+
+  ssh_d437:
+    transport: "stdio"
+    command: "${COSCIENTIST_SSH_MCP_COMMAND:-ssh}"
+    args:
+      - "d437"
+      - "${COSCIENTIST_SSH_MCP_REMOTE_COMMAND:-coscientist-ssh-mcp}"
+    enabled: "${COSCIENTIST_SSH_MCP_D437_ENABLED:-false}"
+
 # Tool Definitions
 # Organized by category: search_tools, read_tools, utility_tools
 tools:
@@ -121,6 +149,160 @@ tools:
           required: false
           description: "Optional run ID for tracking"
 
+    # arXiv search for AI/ML, CS, math, physics, and other preprint-heavy fields.
+    arxiv_search:
+      server: "default_pubmed"
+      mcp_tool_name: "search_arxiv"
+      display_name: "arXiv Search"
+      description: "Search arXiv for preprints and recent research, especially AI/ML and computer science"
+      category: "search"
+      source_type: "preprint"
+      enabled: true
+
+      response_format:
+        type: "json"
+        results_path: "results"
+        is_dict: false
+        field_mapping:
+          title: "title"
+          url: "url"
+          authors: "authors"
+          year: "year"
+          abstract: "abstract"
+          source_id: "arxiv_id"
+          source: "'arxiv'"
+          venue: "primary_category"
+          pdf_links: "pdf_url|wrap_list"
+          source_url: "source_url"
+
+      parameter_mapping:
+        query: "query"
+        max_papers: "max_results"
+        recency_years: "starting_year"
+        slug: null
+        run_id: null
+
+      prompt_snippet: |
+        Use `search_arxiv` to search arXiv for preprints and recent research.
+        - Strong source for AI/ML, weak supervision, computer science, math, and physics
+        - Returns abstracts and direct PDF URLs for open-access papers
+        - Example: search_arxiv(query="partial label learning weak supervision", max_results=10)
+
+      parameters:
+        query:
+          type: "string"
+          required: true
+          description: "Natural language search query"
+        max_results:
+          type: "integer"
+          default: 10
+          description: "Maximum number of papers to return"
+        starting_year:
+          type: "integer"
+          required: false
+          description: "Only include papers published on or after this year"
+
+    # Google Scholar public HTML search. Best-effort: does not bypass CAPTCHA.
+    google_scholar_search:
+      server: "default_pubmed"
+      mcp_tool_name: "search_google_scholar"
+      display_name: "Google Scholar Search"
+      description: "Best-effort public Google Scholar search for scholarly articles across disciplines"
+      category: "search"
+      source_type: "academic"
+      enabled: true
+
+      response_format:
+        type: "json"
+        results_path: "results"
+        is_dict: false
+        field_mapping:
+          title: "title"
+          url: "url"
+          authors: "authors"
+          year: "year"
+          abstract: "abstract"
+          source_id: "source_id"
+          source: "'google_scholar'"
+          venue: "venue"
+          citations: "citations"
+          pdf_links: "pdf_links"
+
+      parameter_mapping:
+        query: "query"
+        max_papers: "max_results"
+        recency_years: "starting_year"
+        slug: null
+        run_id: null
+
+      prompt_snippet: |
+        Use `search_google_scholar` to search public Google Scholar pages.
+        - Covers broad academic literature across disciplines
+        - Returns landing page URLs, snippets, citation counts, and public PDF links when visible
+        - This tool does not bypass CAPTCHA or login/rate-limit walls
+        - Example: search_google_scholar(query="noisy partial label learning", max_results=10)
+
+      parameters:
+        query:
+          type: "string"
+          required: true
+          description: "Search query"
+        max_results:
+          type: "integer"
+          default: 10
+          description: "Maximum number of results to return"
+        starting_year:
+          type: "integer"
+          required: false
+          description: "Only include papers published on or after this year"
+        page:
+          type: "integer"
+          default: 0
+          description: "Page number (0-based)"
+
+  read_tools:
+    read_url:
+      server: "default_pubmed"
+      mcp_tool_name: "read_url"
+      display_name: "Read URL"
+      description: "Fetch a public URL and return readable text content"
+      category: "read"
+      enabled: true
+
+      prompt_snippet: |
+        Use `read_url` to fetch public article landing pages, abstracts, and HTML content.
+        - Works best for open web pages and public abstracts
+        - Falls back to PDF extraction when the URL is a PDF
+
+      parameters:
+        url:
+          type: "string"
+          required: true
+          description: "URL to fetch and read"
+
+    read_pdf:
+      server: "default_pubmed"
+      mcp_tool_name: "read_pdf"
+      display_name: "Read PDF"
+      description: "Fetch a public PDF URL and extract text"
+      category: "read"
+      enabled: true
+
+      prompt_snippet: |
+        Use `read_pdf` to download and extract text from public PDFs.
+        - arXiv PDF URLs are open and work well with this tool
+        - Extracts the first pages by default to keep prompts bounded
+
+      parameters:
+        url:
+          type: "string"
+          required: true
+          description: "Direct URL to the PDF file"
+        max_pages:
+          type: "integer"
+          default: 16
+          description: "Maximum number of PDF pages to extract"
+
   utility_tools:
     # PubMed availability check
     check_pubmed:
@@ -134,24 +316,294 @@ tools:
       response_format:
         type: "boolean_string"
 
+    find_pdf_links:
+      server: "default_pubmed"
+      mcp_tool_name: "find_pdf_links"
+      display_name: "Find PDF Links"
+      description: "Find public PDF links on an article landing page"
+      category: "utility"
+      enabled: true
+
+      prompt_snippet: |
+        Use `find_pdf_links` to find public PDF download URLs from landing pages.
+
+      parameters:
+        url:
+          type: "string"
+          required: true
+          description: "URL of the page to search for PDF links"
+
+    generate_queries:
+      server: "default_pubmed"
+      mcp_tool_name: "generate_queries_hypotheses"
+      display_name: "Generate Search Queries"
+      description: "Generate literature search queries optimized for hypothesis generation"
+      category: "query_generation"
+      enabled: true
+
+      prompt_snippet: |
+        Use `generate_queries_hypotheses` to generate source-friendly search queries.
+
+      parameters:
+        research_goal:
+          type: "string"
+          required: true
+          description: "The research goal or question to generate queries for"
+        query_format:
+          type: "string"
+          default: "natural_language"
+          description: "Query format, usually natural_language for arXiv and Google Scholar"
+        seed:
+          type: "integer"
+          default: 0
+          description: "Random seed for reproducibility"
+
+    download_arxiv_source:
+      server: "default_pubmed"
+      mcp_tool_name: "download_arxiv_source"
+      display_name: "Download arXiv Source"
+      description: "Download and extract an arXiv LaTeX/source bundle for source-level paper analysis"
+      category: "source"
+      enabled: true
+
+      prompt_snippet: |
+        Use `download_arxiv_source` when PDF parsing is incomplete or when LaTeX/BibTeX source provenance is useful.
+        - Accepts an arXiv id, abs URL, pdf URL, source URL, or e-print URL
+        - Returns a local source cache directory, archive path, extraction manifest, and important `.tex`/`.bib` files
+
+      parameters:
+        arxiv_id_or_url:
+          type: "string"
+          required: true
+          description: "arXiv id or URL, e.g. 2506.03229 or https://arxiv.org/abs/2506.03229"
+        extract:
+          type: "boolean"
+          default: true
+          description: "Whether to extract the downloaded source bundle"
+        overwrite:
+          type: "boolean"
+          default: false
+          description: "Whether to refresh an existing cached source bundle"
+        max_bytes:
+          type: "integer"
+          default: 200000000
+          description: "Maximum source archive download size in bytes"
+
+    download_github_repository:
+      server: "default_pubmed"
+      mcp_tool_name: "download_github_repository"
+      display_name: "Download GitHub Repository"
+      description: "Download and extract a public GitHub repository archive for code-level evidence analysis"
+      category: "source"
+      enabled: true
+
+      prompt_snippet: |
+        Use `download_github_repository` when a paper links to public source code or reproducibility artifacts.
+        - Accepts a GitHub repository URL and optional branch/tag/commit ref
+        - Returns a local source cache directory, extracted manifest, README/config/code file list, and repo metadata
+
+      parameters:
+        repository_url:
+          type: "string"
+          required: true
+          description: "GitHub repository URL, e.g. https://github.com/owner/repo"
+        ref:
+          type: "string"
+          required: false
+          description: "Optional branch, tag, or commit ref; defaults to GitHub default branch"
+        extract:
+          type: "boolean"
+          default: true
+          description: "Whether to extract the downloaded repository archive"
+        overwrite:
+          type: "boolean"
+          default: false
+          description: "Whether to refresh an existing cached repository archive"
+        max_bytes:
+          type: "integer"
+          default: 200000000
+          description: "Maximum repository archive download size in bytes"
+
+    find_github_repository_links:
+      server: "default_pubmed"
+      mcp_tool_name: "find_github_repository_links"
+      display_name: "Find GitHub Repository Links"
+      description: "Find public GitHub repository links on an article or project landing page"
+      category: "source_discovery"
+      enabled: true
+
+      prompt_snippet: |
+        Use `find_github_repository_links` to discover public code repositories from paper landing pages, arXiv pages, OpenReview pages, or project pages.
+
+      parameters:
+        url:
+          type: "string"
+          required: true
+          description: "URL to scan for GitHub repository links"
+        max_links:
+          type: "integer"
+          default: 10
+          description: "Maximum repository links to return"
+
+    read_downloaded_source_file:
+      server: "default_pubmed"
+      mcp_tool_name: "read_downloaded_source_file"
+      display_name: "Read Downloaded Source File"
+      description: "Read a text-like file from a previously downloaded arXiv/GitHub source cache directory"
+      category: "source_read"
+      enabled: true
+
+      prompt_snippet: |
+        Use `read_downloaded_source_file` after downloading arXiv or GitHub sources to inspect `.tex`, `.bib`, README, config, and code files.
+        - The tool is restricted to the MCP source cache and refuses path traversal
+
+      parameters:
+        download_dir:
+          type: "string"
+          required: true
+          description: "Extracted source directory returned by a download tool"
+        relative_path:
+          type: "string"
+          required: true
+          description: "Relative file path from the extracted source directory"
+        max_chars:
+          type: "integer"
+          default: 120000
+          description: "Maximum characters to return"
+
+  remote_execution_tools:
+    ssh_c201_4090_exec:
+      server: "ssh_c201_4090"
+      mcp_tool_name: "exec"
+      display_name: "c201-4090 SSH MCP Exec"
+      description: "Execute an approved remote training command on c201-4090 through an SSH-hosted MCP service."
+      category: "remote_execution"
+      source_type: "remote_host"
+      enabled: "${COSCIENTIST_SSH_MCP_C201_4090_ENABLED:-false}"
+
+      parameters:
+        command:
+          type: "string"
+          required: true
+          description: "Remote command to execute through the SSH MCP service"
+        description:
+          type: "string"
+          required: false
+          description: "Human-readable execution purpose"
+
+    ssh_c201_5080_exec:
+      server: "ssh_c201_5080"
+      mcp_tool_name: "exec"
+      display_name: "c201-5080 SSH MCP Exec"
+      description: "Execute an approved remote training command on c201-5080 through an SSH-hosted MCP service."
+      category: "remote_execution"
+      source_type: "remote_host"
+      enabled: "${COSCIENTIST_SSH_MCP_C201_5080_ENABLED:-false}"
+
+      parameters:
+        command:
+          type: "string"
+          required: true
+          description: "Remote command to execute through the SSH MCP service"
+        description:
+          type: "string"
+          required: false
+          description: "Human-readable execution purpose"
+
+    ssh_d437_exec:
+      server: "ssh_d437"
+      mcp_tool_name: "exec"
+      display_name: "d437 SSH MCP Exec"
+      description: "Execute an approved remote training command on d437 through an SSH-hosted MCP service."
+      category: "remote_execution"
+      source_type: "remote_host"
+      enabled: "${COSCIENTIST_SSH_MCP_D437_ENABLED:-false}"
+
+      parameters:
+        command:
+          type: "string"
+          required: true
+          description: "Remote command to execute through the SSH MCP service"
+        description:
+          type: "string"
+          required: false
+          description: "Human-readable execution purpose"
+
 # Workflow Configurations
 # Define which tools are available in each phase of hypothesis generation
 workflows:
   # Literature review phase - comprehensive paper analysis
   literature_review:
-    primary_search: "pubmed_fulltext"
-    fallback_search: "pubmed_search"
-    availability_check: "check_pubmed"
+    search_sources:
+      - tool: "pubmed_fulltext"
+        papers_per_query: 2
+        enabled: true
+
+      - tool: "arxiv_search"
+        papers_per_query: 4
+        enabled: true
+        content_tool: "read_pdf"
+        content_url_field: "pdf_url"
+
+      - tool: "google_scholar_search"
+        papers_per_query: 4
+        enabled: true
+        content_tool: "read_url"
+        content_url_field: "url"
+
+    multi_source_strategy: "parallel"
+    deduplicate_across_sources: true
+    availability_check: null
+    query_generation_tool: "generate_queries"
+    query_format: "natural_language"
+
+    read_tools:
+      - "read_url"
+      - "read_pdf"
+    utility_tools:
+      - "find_pdf_links"
+      - "download_arxiv_source"
+      - "download_github_repository"
+      - "find_github_repository_links"
+      - "read_downloaded_source_file"
 
   # Draft generation phase - quick metadata searches for ideation
   draft_generation:
     search_tools:
       - "pubmed_search"
+      - "arxiv_search"
+      - "google_scholar_search"
+    read_tools:
+      - "read_url"
+      - "read_pdf"
+    utility_tools:
+      - "download_arxiv_source"
+      - "download_github_repository"
+      - "find_github_repository_links"
+      - "read_downloaded_source_file"
 
   # Validation phase - fulltext searches for novelty checking
   validation:
     search_tools:
       - "pubmed_fulltext"
+      - "arxiv_search"
+      - "google_scholar_search"
+    read_tools:
+      - "read_url"
+      - "read_pdf"
+    utility_tools:
+      - "download_arxiv_source"
+      - "download_github_repository"
+      - "find_github_repository_links"
+      - "read_downloaded_source_file"
+
+  # Remote training is not used by the hypothesis/literature graph by
+  # default. It exists for explicit, approval-backed experiment workflows.
+  experiment_execution:
+    utility_tools:
+      - "ssh_c201_4090_exec"
+      - "ssh_c201_5080_exec"
+      - "ssh_d437_exec"
 
 # Global Settings
 settings:

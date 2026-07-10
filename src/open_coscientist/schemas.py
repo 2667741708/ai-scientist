@@ -540,6 +540,19 @@ RANKING_SCHEMA: Dict[str, Any] = {
             },
             "decision_summary": {"type": "string"},
             "confidence_level": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            "debate_trace": {
+                "type": "array",
+                "description": "Optional concise turn summaries when debate mode is requested.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "turn": {"type": "integer"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["turn", "summary"],
+                    "additionalProperties": False,
+                },
+            },
         },
         "required": [
             "research_goal",

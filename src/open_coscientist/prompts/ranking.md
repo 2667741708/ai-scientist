@@ -28,6 +28,8 @@ For each pair of hypotheses, carefully analyze and compare them based on:
 
 Make a clear decision on which hypothesis wins the comparison based on these criteria.
 
+{{comparison_mode_guidance}}
+
 Provide a detailed justification for your decision, explaining the specific strengths that led to the winning hypothesis and weaknesses of the losing hypothesis.
 
 **IMPORTANT:** Keep each comparison field concise (1-2 sentences maximum). Focus on the key differentiator between the hypotheses for each criterion. The total response must be valid, complete JSON with all fields properly closed.

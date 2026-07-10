@@ -65,6 +65,10 @@ def build_reference_index(
         url = getattr(article, "url", "") or ""
         authors = getattr(article, "authors", []) or []
         year = getattr(article, "year", None)
+        abstract = getattr(article, "abstract", None)
+        source = getattr(article, "source", None)
+        source_id = getattr(article, "source_id", None)
+        content = getattr(article, "content", None)
         first_author = authors[0].strip().split()[-1] if authors else "Unknown"
         label = f"{first_author} et al., {year}" if year else title[:50]
         lines.append(f"[{key}] {label} — {title[:80]}")
@@ -74,6 +78,11 @@ def build_reference_index(
             "url": url,
             "authors": authors,
             "year": year,
+            "abstract": abstract,
+            "source": source,
+            "source_id": source_id,
+            "fulltext": content,
+            "source_reliability": _source_reliability(source),
         }
         counter += 1
 
@@ -91,6 +100,19 @@ def build_reference_index(
         counter += 1
 
     return ReferenceIndex(text="\n".join(lines), sources=sources)
+
+
+def _source_reliability(source: Optional[str]) -> str:
+    normalized = (source or "").lower()
+    if "google_scholar" in normalized or "scholar" in normalized:
+        return "best_effort_public_html"
+    if "pubmed" in normalized or "pmc" in normalized:
+        return "stable_biomedical_index"
+    if "arxiv" in normalized:
+        return "preprint_repository"
+    if normalized:
+        return normalized
+    return "unknown"
 
 
 def resolve_citation_keys(
