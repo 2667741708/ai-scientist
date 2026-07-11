@@ -176,7 +176,7 @@ def test_auto_schedule_creates_a_new_durable_research_run() -> None:
         run_id = dispatched["items"][0]["run_id"]
         task_id = dispatched["items"][0]["task_id"]
         assert studio.knowledge_base.get_research_run(run_id)["status"] == "queued"
-        assert studio.knowledge_base.get_research_task(task_id)["status"] == "in_progress"
+        assert studio.knowledge_base.get_research_task(task_id)["status"] == "running"
         work_items = studio.knowledge_base.list_work_items(
             run_id=run_id,
             workflow_name="workflow.open_coscientist_run",
