@@ -5,6 +5,7 @@ import { EmptyState } from "../../components/feedback/states";
 import { ProjectCard } from "../../components/surfaces/cards";
 import { PageHeader } from "../../components/surfaces/PageHeader";
 import { useAuth } from "../../features/auth/auth-context";
+import { GuidedResearchBrief } from "../../features/research-brief/GuidedResearchBrief";
 import { useWorkbench } from "../../features/runs/workbench-context";
 import { classNames, copy, getVisibleProductRuns } from "../../lib/formatters/workbench";
 import type { ProjectViewModel } from "../../types/workbench";
@@ -109,6 +110,18 @@ export function HomePage() {
 
       <section className="home-dashboard-grid">
         <div className="home-main-stack">
+          <GuidedResearchBrief
+            disabled={creatingProject || isBusy || !health || !selectedProviderUsable || !literatureReady}
+            onSubmit={async (goal) => {
+              setCreatingProject(true);
+              try {
+                const runId = await startRun(goal);
+                if (runId) navigate(`/projects/${runId}/hypotheses`);
+              } finally {
+                setCreatingProject(false);
+              }
+            }}
+          />
           <section className="project-create-panel">
             <div className="section-heading">
               <h2>创建一个研究项目</h2>
