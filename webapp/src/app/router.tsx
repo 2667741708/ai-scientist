@@ -12,9 +12,18 @@ import { WorkspacePage } from "../pages/workspace/WorkspacePage";
 import { OutputsPage } from "../pages/outputs/OutputsPage";
 import { AdminPage } from "../pages/admin/AdminPage";
 import { ProtectedRoute } from "../features/auth/ProtectedRoute";
+import LatticeResearchApp from "../lattice/LatticeResearchApp";
 
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
+  {
+    path: "/lattice",
+    element: (
+      <ProtectedRoute>
+        <LatticeResearchApp />
+      </ProtectedRoute>
+    ),
+  },
   {
     path: "/",
     element: (
