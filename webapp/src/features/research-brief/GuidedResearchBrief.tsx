@@ -92,6 +92,7 @@ export function GuidedResearchBrief({
       const goal = [
         `研究问题：\n${brief.question}`,
         `研究范围：\n${brief.scope}`,
+        `证据门槛：\n每个候选假设至少关联 ${brief.evidenceMinimum} 条证据。`,
         `实验预算：\n${brief.computeBudget}`,
         `实验规模：\n${brief.experimentScale}`,
         `要求：\n${brief.requirements.filter(Boolean).map((item, index) => `${index + 1}. ${item}`).join("\n")}`,
