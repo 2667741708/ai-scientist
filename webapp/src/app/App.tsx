@@ -1,5 +1,6 @@
-import LatticeResearchApp from "../lattice/LatticeResearchApp";
+import { RouterProvider } from "react-router-dom";
+import { router } from "./router";
 
 export function App() {
-  return <LatticeResearchApp />;
+  return <RouterProvider router={router} />;
 }
